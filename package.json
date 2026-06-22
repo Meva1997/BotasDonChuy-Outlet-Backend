@@ -1,17 +1,24 @@
 {
   "name": "backend",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "API backend para Botas Don Chuy Outlet (Express + TypeScript + Sequelize/PostgreSQL)",
+  "main": "dist/app.js",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/app.ts",
     "build": "tsc",
     "start": "node dist/app.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "express",
+    "typescript",
+    "sequelize",
+    "postgres",
+    "api",
+    "backend"
+  ],
+  "author": "Alex Medina",
+  "license": "MIT",
   "packageManager": "pnpm@11.8.0",
   "dependencies": {
     "bcrypt": "^6.0.0",
