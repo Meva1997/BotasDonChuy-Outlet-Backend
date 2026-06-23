@@ -29,6 +29,16 @@ The app `export default`s for testability.
 tables to match the models without dropping data. SQL logging is also gated on development.
 On any connection error the process exits with code 1.
 
+**HTTP layer** (`src/routes/`, `src/controllers/`): routers are mounted in `src/app.ts`
+under a base path (e.g. `app.use("/api/products", productRoutes)`). Each route file builds an
+Express `Router` and delegates to handlers in the matching `*.controller.ts`. Product reads
+only expose rows with `visible: true` and exclude the `unitCost` field via Sequelize
+`attributes: { exclude: [...] }`. `GET /api/products` does filtering (`categoria` → `type`,
+`talla` → membership in `sizes`) and pagination (`page`/`perPage`, page clamped to
+`[1, totalPages]`) in memory after the query, and also returns `availableSizes`.
+**When adding a new resource, create `*.routes.ts` + `*.controller.ts` and mount the router
+in `src/app.ts`.**
+
 **Models** (`src/models/Product.ts`): models import the shared `sequelize` instance and call
 `Model.init(...)`. A model only gets its table created/synced if it is imported somewhere in
 the startup path — `src/app.ts` does `import "./models/Product"` specifically to register it.
@@ -48,3 +58,9 @@ than strings. `type` is a Postgres ENUM (`bota | sombrero | ropa`) and `sizes` i
 - Dependencies present but not yet wired in: `jsonwebtoken` + `bcrypt` (auth), `zod`
   (validation), `cloudinary` + `multer` + `multer-storage-cloudinary` (image uploads),
   `express-rate-limit`. Prefer these existing libraries when implementing those features.
+
+## Workflow
+
+- **Before pushing to GitHub** (any commit/push the user requests): always verify that
+  `README.md` and this `CLAUDE.md` are up to date with the changes being committed, and update
+  them if needed, before running the commit/push.

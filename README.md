@@ -54,17 +54,36 @@ CLOUDINARY_API_SECRET=tu_api_secret
 
 ## Endpoints
 
-| Método | Ruta      | Descripción                       |
-| ------ | --------- | --------------------------------- |
-| `GET`  | `/health` | Healthcheck (status + timestamp)  |
+| Método | Ruta                 | Descripción                                        |
+| ------ | -------------------- | -------------------------------------------------- |
+| `GET`  | `/health`            | Healthcheck (status + timestamp)                   |
+| `GET`  | `/api/products`      | Lista productos visibles (paginados y filtrables)  |
+| `GET`  | `/api/products/:id`  | Devuelve un producto visible por `id`              |
+
+### `GET /api/products`
+
+Solo expone productos con `visible: true` y oculta el campo `unitCost`.
+
+| Query param | Tipo   | Default | Descripción                                  |
+| ----------- | ------ | ------- | -------------------------------------------- |
+| `categoria` | string | —       | Filtra por `type` (`bota`, `sombrero`, `ropa`) |
+| `talla`     | number | —       | Filtra productos que incluyan esa talla      |
+| `page`      | number | `1`     | Página (se ajusta al rango `[1, totalPages]`) |
+| `perPage`   | number | `9`     | Elementos por página                         |
+
+Respuesta: `{ products, total, page, perPage, totalPages, availableSizes }`.
 
 ## Estructura
 
 ```
 src/
-├── app.ts              # Punto de entrada: Express, middleware y arranque
+├── app.ts                       # Punto de entrada: Express, middleware y arranque
 ├── config/
-│   └── database.ts     # Conexión Sequelize a PostgreSQL
+│   └── database.ts              # Conexión Sequelize a PostgreSQL
+├── controllers/
+│   └── product.controller.ts    # Lógica de productos (listar, obtener por id)
+├── routes/
+│   └── product.routes.ts        # Rutas /api/products
 └── models/
-    └── Product.ts      # Modelo Product (bota | sombrero | ropa)
+    └── Product.ts               # Modelo Product (bota | sombrero | ropa)
 ```
