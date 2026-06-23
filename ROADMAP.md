@@ -46,10 +46,10 @@ Este backend usa **Express 5 + Sequelize 6 + PostgreSQL + TypeScript**.
 
 ### ⚠️ Deuda de contrato detectada (arreglar en Fase 0)
 
-El modelo `Product` actual **no coincide** del todo con lo que el frontend espera. Hay que corregir:
+El modelo `Product` ya está alineado con el frontend en nombre de campo y formato de precio. Estado actual:
 
-1. **`unitCost` → `costoUnitario`.** El modelo expone el campo como `unitCost`, pero el frontend (`MockProduct`, tipos del admin) lo consume como **`costoUnitario`**. El JSON servido en rutas admin no haría match. Renombrar el campo (o exponerlo como `costoUnitario` en el `toJSON`).
-2. **Precios enteros en MXN.** El frontend espera enteros (`salePrice: 1920`), el modelo los guarda como `DECIMAL(10,2)`. Los getters ya devuelven número, pero asegúrate de que sea **entero** (sin centavos) para igualar los mocks.
+1. **`unitCost` (✅ alineado).** El modelo expone el campo como `unitCost` y el frontend ya lo consume como **`unitCost`** (`MockProduct`, tipos del admin, mocks). El JSON de rutas admin hace match. **Sin acción en el backend.** (Antes el front usaba `costoUnitario`; se renombró en el front para coincidir con el modelo.)
+2. **Precios con decimales (✅ alineado).** Los precios se guardan como `DECIMAL(10,2)` y **pueden tener centavos** (`salePrice: 1920.50`). El front ya es decimal-safe y los formatea con 2 decimales. **No forzar enteros** — servir el número tal cual (no string).
 3. **`discountPercent` derivado.** Debe calcularse en el backend: `round((originalPrice - salePrice) / originalPrice * 100)`. No confiar en que lo mande el cliente.
 4. **Decisión de stock por talla.** Hoy el front modela stock-por-talla con **repetición en el array** `sizes` (`[25, 25, 26]` = 2 piezas de la 25). Decidir antes de la Fase 1: mantener esa convención o introducir tabla `ProductSize { productId, size, stock }`. Afecta el descuento de stock en el checkout (Fase 4).
 
@@ -63,19 +63,19 @@ Construye en este orden. Cada fase desbloquea la siguiente.
 
 **Objetivo:** dejar listas las piezas que todas las demás fases van a usar, y saldar la deuda de contrato del `Product`.
 
-**Por qué ahora:** sin middleware de errores, validación y la lógica de negocio portada, cada endpoint posterior tendría que reinventarlas. Y si no arreglas `costoUnitario`/precios primero, vas a propagar el bug por todo el admin.
+**Por qué ahora:** sin middleware de errores, validación y la lógica de negocio portada, cada endpoint posterior tendría que reinventarlas. El nombre `unitCost` y los precios decimales ya están alineados (puntos 1–2); falta cerrar `discountPercent` derivado y decidir el stock por talla.
 
 **Tareas:**
-- [ ] Arreglar deuda de contrato del `Product` (puntos 1–3 de arriba) en [src/models/Product.ts](src/models/Product.ts).
+- [ ] Cerrar el `discountPercent` derivado (punto 3 de arriba) en [src/models/Product.ts](src/models/Product.ts). Los puntos 1–2 (`unitCost` + precios decimales) ya están alineados.
 - [ ] Decidir el modelo de stock por talla (punto 4 de arriba) y documentar la decisión aquí.
 - [ ] Middleware de manejo de errores centralizado en `src/middlewares/` (captura zod, Sequelize, y errores genéricos → JSON con `message` en español).
 - [ ] Wrapper `asyncHandler` para no repetir try/catch en cada controller.
 - [ ] Portar [frontend/lib/forecast.ts](../frontend/lib/forecast.ts) **tal cual** a `src/services/forecast.ts` (es función pura, no depende del front).
 - [ ] Portar la lógica de [frontend/lib/cart.ts](../frontend/lib/cart.ts) (`computeTotals`, `computeShipping`, `SHIPPING_BY_TYPE`) a `src/services/cart.ts`.
-- [ ] Crear esquemas zod en `src/schemas/` replicando [frontend/schemas/](../frontend/schemas/): `shippingSchema`, `loginSchema`, `productSchema` (extendido con `costoUnitario` + dimensiones + `code`).
+- [ ] Crear esquemas zod en `src/schemas/` replicando [frontend/schemas/](../frontend/schemas/): `shippingSchema`, `loginSchema`, `productSchema` (extendido con `unitCost` + dimensiones + `code`).
 - [ ] Esqueleto de `requireAuth` en `src/middlewares/` (placeholder; la lógica JWT real llega en Fase 2).
 
-**Cómo verificar:** `GET /api/products/1` sigue respondiendo y los precios salen como enteros; el modelo expone `costoUnitario` (no `unitCost`) — confirmarlo solo en una ruta admin más adelante, en la pública sigue oculto.
+**Cómo verificar:** `GET /api/products/1` sigue respondiendo y los precios salen como número (con decimales si los hay, p. ej. `1920.5`); el modelo expone `unitCost` — confirmarlo solo en una ruta admin más adelante, en la pública sigue oculto.
 
 ---
 
@@ -128,19 +128,19 @@ POST /api/auth/login  →  { "token": "<jwt>", "user": { "id": "...", "name": "D
 
 ### Fase 3 — Catálogo admin (CRUD de productos)
 
-**Objetivo:** que Don Chuy pueda crear/editar/borrar productos desde el panel. **Incluye `costoUnitario`.**
+**Objetivo:** que Don Chuy pueda crear/editar/borrar productos desde el panel. **Incluye `unitCost`.**
 
 **Por qué ahora:** ya tienes auth para protegerlo y el modelo `Product` corregido. Reemplaza el flujo de `ProductForm.tsx` / `ProductSection.tsx`.
 
 **Tareas:**
-- [ ] `GET /api/admin/products` `[auth]` — todos los productos (incluye `visible=false` y `costoUnitario`).
+- [ ] `GET /api/admin/products` `[auth]` — todos los productos (incluye `visible=false` y `unitCost`).
 - [ ] `POST /api/admin/products` `[auth]` — valida con `productSchema`; parsea `sizes` string `"25, 26"` → `int[]`; calcula `discountPercent`; valida `salePrice ≤ originalPrice`.
 - [ ] `PUT /api/admin/products/:id` `[auth]` — update parcial.
 - [ ] `DELETE /api/admin/products/:id` `[auth]` — considerar soft-delete si hay pedidos que lo referencian.
 
-> **Nota:** el `ProductForm` del front aún **no captura** `costoUnitario` ni dimensiones. Al cablear, hay que agregar esos inputs al form o asignar defaults por categoría — si no, los márgenes/reposición salen mal.
+> **Nota:** el `ProductForm` del front aún **no captura** `unitCost` ni dimensiones. Al cablear, hay que agregar esos inputs al form o asignar defaults por categoría — si no, los márgenes/reposición salen mal.
 
-**Cómo verificar:** `POST` un producto con token → `201` con `discountPercent` calculado; sin token → `401`. `GET /api/products` público sigue **sin** `costoUnitario`.
+**Cómo verificar:** `POST` un producto con token → `201` con `discountPercent` calculado; sin token → `401`. `GET /api/products` público sigue **sin** `unitCost`.
 
 ---
 
@@ -172,7 +172,7 @@ POST /api/auth/login  →  { "token": "<jwt>", "user": { "id": "...", "name": "D
 - [ ] `GET /api/admin/dashboard` `[auth]` → `DashboardData` (ver tipo exacto en [frontend/components/admin/data/types.ts](../frontend/components/admin/data/types.ts)):
   - `kpis` y `profitKpis`: **`value` ya formateado en es-MX** (`"$245,506"`, `"58%"`) — el front lo pinta tal cual.
   - `revenueByPeriod`: las **tres** series `"7" | "30" | "90"` juntas (el front alterna en cliente).
-  - `recentSales` (`SaleRow[]`) y `inventory` (`InventoryRow[]`, con `valorInventario = stock × costoUnitario`).
+  - `recentSales` (`SaleRow[]`) y `inventory` (`InventoryRow[]`, con `valorInventario = stock × unitCost`).
 - [ ] `GET /api/admin/orders` `[auth]` → `Order[]` con items, para la vista de ventas detalladas.
 
 **Cómo verificar:** `GET /api/admin/dashboard` con token → JSON con las 3 series de revenue y KPIs como strings formateados. Cablear `DataSection` del front contra el endpoint.
@@ -277,7 +277,7 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 
 ## 6. Notas de seguridad
 
-- **`costoUnitario`, `margenMensual`, `costoTotal`, `valorInventario`, `costoEstimadoPedido` son sensibles.** Solo en rutas `/api/admin/*` autenticadas. Las públicas de catálogo **nunca** los incluyen (ya respetado en `product.controller.ts`).
+- **`unitCost`, `margenMensual`, `costoTotal`, `valorInventario`, `costoEstimadoPedido` son sensibles.** Solo en rutas `/api/admin/*` autenticadas. Las públicas de catálogo **nunca** los incluyen (ya respetado en `product.controller.ts`).
 - **Recalcular siempre los totales en el servidor** al crear pedidos. El cliente dice qué quiere; el backend decide cuánto cuesta.
 - **Verificar stock por talla** en el servidor antes de confirmar (el front valida, pero no es autoritativo).
 - **Contraseñas con bcrypt** (nunca texto plano). `forgot-password` no revela si un correo existe.
@@ -291,7 +291,7 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 ## 7. Checklist maestro
 
 **Fase 0 — Cimientos**
-- [ ] Arreglar `unitCost → costoUnitario`, precios enteros, `discountPercent` derivado en el modelo
+- [ ] Cerrar `discountPercent` derivado en el modelo (`unitCost` + precios decimales ya alineados con el front)
 - [ ] Decidir modelo de stock por talla
 - [ ] Middleware de errores + `asyncHandler`
 - [ ] Portar `forecast` y `cart` a `src/services/`
