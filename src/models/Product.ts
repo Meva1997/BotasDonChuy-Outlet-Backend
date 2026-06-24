@@ -7,7 +7,7 @@ interface ProductAttributes {
   description?: string;
   originalPrice: number;
   salePrice: number;
-  discountPercent: number;
+  readonly discountPercent: number;
   unitCost: number;
   stock: number;
   type: "bota" | "sombrero" | "ropa";
@@ -23,7 +23,7 @@ interface ProductAttributes {
 
 interface ProductCreationAttributes extends Optional<
   ProductAttributes,
-  "id" | "description" | "imageSrc" | "code"
+  "id" | "description" | "imageSrc" | "code" | "discountPercent"
 > {}
 
 export class Product
@@ -35,7 +35,7 @@ export class Product
   declare description?: string;
   declare originalPrice: number;
   declare salePrice: number;
-  declare discountPercent: number;
+  declare readonly discountPercent: number;
   declare unitCost: number;
   declare stock: number;
   declare type: "bota" | "sombrero" | "ropa";
@@ -81,8 +81,18 @@ Product.init(
       },
     },
     discountPercent: {
-      type: DataTypes.INTEGER,
-      allowNull: false,
+      type: DataTypes.VIRTUAL,
+      get() {
+        const originalPrice = this.getDataValue("originalPrice") as unknown as number;
+        const salePrice = this.getDataValue("salePrice") as unknown as number;
+        if (!originalPrice) return 0;
+        return Math.round(
+          ((parseFloat(originalPrice as unknown as string) -
+            parseFloat(salePrice as unknown as string)) /
+            parseFloat(originalPrice as unknown as string)) *
+            100,
+        );
+      },
     },
     unitCost: {
       type: DataTypes.DECIMAL(10, 2),

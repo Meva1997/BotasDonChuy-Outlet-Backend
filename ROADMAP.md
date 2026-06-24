@@ -50,8 +50,8 @@ El modelo `Product` ya está alineado con el frontend en nombre de campo y forma
 
 1. **`unitCost` (✅ alineado).** El modelo expone el campo como `unitCost` y el frontend ya lo consume como **`unitCost`** (`MockProduct`, tipos del admin, mocks). El JSON de rutas admin hace match. **Sin acción en el backend.** (Antes el front usaba `costoUnitario`; se renombró en el front para coincidir con el modelo.)
 2. **Precios con decimales (✅ alineado).** Los precios se guardan como `DECIMAL(10,2)` y **pueden tener centavos** (`salePrice: 1920.50`). El front ya es decimal-safe y los formatea con 2 decimales. **No forzar enteros** — servir el número tal cual (no string).
-3. **`discountPercent` derivado.** Debe calcularse en el backend: `round((originalPrice - salePrice) / originalPrice * 100)`. No confiar en que lo mande el cliente.
-4. **Decisión de stock por talla.** Hoy el front modela stock-por-talla con **repetición en el array** `sizes` (`[25, 25, 26]` = 2 piezas de la 25). Decidir antes de la Fase 1: mantener esa convención o introducir tabla `ProductSize { productId, size, stock }`. Afecta el descuento de stock en el checkout (Fase 4).
+3. **`discountPercent` derivado (✅ cerrado).** Convertido a campo `VIRTUAL` en [src/models/Product.ts](src/models/Product.ts): se calcula con `round((originalPrice - salePrice) / originalPrice * 100)` al leer, nunca se guarda ni se puede mandar desde el cliente. La columna física se elimina del `sync({ alter: true })` en el próximo arranque en dev.
+4. **Decisión de stock por talla (✅ cerrada).** Se mantiene la convención actual: repetición en el array `sizes` (`[25, 25, 26]` = 2 piezas de la 25). **No se introduce `ProductSize`** — migrar obligaría a tocar 4 lugares del front que ya derivan stock por talla así (`ProductInfo.tsx`, `cartStore.ts` ×2 en `addItem`/`updateQuantity`, `Cart.tsx`), sin beneficio inmediato, y rompería el principio rector de no tocar el front mientras el contrato se respete. El descuento de stock en el checkout (Fase 4) debe operar sobre `sizes` removiendo una ocurrencia de la talla vendida. Revisar esta decisión en Fase 8 si se necesita stock granular real.
 
 ---
 
@@ -66,8 +66,8 @@ Construye en este orden. Cada fase desbloquea la siguiente.
 **Por qué ahora:** sin middleware de errores, validación y la lógica de negocio portada, cada endpoint posterior tendría que reinventarlas. El nombre `unitCost` y los precios decimales ya están alineados (puntos 1–2); falta cerrar `discountPercent` derivado y decidir el stock por talla.
 
 **Tareas:**
-- [ ] Cerrar el `discountPercent` derivado (punto 3 de arriba) en [src/models/Product.ts](src/models/Product.ts). Los puntos 1–2 (`unitCost` + precios decimales) ya están alineados.
-- [ ] Decidir el modelo de stock por talla (punto 4 de arriba) y documentar la decisión aquí.
+- [x] Cerrar el `discountPercent` derivado (punto 3 de arriba) en [src/models/Product.ts](src/models/Product.ts). Los puntos 1–2 (`unitCost` + precios decimales) ya están alineados.
+- [x] Decidir el modelo de stock por talla (punto 4 de arriba) y documentar la decisión aquí.
 - [ ] Middleware de manejo de errores centralizado en `src/middlewares/` (captura zod, Sequelize, y errores genéricos → JSON con `message` en español).
 - [ ] Wrapper `asyncHandler` para no repetir try/catch en cada controller.
 - [ ] Portar [frontend/lib/forecast.ts](../frontend/lib/forecast.ts) **tal cual** a `src/services/forecast.ts` (es función pura, no depende del front).
@@ -291,8 +291,8 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 ## 7. Checklist maestro
 
 **Fase 0 — Cimientos**
-- [ ] Cerrar `discountPercent` derivado en el modelo (`unitCost` + precios decimales ya alineados con el front)
-- [ ] Decidir modelo de stock por talla
+- [x] Cerrar `discountPercent` derivado en el modelo (`unitCost` + precios decimales ya alineados con el front)
+- [x] Decidir modelo de stock por talla
 - [ ] Middleware de errores + `asyncHandler`
 - [ ] Portar `forecast` y `cart` a `src/services/`
 - [ ] Esquemas zod en `src/schemas/`
