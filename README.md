@@ -85,9 +85,17 @@ src/
 ├── middlewares/
 │   ├── AppError.ts               # Clase de error con status code para respuestas controladas
 │   ├── asyncHandler.ts            # Wrapper para controllers async (evita try/catch repetido)
-│   └── errorHandler.ts            # Middleware centralizado de manejo de errores
+│   ├── errorHandler.ts            # Middleware centralizado de manejo de errores
+│   └── requireAuth.ts             # Placeholder de auth (JWT real llega en Fase 2)
 ├── routes/
 │   └── product.routes.ts        # Rutas /api/products
+├── schemas/
+│   ├── auth.ts                   # Esquema zod de login
+│   ├── checkout.ts                # Esquema zod de envío/checkout
+│   └── product.ts                 # Esquema zod de producto
+├── services/
+│   ├── cart.ts                    # computeTotals, computeShipping, SHIPPING_BY_TYPE
+│   └── forecast.ts                # Función pura portada del frontend
 └── models/
     └── Product.ts               # Modelo Product (bota | sombrero | ropa)
 ```

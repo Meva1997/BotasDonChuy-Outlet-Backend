@@ -70,10 +70,10 @@ Construye en este orden. Cada fase desbloquea la siguiente.
 - [x] Decidir el modelo de stock por talla (punto 4 de arriba) y documentar la decisión aquí.
 - [x] Middleware de manejo de errores centralizado en `src/middlewares/` (captura zod, Sequelize, y errores genéricos → JSON con `message` en español).
 - [x] Wrapper `asyncHandler` para no repetir try/catch en cada controller.
-- [ ] Portar [frontend/lib/forecast.ts](../frontend/lib/forecast.ts) **tal cual** a `src/services/forecast.ts` (es función pura, no depende del front).
-- [ ] Portar la lógica de [frontend/lib/cart.ts](../frontend/lib/cart.ts) (`computeTotals`, `computeShipping`, `SHIPPING_BY_TYPE`) a `src/services/cart.ts`.
-- [ ] Crear esquemas zod en `src/schemas/` replicando [frontend/schemas/](../frontend/schemas/): `shippingSchema`, `loginSchema`, `productSchema` (extendido con `unitCost` + dimensiones + `code`).
-- [ ] Esqueleto de `requireAuth` en `src/middlewares/` (placeholder; la lógica JWT real llega en Fase 2).
+- [x] Portar [frontend/lib/forecast.ts](../frontend/lib/forecast.ts) **tal cual** a `src/services/forecast.ts` (es función pura, no depende del front).
+- [x] Portar la lógica de [frontend/lib/cart.ts](../frontend/lib/cart.ts) (`computeTotals`, `computeShipping`, `SHIPPING_BY_TYPE`) a `src/services/cart.ts`.
+- [x] Crear esquemas zod en `src/schemas/` replicando [frontend/schemas/](../frontend/schemas/): `shippingSchema`, `loginSchema`, `productSchema` (extendido con `unitCost` + dimensiones + `code`).
+- [x] Esqueleto de `requireAuth` en `src/middlewares/` (placeholder; la lógica JWT real llega en Fase 2).
 
 **Cómo verificar:** `GET /api/products/1` sigue respondiendo y los precios salen como número (con decimales si los hay, p. ej. `1920.5`); el modelo expone `unitCost` — confirmarlo solo en una ruta admin más adelante, en la pública sigue oculto.
 
@@ -86,7 +86,7 @@ Construye en este orden. Cada fase desbloquea la siguiente.
 **Por qué ahora:** no puedes construir login sin tabla `AdminUser`, ni dashboard sin órdenes/ventas. El seed te da datos reales contra los que probar cada endpoint.
 
 **Tareas:**
-- [ ] Modelo `AdminUser` (`id`, `name`, `email` unique, `passwordHash`, `role` enum `owner|admin|editor`, `createdAt`).
+- [ ] Modelo `AdminUser` (`id`, `name`, `email` unique, `passwordHash`, `role` enum `owner|admin`, `createdAt`).
 - [ ] Modelo `Order` (snapshot de totales + datos de envío; ver Fase/§4).
 - [ ] Modelo `OrderItem` (un renglón por ítem, con precios **congelados**: `unitOriginalPrice`, `unitSalePrice`, `unitCosto`).
 - [ ] Modelo `BrandSettings` (singleton: `brandName`, `heroText`, `tagline`, `cartNotice`, `footerNote`, `logoUrl`).
@@ -212,7 +212,7 @@ POST /api/auth/login  →  { "token": "<jwt>", "user": { "id": "...", "name": "D
 - [ ] `DELETE /api/admin/users/:id` `[auth]` (**solo `owner`**).
 - [ ] `PUT /api/admin/account` `[auth]` — cambiar correo/contraseña propios (verificar `currentPassword`, exigir `newPassword === confirmPassword` y ≥ 8 chars).
 
-**Cómo verificar:** `PUT /api/admin/brand` con un solo campo → persiste; `POST /api/admin/users` con token de `editor` → `403`.
+**Cómo verificar:** `PUT /api/admin/brand` con un solo campo → persiste; `POST /api/admin/users` con token de `admin` → `403`.
 
 ---
 
@@ -254,7 +254,7 @@ Resumen rápido. El tipo de cada respuesta vive en el frontend (columna "Tipo").
 
 Detalle completo de campos en [frontend/BACKEND.md](../frontend/BACKEND.md) §3 (ignorar el bloque Prisma; traducir a `Model.init` de Sequelize como ya se hizo con `Product`).
 
-- **`AdminUser`** — `id` (uuid), `name`, `email` (unique), `passwordHash`, `role` (ENUM `owner|admin|editor`, default `admin`), `createdAt`.
+- **`AdminUser`** — `id` (uuid), `name`, `email` (unique), `passwordHash`, `role` (ENUM `owner|admin`, default `admin`), `createdAt`.
 - **`Order`** — `id` (uuid), `status` (ENUM `pending|paid|shipped|delivered|cancelled`), `subtotal`/`savings`/`shipping`/`total` (int), datos de cliente (`customerName`, `customerEmail`, `customerPhone`, `street`, `neighborhood`, `city`, `state`, `postalCode`, `references?`), `shippingCarrier?`, `createdAt`. `hasMany(OrderItem)`.
 - **`OrderItem`** — `id` (uuid), `orderId` (FK), `productId` (FK), `nameSnapshot`, `size` (int), `quantity` (int), y precios **congelados**: `unitOriginalPrice`, `unitSalePrice`, `unitCosto`.
 - **`BrandSettings`** — singleton (`id=1`): `brandName`, `heroText`, `tagline`, `cartNotice`, `footerNote`, `logoUrl?`, `updatedAt`.
@@ -294,9 +294,9 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 - [x] Cerrar `discountPercent` derivado en el modelo (`unitCost` + precios decimales ya alineados con el front)
 - [x] Decidir modelo de stock por talla
 - [x] Middleware de errores + `asyncHandler`
-- [ ] Portar `forecast` y `cart` a `src/services/`
-- [ ] Esquemas zod en `src/schemas/`
-- [ ] Esqueleto `requireAuth`
+- [x] Portar `forecast` y `cart` a `src/services/`
+- [x] Esquemas zod en `src/schemas/`
+- [x] Esqueleto `requireAuth`
 
 **Fase 1 — Datos base**
 - [ ] Modelos `AdminUser`, `Order`, `OrderItem`, `BrandSettings` (+ `ProductSize`?)
