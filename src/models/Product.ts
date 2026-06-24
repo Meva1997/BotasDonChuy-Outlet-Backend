@@ -1,7 +1,7 @@
 import { DataTypes, Model, Optional } from "sequelize";
 import { sequelize } from "../config/database";
 
-interface ProductAttributes {
+export interface ProductAttributes {
   id: number;
   name: string;
   description?: string;

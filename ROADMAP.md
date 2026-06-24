@@ -68,8 +68,8 @@ Construye en este orden. Cada fase desbloquea la siguiente.
 **Tareas:**
 - [x] Cerrar el `discountPercent` derivado (punto 3 de arriba) en [src/models/Product.ts](src/models/Product.ts). Los puntos 1–2 (`unitCost` + precios decimales) ya están alineados.
 - [x] Decidir el modelo de stock por talla (punto 4 de arriba) y documentar la decisión aquí.
-- [ ] Middleware de manejo de errores centralizado en `src/middlewares/` (captura zod, Sequelize, y errores genéricos → JSON con `message` en español).
-- [ ] Wrapper `asyncHandler` para no repetir try/catch en cada controller.
+- [x] Middleware de manejo de errores centralizado en `src/middlewares/` (captura zod, Sequelize, y errores genéricos → JSON con `message` en español).
+- [x] Wrapper `asyncHandler` para no repetir try/catch en cada controller.
 - [ ] Portar [frontend/lib/forecast.ts](../frontend/lib/forecast.ts) **tal cual** a `src/services/forecast.ts` (es función pura, no depende del front).
 - [ ] Portar la lógica de [frontend/lib/cart.ts](../frontend/lib/cart.ts) (`computeTotals`, `computeShipping`, `SHIPPING_BY_TYPE`) a `src/services/cart.ts`.
 - [ ] Crear esquemas zod en `src/schemas/` replicando [frontend/schemas/](../frontend/schemas/): `shippingSchema`, `loginSchema`, `productSchema` (extendido con `unitCost` + dimensiones + `code`).
@@ -293,7 +293,7 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 **Fase 0 — Cimientos**
 - [x] Cerrar `discountPercent` derivado en el modelo (`unitCost` + precios decimales ya alineados con el front)
 - [x] Decidir modelo de stock por talla
-- [ ] Middleware de errores + `asyncHandler`
+- [x] Middleware de errores + `asyncHandler`
 - [ ] Portar `forecast` y `cart` a `src/services/`
 - [ ] Esquemas zod en `src/schemas/`
 - [ ] Esqueleto `requireAuth`

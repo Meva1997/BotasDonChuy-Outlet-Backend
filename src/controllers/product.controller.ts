@@ -1,12 +1,15 @@
-import type { Request, Response } from "express";
-import { Product } from "../models/Product";
+import type { Request, RequestHandler, Response } from "express";
+import type { WhereOptions } from "sequelize";
+import { Product, type ProductAttributes } from "../models/Product";
+import { asyncHandler } from "../middlewares/asyncHandler";
+import { AppError } from "../middlewares/AppError";
 
-export const getProducts = async (req: Request, res: Response) => {
+export const getProducts: RequestHandler = asyncHandler(async (req: Request, res: Response) => {
   const categoria = req.query.categoria as string | undefined;
   const talla = req.query.talla ? Number(req.query.talla) : undefined;
   const page = Number(req.query.page) || 1;
   const perPage = Number(req.query.perPage) || 9;
-  const where: any = { visible: true };
+  const where: WhereOptions<ProductAttributes> = { visible: true };
   if (categoria) where.type = categoria;
 
   const productos = await Product.findAll({
@@ -36,9 +39,9 @@ export const getProducts = async (req: Request, res: Response) => {
     totalPages,
     availableSizes,
   });
-};
+});
 
-export const getProductById = async (req: Request, res: Response) => {
+export const getProductById: RequestHandler = asyncHandler(async (req: Request, res: Response) => {
   const id = Number(req.params.id);
 
   const product = await Product.findOne({
@@ -47,8 +50,8 @@ export const getProductById = async (req: Request, res: Response) => {
   });
 
   if (!product) {
-    return res.status(404).json({ message: "Producto no encontrado" });
+    throw new AppError("Producto no encontrado", 404);
   }
 
   res.json(product);
-};
+});

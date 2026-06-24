@@ -82,6 +82,10 @@ src/
 │   └── database.ts              # Conexión Sequelize a PostgreSQL
 ├── controllers/
 │   └── product.controller.ts    # Lógica de productos (listar, obtener por id)
+├── middlewares/
+│   ├── AppError.ts               # Clase de error con status code para respuestas controladas
+│   ├── asyncHandler.ts            # Wrapper para controllers async (evita try/catch repetido)
+│   └── errorHandler.ts            # Middleware centralizado de manejo de errores
 ├── routes/
 │   └── product.routes.ts        # Rutas /api/products
 └── models/

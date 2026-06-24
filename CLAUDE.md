@@ -39,6 +39,15 @@ only expose rows with `visible: true` and exclude the `unitCost` field via Seque
 **When adding a new resource, create `*.routes.ts` + `*.controller.ts` and mount the router
 in `src/app.ts`.**
 
+**Error handling** (`src/middlewares/`): `asyncHandler` wraps async controller functions so
+thrown/rejected errors are forwarded to Express's error pipeline instead of needing try/catch
+in each controller. Controllers throw `AppError(message, statusCode)` for expected failures
+(e.g. 404s). `errorHandler` is registered last in `src/app.ts` and maps `ZodError`,
+Sequelize's `UniqueConstraintError`/`ValidationError`, and `AppError` to JSON responses with a
+Spanish `message`; anything else falls back to a logged 500.
+**When adding a new resource, use `asyncHandler` for its controller handlers and throw
+`AppError` for expected error cases instead of returning ad-hoc status codes.**
+
 **Models** (`src/models/Product.ts`): models import the shared `sequelize` instance and call
 `Model.init(...)`. A model only gets its table created/synced if it is imported somewhere in
 the startup path — `src/app.ts` does `import "./models/Product"` specifically to register it.

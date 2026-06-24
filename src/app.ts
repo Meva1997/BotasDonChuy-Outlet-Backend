@@ -4,6 +4,7 @@ import helmet from "helmet";
 import dotenv from "dotenv";
 import { connectDB } from "./config/database";
 import productRoutes from "./routes/product.routes";
+import { errorHandler } from "./middlewares/errorHandler";
 import "./models/Product"; // register the model so sync() creates its table
 
 dotenv.config();
@@ -26,6 +27,8 @@ app.use("/api/products", productRoutes);
 app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
+
+app.use(errorHandler);
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
