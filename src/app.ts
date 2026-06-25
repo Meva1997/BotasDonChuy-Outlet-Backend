@@ -6,6 +6,12 @@ import { connectDB } from "./config/database";
 import productRoutes from "./routes/product.routes";
 import { errorHandler } from "./middlewares/errorHandler";
 import "./models/Product"; // register the model so sync() creates its table
+import "./models/ProductSize";
+import "./models/AdminUser";
+import "./models/Order";
+import "./models/OrderItem";
+import "./models/BrandSettings";
+import "./models/associations";
 
 dotenv.config();
 

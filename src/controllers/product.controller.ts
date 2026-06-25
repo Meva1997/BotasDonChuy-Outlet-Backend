@@ -1,8 +1,15 @@
 import type { Request, RequestHandler, Response } from "express";
 import type { WhereOptions } from "sequelize";
 import { Product, type ProductAttributes } from "../models/Product";
+import { ProductSize } from "../models/ProductSize";
 import { asyncHandler } from "../middlewares/asyncHandler";
 import { AppError } from "../middlewares/AppError";
+
+const productSizesInclude = {
+  model: ProductSize,
+  as: "productSizes",
+  attributes: ["size", "stock"],
+};
 
 export const getProducts: RequestHandler = asyncHandler(async (req: Request, res: Response) => {
   const categoria = req.query.categoria as string | undefined;
@@ -15,6 +22,7 @@ export const getProducts: RequestHandler = asyncHandler(async (req: Request, res
   const productos = await Product.findAll({
     where,
     attributes: { exclude: ["unitCost"] },
+    include: [productSizesInclude],
   });
 
   const availableSizes = [...new Set(productos.flatMap((p) => p.sizes))].sort(
@@ -47,6 +55,7 @@ export const getProductById: RequestHandler = asyncHandler(async (req: Request, 
   const product = await Product.findOne({
     where: { id, visible: true },
     attributes: { exclude: ["unitCost"] },
+    include: [productSizesInclude],
   });
 
   if (!product) {

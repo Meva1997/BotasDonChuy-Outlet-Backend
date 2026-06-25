@@ -1,5 +1,6 @@
 import { DataTypes, Model, Optional } from "sequelize";
 import { sequelize } from "../config/database";
+import type { ProductSize } from "./ProductSize";
 
 export interface ProductAttributes {
   id: number;
@@ -9,9 +10,9 @@ export interface ProductAttributes {
   salePrice: number;
   readonly discountPercent: number;
   unitCost: number;
-  stock: number;
+  readonly stock: number;
   type: "bota" | "sombrero" | "ropa";
-  sizes: number[];
+  readonly sizes: number[];
   imageSrc?: string;
   code?: string;
   weightKg: number;
@@ -23,7 +24,7 @@ export interface ProductAttributes {
 
 interface ProductCreationAttributes extends Optional<
   ProductAttributes,
-  "id" | "description" | "imageSrc" | "code" | "discountPercent"
+  "id" | "description" | "imageSrc" | "code" | "discountPercent" | "stock" | "sizes"
 > {}
 
 export class Product
@@ -37,9 +38,9 @@ export class Product
   declare salePrice: number;
   declare readonly discountPercent: number;
   declare unitCost: number;
-  declare stock: number;
+  declare readonly stock: number;
   declare type: "bota" | "sombrero" | "ropa";
-  declare sizes: number[];
+  declare readonly sizes: number[];
   declare imageSrc?: string;
   declare code?: string;
   declare weightKg: number;
@@ -47,6 +48,13 @@ export class Product
   declare widthCm: number;
   declare heightCm: number;
   declare visible: boolean;
+  declare productSizes?: ProductSize[];
+
+  toJSON() {
+    const values = { ...this.get() } as Record<string, unknown>;
+    delete values.productSizes;
+    return values;
+  }
 }
 
 Product.init(
@@ -103,18 +111,24 @@ Product.init(
       },
     },
     stock: {
-      type: DataTypes.INTEGER,
-      allowNull: false,
-      defaultValue: 0,
+      type: DataTypes.VIRTUAL,
+      get(this: Product) {
+        const productSizes = this.productSizes;
+        if (!productSizes) return 0;
+        return productSizes.reduce((acc, ps) => acc + ps.stock, 0);
+      },
     },
     type: {
       type: DataTypes.ENUM("bota", "sombrero", "ropa"),
       allowNull: false,
     },
     sizes: {
-      type: DataTypes.ARRAY(DataTypes.INTEGER),
-      allowNull: false,
-      defaultValue: [],
+      type: DataTypes.VIRTUAL,
+      get(this: Product) {
+        const productSizes = this.productSizes;
+        if (!productSizes) return [];
+        return productSizes.flatMap((ps) => Array(ps.stock).fill(ps.size));
+      },
     },
     imageSrc: {
       type: DataTypes.STRING,

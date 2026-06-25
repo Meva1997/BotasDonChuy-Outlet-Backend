@@ -3,8 +3,10 @@ import { z } from "zod";
 /**
  * El front manda `sizes` como string separado por comas (p. ej. "25, 26, 26")
  * porque así lo captura el input del ProductForm; aquí se parsea a `number[]`.
- * La repetición de una talla representa unidades de stock para esa talla
- * (decisión de Fase 0: no hay tabla `ProductSize`).
+ * La repetición de una talla representa unidades de stock para esa talla.
+ * En el backend esto se traduce a filas de `ProductSize` (productId, size, stock)
+ * agrupando ocurrencias repetidas; `Product.sizes`/`Product.stock` son derivados
+ * (VIRTUAL) de esa tabla, no columnas propias.
  */
 const sizesFromString = z
   .string()
