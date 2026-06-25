@@ -48,15 +48,27 @@ Spanish `message`; anything else falls back to a logged 500.
 **When adding a new resource, use `asyncHandler` for its controller handlers and throw
 `AppError` for expected error cases instead of returning ad-hoc status codes.**
 
-**Models** (`src/models/Product.ts`): models import the shared `sequelize` instance and call
+**Models** (`src/models/`): models import the shared `sequelize` instance and call
 `Model.init(...)`. A model only gets its table created/synced if it is imported somewhere in
-the startup path — `src/app.ts` does `import "./models/Product"` specifically to register it.
-**When adding a new model, add a matching side-effect import in `src/app.ts`.**
+the startup path — `src/app.ts` does `import "./models/Product"` (and the same for every other
+model) specifically to register it. Cross-model relations (`hasMany`/`belongsTo`) live in
+`src/models/associations.ts`, also side-effect imported from `src/app.ts`.
+**When adding a new model, add a matching side-effect import in `src/app.ts`, and declare its
+associations (if any) in `associations.ts`.**
 
 The `Product` model stores `DECIMAL(10,2)` money fields (`originalPrice`, `salePrice`,
 `unitCost`) with custom getters that `parseFloat` the values so the API returns numbers rather
-than strings. `type` is a Postgres ENUM (`bota | sombrero | ropa`) and `sizes` is an
-`ARRAY(INTEGER)` — both are Postgres-specific, so the database must be PostgreSQL.
+than strings. `type` is a Postgres ENUM (`bota | sombrero | ropa`) — Postgres-specific, so the
+database must be PostgreSQL. `discountPercent`, `stock`, and `sizes` are all `VIRTUAL` fields:
+`discountPercent` is derived from the two prices, while `stock` (total) and `sizes` (repeated
+per unit, e.g. `[25, 25, 26]`) are derived from the `ProductSize` association (`productId`,
+`size`, `stock`, unique per `(productId, size)`) — the real source of truth for stock per size.
+Controllers must `include` the `productSizes` association for `stock`/`sizes` to resolve;
+without it they default to `0`/`[]`. `Order` holds a frozen snapshot of totals and shipping
+data; `OrderItem` freezes per-unit prices (`unitOriginalPrice`, `unitSalePrice`, `unitCosto`) so
+historical orders aren't affected by later `Product` price changes. `AdminUser` and
+`BrandSettings` (singleton) round out the Fase 1 data model. `src/seed.ts` (`pnpm seed`)
+populates all of the above from the frontend's mock data.
 
 ## Conventions
 

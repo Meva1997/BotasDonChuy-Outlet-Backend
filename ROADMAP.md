@@ -51,7 +51,7 @@ El modelo `Product` ya está alineado con el frontend en nombre de campo y forma
 1. **`unitCost` (✅ alineado).** El modelo expone el campo como `unitCost` y el frontend ya lo consume como **`unitCost`** (`MockProduct`, tipos del admin, mocks). El JSON de rutas admin hace match. **Sin acción en el backend.** (Antes el front usaba `costoUnitario`; se renombró en el front para coincidir con el modelo.)
 2. **Precios con decimales (✅ alineado).** Los precios se guardan como `DECIMAL(10,2)` y **pueden tener centavos** (`salePrice: 1920.50`). El front ya es decimal-safe y los formatea con 2 decimales. **No forzar enteros** — servir el número tal cual (no string).
 3. **`discountPercent` derivado (✅ cerrado).** Convertido a campo `VIRTUAL` en [src/models/Product.ts](src/models/Product.ts): se calcula con `round((originalPrice - salePrice) / originalPrice * 100)` al leer, nunca se guarda ni se puede mandar desde el cliente. La columna física se elimina del `sync({ alter: true })` en el próximo arranque en dev.
-4. **Decisión de stock por talla (✅ cerrada).** Se mantiene la convención actual: repetición en el array `sizes` (`[25, 25, 26]` = 2 piezas de la 25). **No se introduce `ProductSize`** — migrar obligaría a tocar 4 lugares del front que ya derivan stock por talla así (`ProductInfo.tsx`, `cartStore.ts` ×2 en `addItem`/`updateQuantity`, `Cart.tsx`), sin beneficio inmediato, y rompería el principio rector de no tocar el front mientras el contrato se respete. El descuento de stock en el checkout (Fase 4) debe operar sobre `sizes` removiendo una ocurrencia de la talla vendida. Revisar esta decisión en Fase 8 si se necesita stock granular real.
+4. **Decisión de stock por talla (✅ cerrada, revertida en Fase 1).** Se introdujo el modelo `ProductSize` (`productId`, `size`, `stock`, único por `(productId, size)`) como fuente de verdad real del stock por talla — ver [src/models/ProductSize.ts](src/models/ProductSize.ts) y la asociación `Product.hasMany(ProductSize, { as: "productSizes" })` en [src/models/associations.ts](src/models/associations.ts). Razón del cambio: descontar stock removiendo una ocurrencia de un array Postgres no es atómico (requiere leer-filtrar-reescribir), lo que abre condiciones de carrera en checkouts concurrentes (Fase 4); con `ProductSize` el descuento es un `UPDATE ... SET stock = stock - 1 WHERE stock > 0` atómico. **El contrato público no cambia:** `Product.sizes` (repetido, p. ej. `[25, 25, 26]`) y `Product.stock` (total) ahora son campos `VIRTUAL` derivados de `productSizes` cuando se incluye la asociación (ver `product.controller.ts`), así que el frontend sigue recibiendo exactamente la misma forma de datos sin tocar `ProductInfo.tsx`, `cartStore.ts` ni `Cart.tsx`.
 
 ---
 
@@ -86,17 +86,18 @@ Construye en este orden. Cada fase desbloquea la siguiente.
 **Por qué ahora:** no puedes construir login sin tabla `AdminUser`, ni dashboard sin órdenes/ventas. El seed te da datos reales contra los que probar cada endpoint.
 
 **Tareas:**
-- [ ] Modelo `AdminUser` (`id`, `name`, `email` unique, `passwordHash`, `role` enum `owner|admin`, `createdAt`).
-- [ ] Modelo `Order` (snapshot de totales + datos de envío; ver Fase/§4).
-- [ ] Modelo `OrderItem` (un renglón por ítem, con precios **congelados**: `unitOriginalPrice`, `unitSalePrice`, `unitCosto`).
-- [ ] Modelo `BrandSettings` (singleton: `brandName`, `heroText`, `tagline`, `cartNotice`, `footerNote`, `logoUrl`).
-- [ ] (Si se decidió en Fase 0) Modelo `ProductSize`.
-- [ ] Asociaciones Sequelize: `Order.hasMany(OrderItem)`, `OrderItem.belongsTo(Product)`.
-- [ ] Registrar **todos** los modelos importándolos en [src/app.ts](src/app.ts) (si no se importan, `sync` no los crea).
-- [ ] Script de seed (`src/seed.ts` + script en `package.json`):
+- [x] Modelo `AdminUser` (`id`, `name`, `email` unique, `passwordHash`, `role` enum `owner|admin`, `createdAt`).
+- [x] Modelo `Order` (snapshot de totales + datos de envío; ver Fase/§4).
+- [x] Modelo `OrderItem` (un renglón por ítem, con precios **congelados**: `unitOriginalPrice`, `unitSalePrice`, `unitCosto`).
+- [x] Modelo `BrandSettings` (singleton: `brandName`, `heroText`, `tagline`, `cartNotice`, `footerNote`, `logoUrl`).
+- [x] Modelo `ProductSize` (`productId`, `size`, `stock`) — ver decisión revertida en Fase 0, punto 4.
+- [x] Asociación `Product.hasMany(ProductSize, { as: "productSizes" })` / `ProductSize.belongsTo(Product)` en [src/models/associations.ts](src/models/associations.ts).
+- [x] Asociaciones Sequelize: `Order.hasMany(OrderItem)`, `OrderItem.belongsTo(Product)`.
+- [x] Registrar **todos** los modelos importándolos en [src/app.ts](src/app.ts) (si no se importan, `sync` no los crea).
+- [x] Script de seed (`src/seed.ts` + script en `package.json`):
   - 6 productos de [frontend/db/mockProducts.ts](../frontend/db/mockProducts.ts).
-  - Histórico `MONTHLY_UNIT_SALES` de [frontend/db/mockData.ts](../frontend/db/mockData.ts) (como `Order`/`OrderItem` o tabla `MonthlySale`).
-  - `AdminUser` semilla: `admin@botasdonchuy.mx`, rol `owner` (password hasheada con bcrypt).
+  - Histórico `MONTHLY_UNIT_SALES` de [frontend/db/mockData.ts](../frontend/db/mockData.ts), modelado como `Order`/`OrderItem` reales (un pedido `paid` por mes, `createdAt` fijado a ese mes) en vez de una tabla `MonthlySale` nueva.
+  - `AdminUser` semilla: `mevadev97@gmail.com`, rol `admin` (password `password` hasheada con bcrypt; `owner` y `admin` tienen los mismos permisos, así que el rol semilla no importa).
   - `BrandSettings` con los defaults de [frontend/lib/brand.ts](../frontend/lib/brand.ts).
 
 **Cómo verificar:** correr el seed; en psql, `SELECT count(*) FROM products;` → 6, y existe el `AdminUser` con email semilla.
@@ -153,9 +154,9 @@ POST /api/auth/login  →  { "token": "<jwt>", "user": { "id": "...", "name": "D
 **Tareas:**
 - [ ] `POST /api/orders` (público) — body `{ items: [{ productId, size, quantity }], customer, shippingCarrier }`.
   - [ ] Validar `customer` con `shippingSchema`.
-  - [ ] Cargar cada `Product`, **verificar stock por talla** (según decisión de Fase 0).
+  - [ ] Cargar cada `Product`, **verificar stock por talla** contra la fila `ProductSize` correspondiente.
   - [ ] **Recalcular** `subtotal`, `savings`, `shipping`, `total` con el service de cart (NUNCA confiar en montos del cliente).
-  - [ ] **Congelar** precios en cada `OrderItem`, descontar stock, persistir.
+  - [ ] **Congelar** precios en cada `OrderItem`, descontar stock **atómicamente** sobre `ProductSize.stock` (`UPDATE ... SET stock = stock - 1 WHERE stock > 0`, dentro de una transacción), persistir.
   - [ ] `409` con detalle del ítem si no hay stock; `400` si validación falla; `201` con `{ order }`.
 
 **Cómo verificar:** `POST /api/orders` con 1 ítem → `201`, totales correctos, stock descontado en la BD. Forzar stock insuficiente → `409`.
@@ -258,9 +259,9 @@ Detalle completo de campos en [frontend/BACKEND.md](../frontend/BACKEND.md) §3 
 - **`Order`** — `id` (uuid), `status` (ENUM `pending|paid|shipped|delivered|cancelled`), `subtotal`/`savings`/`shipping`/`total` (int), datos de cliente (`customerName`, `customerEmail`, `customerPhone`, `street`, `neighborhood`, `city`, `state`, `postalCode`, `references?`), `shippingCarrier?`, `createdAt`. `hasMany(OrderItem)`.
 - **`OrderItem`** — `id` (uuid), `orderId` (FK), `productId` (FK), `nameSnapshot`, `size` (int), `quantity` (int), y precios **congelados**: `unitOriginalPrice`, `unitSalePrice`, `unitCosto`.
 - **`BrandSettings`** — singleton (`id=1`): `brandName`, `heroText`, `tagline`, `cartNotice`, `footerNote`, `logoUrl?`, `updatedAt`.
-- **`ProductSize`** (opcional, según decisión Fase 0) — `productId`, `size`, `stock`.
+- **`ProductSize`** (✅ implementado en Fase 1) — `productId`, `size`, `stock`. Único por `(productId, size)`. Fuente de verdad real del stock por talla.
 
-> **Stock por talla:** hoy el front cuenta `product.sizes.filter(s => s === size).length` en `ProductInfo`, `Cart` y `cartStore`. Si cambias a `ProductSize`, hay que actualizar esos tres lugares **o** seguir exponiendo `sizes` como `number[]` derivado (repetición) para no romper el front.
+> **Stock por talla:** el front sigue contando `product.sizes.filter(s => s === size).length` en `ProductInfo`, `Cart` y `cartStore` — **sin tocar esos archivos**, porque `Product.sizes` (repetido) y `Product.stock` (total) son ahora campos `VIRTUAL` derivados de `productSizes` en el backend. El descuento real al confirmar un pedido (Fase 4) debe operar sobre `ProductSize.stock` con un `UPDATE` atómico (`stock = stock - 1 WHERE stock > 0`), no sobre el array derivado.
 
 ---
 
@@ -279,7 +280,7 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 
 - **`unitCost`, `margenMensual`, `costoTotal`, `valorInventario`, `costoEstimadoPedido` son sensibles.** Solo en rutas `/api/admin/*` autenticadas. Las públicas de catálogo **nunca** los incluyen (ya respetado en `product.controller.ts`).
 - **Recalcular siempre los totales en el servidor** al crear pedidos. El cliente dice qué quiere; el backend decide cuánto cuesta.
-- **Verificar stock por talla** en el servidor antes de confirmar (el front valida, pero no es autoritativo).
+- **Verificar y descontar stock por talla** en el servidor antes de confirmar, sobre `ProductSize.stock` con `UPDATE` atómico dentro de una transacción (el front valida, pero no es autoritativo).
 - **Contraseñas con bcrypt** (nunca texto plano). `forgot-password` no revela si un correo existe.
 - **CORS** restringido a `CORS_ORIGIN` (ya configurado).
 - **Rate limiting** en `/api/auth/login` y `/forgot-password`.
@@ -299,9 +300,10 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 - [x] Esqueleto `requireAuth`
 
 **Fase 1 — Datos base**
-- [ ] Modelos `AdminUser`, `Order`, `OrderItem`, `BrandSettings` (+ `ProductSize`?)
-- [ ] Asociaciones y registro en `app.ts`
-- [ ] Script de seed (productos, histórico, admin, brand)
+- [x] Modelos `AdminUser`, `Order`, `OrderItem`, `BrandSettings`, `ProductSize`
+- [x] Asociación `Product`↔`ProductSize` y registro en `app.ts`
+- [x] Asociaciones `Order`↔`OrderItem` y registro en `app.ts`
+- [x] Script de seed (productos, histórico, admin, brand)
 
 **Fase 2 — Auth**
 - [ ] `POST /api/auth/login`

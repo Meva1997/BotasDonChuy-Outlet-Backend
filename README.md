@@ -51,6 +51,7 @@ CLOUDINARY_API_SECRET=tu_api_secret
 | `pnpm dev`   | Servidor en desarrollo con recarga (`ts-node-dev`)   |
 | `pnpm build` | Compila TypeScript a `dist/` (`tsc`)                 |
 | `pnpm start` | Ejecuta la build de producción (`node dist/app.js`)  |
+| `pnpm seed`  | Llena la base de datos con productos, histórico de ventas, usuario admin semilla y configuración de marca (`src/seed.ts`) |
 
 ## Endpoints
 
@@ -71,13 +72,16 @@ Solo expone productos con `visible: true` y oculta el campo `unitCost`.
 | `page`      | number | `1`     | Página (se ajusta al rango `[1, totalPages]`) |
 | `perPage`   | number | `9`     | Elementos por página                         |
 
-Respuesta: `{ products, total, page, perPage, totalPages, availableSizes }`.
+Respuesta: `{ products, total, page, perPage, totalPages, availableSizes }`. `Product.sizes`
+(repetido por talla) y `Product.stock` (total) son campos `VIRTUAL` derivados de la tabla
+`ProductSize` cuando se incluye esa asociación.
 
 ## Estructura
 
 ```
 src/
 ├── app.ts                       # Punto de entrada: Express, middleware y arranque
+├── seed.ts                      # Script de seed (productos, histórico, admin, marca)
 ├── config/
 │   └── database.ts              # Conexión Sequelize a PostgreSQL
 ├── controllers/
@@ -96,6 +100,14 @@ src/
 ├── services/
 │   ├── cart.ts                    # computeTotals, computeShipping, SHIPPING_BY_TYPE
 │   └── forecast.ts                # Función pura portada del frontend
+├── utils/
+│   └── password.ts                # Helpers de hash/verificación de contraseñas (bcrypt)
 └── models/
-    └── Product.ts               # Modelo Product (bota | sombrero | ropa)
+    ├── Product.ts                # Modelo Product (bota | sombrero | ropa)
+    ├── ProductSize.ts            # Stock por talla (productId, size, stock), único por (productId, size)
+    ├── AdminUser.ts              # Usuarios del panel (id, name, email, passwordHash, role)
+    ├── Order.ts                  # Pedidos (totales + datos de envío)
+    ├── OrderItem.ts              # Renglones de pedido con precios congelados
+    ├── BrandSettings.ts          # Configuración de marca (singleton)
+    └── associations.ts           # Relaciones entre modelos (hasMany/belongsTo)
 ```
