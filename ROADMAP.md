@@ -36,7 +36,7 @@ Este backend usa **Express 5 + Sequelize 6 + PostgreSQL + TypeScript**.
 | `/health` | ✅ Hecho | [src/app.ts](src/app.ts) |
 | jsonwebtoken, bcrypt, zod, express-rate-limit, cloudinary, multer, sequelize-cli | 🔨 Instalados, **sin cablear** | `package.json` |
 | Carpetas `src/middlewares/`, `src/schemas/`, `src/services/` | 🔨 Vacías, listas | `src/` |
-| Auth (login, JWT, `requireAuth`) | ❌ Falta | Fase 2 |
+| Auth (login, JWT, `requireAuth`) | ✅ Hecho | [src/routes/auth.routes.ts](src/routes/auth.routes.ts) |
 | Modelos `Order`, `OrderItem`, `AdminUser`, `BrandSettings` | ❌ Falta | Fase 1 |
 | Seed de datos | ❌ Falta | Fase 1 |
 | CRUD admin de productos | ❌ Falta | Fase 3 |
@@ -111,12 +111,12 @@ Construye en este orden. Cada fase desbloquea la siguiente.
 **Por qué ahora:** el frontend ya tiene `/login` con `useMutation` mockeado esperando `api.post("/auth/login")`. Es el puente entre el front y todo el panel.
 
 **Tareas:**
-- [ ] `POST /api/auth/login` — valida con `loginSchema`, compara bcrypt, devuelve `{ token, user: { id, name, email, role } }`. `401` si credenciales inválidas.
-- [ ] `POST /api/auth/forgot-password` — devuelve `{ ok: true }` **siempre** (no revelar si el correo existe).
-- [ ] `GET /api/auth/me` `[auth]` — devuelve `{ user }` del token.
-- [ ] `requireAuth` real: verifica `Authorization: Bearer <token>`, decodifica JWT, adjunta `req.user`. `401` si inválido/expirado.
-- [ ] Check de rol (helper `requireRole('owner')`) para crear/eliminar admins.
-- [ ] Rate-limit (express-rate-limit) en `/api/auth/login` y `/forgot-password`.
+- [x] `POST /api/auth/login` — valida con `loginSchema`, compara bcrypt, devuelve `{ token, user: { id, name, email, role } }`. `401` si credenciales inválidas.
+- [x] `POST /api/auth/forgot-password` — devuelve `{ ok: true }` **siempre** (no revelar si el correo existe).
+- [x] `GET /api/auth/me` `[auth]` — devuelve `{ user }` del token.
+- [x] `requireAuth` real: verifica `Authorization: Bearer <token>`, decodifica JWT, adjunta `req.user`. `401` si inválido/expirado.
+- [x] Check de rol (helper `requireRole('owner')`) para crear/eliminar admins.
+- [x] Rate-limit (express-rate-limit) en `/api/auth/login` y `/forgot-password`.
 
 **Contrato exacto:**
 ```json
@@ -306,10 +306,10 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 - [x] Script de seed (productos, histórico, admin, brand)
 
 **Fase 2 — Auth**
-- [ ] `POST /api/auth/login`
-- [ ] `POST /api/auth/forgot-password`
-- [ ] `GET /api/auth/me`
-- [ ] `requireAuth` + `requireRole` + rate-limit
+- [x] `POST /api/auth/login`
+- [x] `POST /api/auth/forgot-password`
+- [x] `GET /api/auth/me`
+- [x] `requireAuth` + `requireRole` + rate-limit
 
 **Fase 3 — Catálogo admin**
 - [ ] `GET /api/admin/products`

@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
+import jsonwebtoken from "jsonwebtoken";
 import { AppError } from "./AppError";
 
 export interface AuthUser {
@@ -12,9 +13,6 @@ export interface AuthRequest extends Request {
   user?: AuthUser;
 }
 
-// Placeholder: solo valida que venga un Bearer token, sin verificar el JWT
-// todavía. La verificación real (jsonwebtoken.verify + adjuntar req.user)
-// se implementa en Fase 2.
 export const requireAuth = (
   req: AuthRequest,
   _res: Response,
@@ -26,11 +24,17 @@ export const requireAuth = (
     throw new AppError("No autenticado", 401);
   }
 
-  next();
+  const token = authHeader.slice("Bearer ".length);
+
+  try {
+    const decoded = jsonwebtoken.verify(token, process.env.JWT_SECRET!) as AuthUser;
+    req.user = decoded;
+    next();
+  } catch {
+    throw new AppError("Token inválido o expirado", 401);
+  }
 };
 
-// Placeholder: la validación de rol real depende de req.user, que aún no
-// se llena hasta que requireAuth verifique el JWT en Fase 2.
 export const requireRole =
   (...roles: AuthUser["role"][]) =>
   (req: AuthRequest, _res: Response, next: NextFunction): void => {
