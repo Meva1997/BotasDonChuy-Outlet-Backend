@@ -39,6 +39,15 @@ only expose rows with `visible: true` and exclude the `unitCost` field via Seque
 **When adding a new resource, create `*.routes.ts` + `*.controller.ts` and mount the router
 in `src/app.ts`.**
 
+**Auth** (`src/routes/auth.routes.ts`, `src/controllers/auth.controller.ts`): mounted at
+`/api/auth`. `POST /api/auth/login` validates the body with `loginSchema` (zod), looks up
+`AdminUser` by email, compares bcrypt hash, and returns `{ token, user }`. `POST /api/auth/forgot-password`
+always returns `{ ok: true }`. `GET /api/auth/me` is protected by `requireAuth` and returns
+the decoded `{ user }`. Both `/login` and `/forgot-password` are gated behind `authRateLimiter`
+(10 req / 15 min). `requireAuth` (`src/middlewares/requireAuth.ts`) extracts the Bearer token,
+verifies it with `JWT_SECRET`, and attaches `req.user: AuthUser`. `requireRole(...roles)`
+checks `req.user.role` and throws `403` if the role isn't in the list.
+
 **Error handling** (`src/middlewares/`): `asyncHandler` wraps async controller functions so
 thrown/rejected errors are forwarded to Express's error pipeline instead of needing try/catch
 in each controller. Controllers throw `AppError(message, statusCode)` for expected failures
@@ -75,10 +84,12 @@ populates all of the above from the frontend's mock data.
 - TypeScript runs in `strict` mode with decorators enabled (`experimentalDecorators`,
   `emitDecoratorMetadata`); source in `src/`, output in `dist/`.
 - Configuration comes exclusively from environment variables (`PORT`, `NODE_ENV`,
-  `DATABASE_URL`, `CORS_ORIGIN`, plus Cloudinary keys). `.env` is gitignored — never commit it.
-- Dependencies present but not yet wired in: `jsonwebtoken` + `bcrypt` (auth), `zod`
-  (validation), `cloudinary` + `multer` + `multer-storage-cloudinary` (image uploads),
-  `express-rate-limit`. Prefer these existing libraries when implementing those features.
+  `DATABASE_URL`, `CORS_ORIGIN`, `JWT_SECRET`, `JWT_EXPIRES_IN`, plus Cloudinary keys).
+  `.env` is gitignored — never commit it.
+- Dependencies wired in: `jsonwebtoken` + `bcrypt` (auth), `zod` (validation),
+  `express-rate-limit` (auth routes). Dependencies installed but not yet wired:
+  `cloudinary` + `multer` + `multer-storage-cloudinary` (image uploads — Fase 3+).
+  Prefer these existing libraries when implementing those features.
 
 ## Workflow
 

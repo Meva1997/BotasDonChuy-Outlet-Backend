@@ -241,7 +241,7 @@ async function seed() {
     }
     console.log(`🧾 ${ordersCreated} órdenes históricas creadas`);
 
-    const passwordHash = await hashPassword("password");
+    const passwordHash = await hashPassword("Queco144@");
     await AdminUser.create(
       {
         name: "Admin",

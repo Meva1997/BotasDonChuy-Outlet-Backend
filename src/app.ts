@@ -4,6 +4,7 @@ import helmet from "helmet";
 import dotenv from "dotenv";
 import { connectDB } from "./config/database";
 import productRoutes from "./routes/product.routes";
+import authRoutes from "./routes/auth.routes";
 import { errorHandler } from "./middlewares/errorHandler";
 import "./models/Product"; // register the model so sync() creates its table
 import "./models/ProductSize";
@@ -28,6 +29,7 @@ app.use(express.urlencoded({ extended: true }));
 
 //routes
 app.use("/api/products", productRoutes);
+app.use("/api/auth", authRoutes);
 
 // Verification route
 app.get("/health", (req, res) => {
