@@ -10,6 +10,7 @@ Construido con Express 5, TypeScript y Sequelize sobre PostgreSQL.
 - **ORM:** Sequelize 6 (PostgreSQL)
 - **Seguridad:** Helmet, CORS, express-rate-limit, bcrypt, JSON Web Tokens
 - **Validación:** Zod
+- **Documentación API:** Swagger UI (OpenAPI 3.0) vía swagger-jsdoc + swagger-ui-express
 - **Imágenes:** Cloudinary + multer / multer-storage-cloudinary
 - **Gestor de paquetes:** pnpm
 
@@ -83,6 +84,21 @@ Respuesta: `{ products, total, page, perPage, totalPages, availableSizes }`. `Pr
 (repetido por talla) y `Product.stock` (total) son campos `VIRTUAL` derivados de la tabla
 `ProductSize` cuando se incluye esa asociación.
 
+## Documentación API (Swagger)
+
+Con el servidor en marcha, la documentación interactiva está disponible en:
+
+- **Swagger UI:** [`http://localhost:4000/api/docs`](http://localhost:4000/api/docs) — explora y
+  prueba los endpoints desde el navegador.
+- **OpenAPI JSON:** [`http://localhost:4000/api/docs.json`](http://localhost:4000/api/docs.json) —
+  especificación cruda (útil para importar en Postman/Insomnia o validar).
+
+Para probar rutas protegidas: haz `POST /api/auth/login`, copia el `token`, pulsa **Authorize**
+(esquema `bearerAuth`) en la UI y pega el token; luego llama a `GET /api/auth/me`.
+
+La especificación base vive en `src/config/swagger.ts` y cada endpoint se documenta con
+anotaciones JSDoc `@openapi` sobre su router en `src/routes/*.ts`.
+
 ## Estructura
 
 ```
@@ -90,7 +106,8 @@ src/
 ├── app.ts                       # Punto de entrada: Express, middleware y arranque
 ├── seed.ts                      # Script de seed (productos, histórico, admin, marca)
 ├── config/
-│   └── database.ts              # Conexión Sequelize a PostgreSQL
+│   ├── database.ts              # Conexión Sequelize a PostgreSQL
+│   └── swagger.ts               # Spec OpenAPI base (swagger-jsdoc) servida en /api/docs
 ├── controllers/
 │   ├── product.controller.ts    # Lógica de productos (listar, obtener por id)
 │   └── auth.controller.ts       # Login, forgot-password, me
