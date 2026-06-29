@@ -35,6 +35,10 @@ NODE_ENV=development
 DATABASE_URL=postgres://usuario:password@host:5432/basededatos
 CORS_ORIGIN=http://localhost:3000
 
+# Auth
+JWT_SECRET=un_secreto_largo_y_seguro
+JWT_EXPIRES_IN=7d
+
 # Cloudinary
 CLOUDINARY_CLOUD_NAME=tu_cloud_name
 CLOUDINARY_API_KEY=tu_api_key
@@ -55,11 +59,14 @@ CLOUDINARY_API_SECRET=tu_api_secret
 
 ## Endpoints
 
-| Método | Ruta                 | Descripción                                        |
-| ------ | -------------------- | -------------------------------------------------- |
-| `GET`  | `/health`            | Healthcheck (status + timestamp)                   |
-| `GET`  | `/api/products`      | Lista productos visibles (paginados y filtrables)  |
-| `GET`  | `/api/products/:id`  | Devuelve un producto visible por `id`              |
+| Método   | Ruta                          | Auth | Descripción                                        |
+| -------- | ----------------------------- | ---- | -------------------------------------------------- |
+| `GET`    | `/health`                     | —    | Healthcheck (status + timestamp)                   |
+| `GET`    | `/api/products`               | —    | Lista productos visibles (paginados y filtrables)  |
+| `GET`    | `/api/products/:id`           | —    | Devuelve un producto visible por `id`              |
+| `POST`   | `/api/auth/login`             | —    | Login con email/password; devuelve JWT y usuario   |
+| `POST`   | `/api/auth/forgot-password`   | —    | Solicita recuperación de contraseña (`{ ok: true }`) |
+| `GET`    | `/api/auth/me`                | ✅   | Devuelve el usuario autenticado desde el token JWT |
 
 ### `GET /api/products`
 
@@ -85,14 +92,17 @@ src/
 ├── config/
 │   └── database.ts              # Conexión Sequelize a PostgreSQL
 ├── controllers/
-│   └── product.controller.ts    # Lógica de productos (listar, obtener por id)
+│   ├── product.controller.ts    # Lógica de productos (listar, obtener por id)
+│   └── auth.controller.ts       # Login, forgot-password, me
 ├── middlewares/
 │   ├── AppError.ts               # Clase de error con status code para respuestas controladas
 │   ├── asyncHandler.ts            # Wrapper para controllers async (evita try/catch repetido)
 │   ├── errorHandler.ts            # Middleware centralizado de manejo de errores
-│   └── requireAuth.ts             # Placeholder de auth (JWT real llega en Fase 2)
+│   ├── rateLimit.ts               # authRateLimiter: 10 req / 15 min en rutas de auth
+│   └── requireAuth.ts             # Verifica JWT Bearer, adjunta req.user; requireRole helper
 ├── routes/
-│   └── product.routes.ts        # Rutas /api/products
+│   ├── product.routes.ts        # Rutas /api/products
+│   └── auth.routes.ts           # Rutas /api/auth
 ├── schemas/
 │   ├── auth.ts                   # Esquema zod de login
 │   ├── checkout.ts                # Esquema zod de envío/checkout
