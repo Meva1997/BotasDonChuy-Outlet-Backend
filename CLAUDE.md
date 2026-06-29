@@ -20,7 +20,8 @@ for the "Botas Don Chuy Outlet" store (products of type `bota`, `sombrero`, or `
 
 **Startup flow** (`src/app.ts`): loads env via `dotenv` → creates the Express app → calls
 `connectDB()` → registers global middleware (`helmet`, `cors` with `CORS_ORIGIN`, JSON and
-urlencoded body parsers) → exposes `GET /health` → listens on `PORT` (default `4000`).
+urlencoded body parsers) → mounts Swagger UI at `/api/docs` (+ raw spec at `/api/docs.json`) →
+mounts the routers → exposes `GET /health` → listens on `PORT` (default `4000`).
 The app `export default`s for testability.
 
 **Database** (`src/config/database.ts`): a single shared `sequelize` instance built from
@@ -38,6 +39,16 @@ only expose rows with `visible: true` and exclude the `unitCost` field via Seque
 `[1, totalPages]`) in memory after the query, and also returns `availableSizes`.
 **When adding a new resource, create `*.routes.ts` + `*.controller.ts` and mount the router
 in `src/app.ts`.**
+
+**API docs** (`src/config/swagger.ts`): `swagger-jsdoc` builds an OpenAPI 3.0 spec from a base
+`definition` (info, `servers`, `bearerAuth` security scheme, reusable `components.schemas` like
+`Product`, `LoginInput`, `Error`) plus JSDoc `@openapi` annotations read from the `apis` globs
+(`./src/routes/*.ts` + `./src/app.ts` in dev, and the `./dist/...` equivalents for the compiled
+build — both run with cwd at the backend root). `src/app.ts` serves the interactive UI with
+`swagger-ui-express` at `/api/docs` (no `NODE_ENV` gate — exposed in all environments) and the
+raw JSON at `/api/docs.json`. **When adding a new resource, document each endpoint with an
+`@openapi` JSDoc block above its `router.<method>(...)` in `*.routes.ts`, referencing shared
+schemas via `$ref: '#/components/schemas/...'` (add new schemas to `src/config/swagger.ts`).**
 
 **Auth** (`src/routes/auth.routes.ts`, `src/controllers/auth.controller.ts`): mounted at
 `/api/auth`. `POST /api/auth/login` validates the body with `loginSchema` (zod), looks up
@@ -87,12 +98,20 @@ populates all of the above from the frontend's mock data.
   `DATABASE_URL`, `CORS_ORIGIN`, `JWT_SECRET`, `JWT_EXPIRES_IN`, plus Cloudinary keys).
   `.env` is gitignored — never commit it.
 - Dependencies wired in: `jsonwebtoken` + `bcrypt` (auth), `zod` (validation),
-  `express-rate-limit` (auth routes). Dependencies installed but not yet wired:
-  `cloudinary` + `multer` + `multer-storage-cloudinary` (image uploads — Fase 3+).
+  `express-rate-limit` (auth routes), `swagger-jsdoc` + `swagger-ui-express` (API docs).
+  Dependencies installed but not yet wired: `cloudinary` + `multer` +
+  `multer-storage-cloudinary` (image uploads — Fase 3+).
   Prefer these existing libraries when implementing those features.
+- `pnpm-workspace.yaml` holds the pnpm `allowBuilds` map (decides which dependency lifecycle
+  scripts may run, e.g. `bcrypt: true`, `@scarf/scarf: false`). pnpm v11 errors on undecided
+  build scripts, so new deps with install scripts must be resolved via `pnpm approve-builds`.
 
 ## Workflow
 
 - **Before pushing to GitHub** (any commit/push the user requests): always verify that
   `README.md` and this `CLAUDE.md` are up to date with the changes being committed, and update
   them if needed, before running the commit/push.
+- **Whenever a commit/push adds or changes routes** (new `*.routes.ts`, a new `router.<method>`,
+  or a changed path/params/response): the Swagger documentation MUST be written/updated first —
+  add an `@openapi` JSDoc block for each new or changed endpoint (and any new
+  `components.schemas` in `src/config/swagger.ts`) — before running the commit and push.

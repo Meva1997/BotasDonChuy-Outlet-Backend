@@ -2,7 +2,9 @@ import express, { type Express } from "express";
 import cors from "cors";
 import helmet from "helmet";
 import dotenv from "dotenv";
+import swaggerUi from "swagger-ui-express";
 import { connectDB } from "./config/database";
+import { swaggerSpec } from "./config/swagger";
 import productRoutes from "./routes/product.routes";
 import authRoutes from "./routes/auth.routes";
 import { errorHandler } from "./middlewares/errorHandler";
@@ -27,10 +29,37 @@ app.use(cors({ origin: process.env.CORS_ORIGIN }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// API docs (Swagger UI + raw OpenAPI JSON)
+app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+app.get("/api/docs.json", (req, res) => {
+  res.json(swaggerSpec);
+});
+
 //routes
 app.use("/api/products", productRoutes);
 app.use("/api/auth", authRoutes);
 
+/**
+ * @openapi
+ * /health:
+ *   get:
+ *     summary: Healthcheck del servicio
+ *     tags: [Health]
+ *     responses:
+ *       200:
+ *         description: El servicio está operativo.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   example: ok
+ *                 timestamp:
+ *                   type: string
+ *                   format: date-time
+ */
 // Verification route
 app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
