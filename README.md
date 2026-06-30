@@ -72,6 +72,8 @@ CLOUDINARY_API_SECRET=tu_api_secret
 | `POST`   | `/api/admin/products`         | ✅   | Crea un producto (con tallas/stock)                |
 | `PUT`    | `/api/admin/products/:id`     | ✅   | Actualiza parcialmente un producto                 |
 | `DELETE` | `/api/admin/products/:id`     | ✅   | Elimina un producto (soft-delete si tiene pedidos) |
+| `POST`   | `/api/orders`                 | —    | Checkout: crea un pedido desde el carrito          |
+| `POST`   | `/api/webhooks/stripe`        | —    | Webhook de pagos (stub, listo para Stripe en Fase 8) |
 
 ### `GET /api/products`
 
@@ -99,6 +101,41 @@ de números (cada repetición = una unidad de stock para esa talla) y se materia
 **hard-delete** (con sus `ProductSize` por CASCADE) si no lo está — la respuesta indica
 `{ ok, softDeleted }`.
 
+### `POST /api/orders` (checkout público)
+
+Convierte el carrito del cliente en un pedido persistido. Body:
+`{ items: [{ productId, size, quantity }], customer, shippingCarrier? }`, validado con
+`createOrderSchema` (zod). El backend es la **autoridad de precios y stock**:
+
+- **Recalcula los totales** (`subtotal`, `savings`, `shipping`, `total`) en el servidor con el
+  service `cart` — el cliente nunca envía montos.
+- **Verifica y descuenta el stock por talla de forma atómica** dentro de una transacción, con un
+  `UPDATE ... SET stock = stock - N WHERE stock >= N`. Si dos clientes compran la última unidad
+  casi al mismo tiempo, solo uno recibe `201`; el otro recibe `409` y esa talla queda en stock 0.
+  Cualquier fallo a media transacción revierte todo (sin descuentos parciales).
+- **Congela los precios** (`unitOriginalPrice`, `unitSalePrice`, `unitCost`) y el nombre en cada
+  `OrderItem`, para que el histórico no cambie si el producto se reprecia. El `unitCost` (costo
+  interno) se guarda congelado pero **se excluye de la respuesta pública** — solo lo ven las rutas
+  admin autenticadas.
+- Renglones duplicados del mismo `(productId, size)` se agregan; el descuento se hace en orden
+  determinista por `(productId, size)` para evitar deadlocks entre checkouts concurrentes.
+- **Topes anti-abuso** (zod): máximo `99` unidades por artículo y `50` artículos por pedido (`400`
+  si se exceden). El límite **real** de existencias por talla lo impone el descuento atómico: pedir
+  más unidades de las que hay en esa talla (o una talla inexistente) devuelve `409`.
+
+La orden nace en `status: "pending"` / `paymentStatus: "unpaid"`. Respuesta `201`:
+`{ order, clientSecret }` (`clientSecret` es `null` hasta activar Stripe en Fase 8). Errores:
+`400` (body/cliente inválido), `409` (sin stock o producto no disponible, con el ítem en el mensaje).
+
+### Pagos (seam de Stripe, Fase 8)
+
+El cobro real con Stripe está **cableado pero inerte**: `src/services/payment.service.ts` define
+`createPaymentIntentForOrder` (hoy devuelve `null`) y `markOrderPaidFromWebhook`, y
+`POST /api/webhooks/stripe` es un stub que marca la orden como `paid` por `paymentIntentId`. Al
+activar Stripe se rellenan esas funciones, se verifica la firma del webhook sobre el cuerpo crudo
+(`express.raw`) y se libera el stock de órdenes `pending` abandonadas. El paquete `stripe` aún no
+se instala.
+
 ## Documentación API (Swagger)
 
 Con el servidor en marcha, la documentación interactiva está disponible en:
@@ -125,7 +162,8 @@ src/
 │   └── swagger.ts               # Spec OpenAPI base (swagger-jsdoc) servida en /api/docs
 ├── controllers/
 │   ├── product.controller.ts    # Lógica de productos (listar, obtener por id)
-│   └── auth.controller.ts       # Login, forgot-password, me
+│   ├── auth.controller.ts       # Login, forgot-password, me
+│   └── order.controller.ts      # Checkout (POST /api/orders) + webhook de pagos
 ├── middlewares/
 │   ├── AppError.ts               # Clase de error con status code para respuestas controladas
 │   ├── asyncHandler.ts            # Wrapper para controllers async (evita try/catch repetido)
@@ -135,13 +173,17 @@ src/
 ├── routes/
 │   ├── product.routes.ts        # Rutas /api/products
 │   ├── adminProduct.routes.ts   # Rutas /api/admin/products (CRUD admin, requireAuth)
-│   └── auth.routes.ts           # Rutas /api/auth
+│   ├── auth.routes.ts           # Rutas /api/auth
+│   ├── order.routes.ts          # Ruta /api/orders (checkout público)
+│   └── webhook.routes.ts        # Ruta /api/webhooks/stripe (stub de pagos)
 ├── schemas/
 │   ├── auth.ts                   # Esquema zod de login
 │   ├── checkout.ts                # Esquema zod de envío/checkout
 │   └── product.ts                 # Esquema zod de producto
 ├── services/
 │   ├── cart.ts                    # computeTotals, computeShipping, SHIPPING_BY_TYPE
+│   ├── orders.service.ts          # Checkout: stock atómico, totales, precios congelados
+│   ├── payment.service.ts         # Seam de Stripe (inerte hasta Fase 8)
 │   └── forecast.ts                # Función pura portada del frontend
 ├── utils/
 │   └── password.ts                # Helpers de hash/verificación de contraseñas (bcrypt)

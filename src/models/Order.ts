@@ -18,11 +18,15 @@ export interface OrderAttributes {
   postalCode: string;
   references: string;
   shippingCarrier: string;
+  // Seam de pagos (Stripe llega en Fase 8). Nullable hoy: la orden nace en
+  // status "pending" / paymentStatus "unpaid" y el PaymentIntent aún no existe.
+  paymentIntentId: string | null;
+  paymentStatus: "unpaid" | "processing" | "paid" | "failed";
 }
 
 interface OrderCreationAttributes extends Optional<
   OrderAttributes,
-  "id" | "references" | "shippingCarrier"
+  "id" | "references" | "shippingCarrier" | "paymentIntentId" | "paymentStatus"
 > {}
 
 export class Order
@@ -45,6 +49,8 @@ export class Order
   declare postalCode: string;
   declare references: string;
   declare shippingCarrier: string;
+  declare paymentIntentId: string | null;
+  declare paymentStatus: "unpaid" | "processing" | "paid" | "failed";
 }
 
 Order.init(
@@ -136,6 +142,16 @@ Order.init(
     shippingCarrier: {
       type: DataTypes.STRING,
       allowNull: true,
+    },
+    paymentIntentId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      defaultValue: null,
+    },
+    paymentStatus: {
+      type: DataTypes.ENUM("unpaid", "processing", "paid", "failed"),
+      allowNull: false,
+      defaultValue: "unpaid",
     },
   },
   {
