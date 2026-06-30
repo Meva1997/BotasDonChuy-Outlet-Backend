@@ -17,6 +17,7 @@ const options: Options = {
     ],
     tags: [
       { name: "Products", description: "Catálogo público de productos" },
+      { name: "Admin - Products", description: "CRUD de productos (requiere auth)" },
       { name: "Auth", description: "Autenticación de administradores" },
       { name: "Health", description: "Estado del servicio" },
     ],
@@ -151,6 +152,34 @@ const options: Options = {
             user: { $ref: "#/components/schemas/AuthUser" },
           },
         },
+        ProductInput: {
+          type: "object",
+          required: [
+            "name", "originalPrice", "salePrice", "unitCost",
+            "type", "sizes", "weightKg", "lengthCm", "widthCm", "heightCm",
+          ],
+          properties: {
+            name: { type: "string", example: "Bota vaquera de cuero" },
+            description: { type: "string", nullable: true },
+            originalPrice: { type: "number", format: "float", example: 1899 },
+            salePrice: { type: "number", format: "float", example: 1499 },
+            unitCost: { type: "number", format: "float", example: 800 },
+            type: { type: "string", enum: ["bota", "sombrero", "ropa"] },
+            sizes: {
+              oneOf: [
+                { type: "string", description: "Tallas separadas por coma, repetidas para indicar stock", example: "25, 25, 26" },
+                { type: "array", items: { type: "integer" }, example: [25, 25, 26] },
+              ],
+            },
+            imageSrc: { type: "string", nullable: true },
+            code: { type: "string", nullable: true, example: "BTA-001" },
+            weightKg: { type: "number", format: "float", example: 1.2 },
+            lengthCm: { type: "number", format: "float", example: 30 },
+            widthCm: { type: "number", format: "float", example: 12 },
+            heightCm: { type: "number", format: "float", example: 35 },
+            visible: { type: "boolean", default: true },
+          },
+        },
         Error: {
           type: "object",
           properties: {
@@ -167,6 +196,20 @@ const options: Options = {
               },
             },
           },
+        },
+      },
+      responses: {
+        Unauthorized: {
+          description: "Token ausente o inválido.",
+          content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } },
+        },
+        NotFound: {
+          description: "Recurso no encontrado.",
+          content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } },
+        },
+        ValidationError: {
+          description: "Error de validación (campos inválidos).",
+          content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } },
         },
       },
     },

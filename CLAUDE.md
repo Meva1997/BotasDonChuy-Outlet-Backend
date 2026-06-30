@@ -37,8 +37,21 @@ only expose rows with `visible: true` and exclude the `unitCost` field via Seque
 `attributes: { exclude: [...] }`. `GET /api/products` does filtering (`categoria` → `type`,
 `talla` → membership in `sizes`) and pagination (`page`/`perPage`, page clamped to
 `[1, totalPages]`) in memory after the query, and also returns `availableSizes`.
+The admin CRUD lives in `src/routes/adminProduct.routes.ts` (mounted at `/api/admin/products`,
+`router.use(requireAuth)` so every route needs a JWT) and reuses `product.controller.ts`
+(`adminGetProducts`/`adminCreateProduct`/`adminUpdateProduct`/`adminDeleteProduct`). Unlike the
+public reads it exposes non-visible rows and `unitCost`. Create/update validate the body with
+`productSchema`/`productUpdateSchema` (zod) and write tallas/stock to `ProductSize` inside a
+`sequelize.transaction`; `sizes` accepts a `"25,25,26"` string or a number array (each repeat =
+one stock unit). `DELETE` soft-deletes (`deletedAt` + `visible:false`) when the product is
+referenced by an `OrderItem`, otherwise hard-deletes (its `ProductSize` rows cascade).
 **When adding a new resource, create `*.routes.ts` + `*.controller.ts` and mount the router
 in `src/app.ts`.**
+
+Because the seed inserts rows with explicit `id`s, Postgres SERIAL sequences are left behind;
+`src/seed.ts` resyncs each one (`setval(pg_get_serial_sequence(table,'id'), MAX(id))`) at the
+end of the transaction so later `id DEFAULT` inserts (e.g. `POST /api/admin/products`) don't
+collide with seeded ids.
 
 **API docs** (`src/config/swagger.ts`): `swagger-jsdoc` builds an OpenAPI 3.0 spec from a base
 `definition` (info, `servers`, `bearerAuth` security scheme, reusable `components.schemas` like

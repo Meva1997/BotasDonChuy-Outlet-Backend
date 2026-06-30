@@ -7,6 +7,7 @@ import { connectDB } from "./config/database";
 import { swaggerSpec } from "./config/swagger";
 import productRoutes from "./routes/product.routes";
 import authRoutes from "./routes/auth.routes";
+import adminProductRoutes from "./routes/adminProduct.routes";
 import { errorHandler } from "./middlewares/errorHandler";
 import "./models/Product"; // register the model so sync() creates its table
 import "./models/ProductSize";
@@ -38,6 +39,7 @@ app.get("/api/docs.json", (req, res) => {
 //routes
 app.use("/api/products", productRoutes);
 app.use("/api/auth", authRoutes);
+app.use("/api/admin/products", adminProductRoutes);
 
 /**
  * @openapi
