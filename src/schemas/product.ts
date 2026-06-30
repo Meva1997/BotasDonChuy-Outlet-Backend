@@ -29,7 +29,10 @@ const productBaseSchema = z.object({
   type: z.enum(["bota", "sombrero", "ropa"], {
     message: "Selecciona una categoría válida",
   }),
-  sizes: z.union([sizesFromString, z.array(z.number().int().positive())]),
+  sizes: z.union([
+    sizesFromString,
+    z.array(z.number().int().positive()).min(1, "Agrega al menos una talla"),
+  ]),
   imageSrc: z.string().trim().optional().or(z.literal("")),
   code: z.string().trim().max(40).optional().or(z.literal("")),
   weightKg: z.number().nonnegative(),

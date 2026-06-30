@@ -8,8 +8,10 @@ export interface ProductSizeAttributes {
   stock: number;
 }
 
-interface ProductSizeCreationAttributes
-  extends Optional<ProductSizeAttributes, "id"> {}
+interface ProductSizeCreationAttributes extends Optional<
+  ProductSizeAttributes,
+  "id"
+> {}
 
 export class ProductSize
   extends Model<ProductSizeAttributes, ProductSizeCreationAttributes>

@@ -134,10 +134,10 @@ POST /api/auth/login  →  { "token": "<jwt>", "user": { "id": "...", "name": "D
 **Por qué ahora:** ya tienes auth para protegerlo y el modelo `Product` corregido. Reemplaza el flujo de `ProductForm.tsx` / `ProductSection.tsx`.
 
 **Tareas:**
-- [ ] `GET /api/admin/products` `[auth]` — todos los productos (incluye `visible=false` y `unitCost`).
-- [ ] `POST /api/admin/products` `[auth]` — valida con `productSchema`; parsea `sizes` string `"25, 26"` → `int[]`; calcula `discountPercent`; valida `salePrice ≤ originalPrice`.
-- [ ] `PUT /api/admin/products/:id` `[auth]` — update parcial.
-- [ ] `DELETE /api/admin/products/:id` `[auth]` — considerar soft-delete si hay pedidos que lo referencian.
+- [x] `GET /api/admin/products` `[auth]` — todos los productos (incluye `visible=false` y `unitCost`).
+- [x] `POST /api/admin/products` `[auth]` — valida con `productSchema`; parsea `sizes` string `"25, 26"` → `int[]`; calcula `discountPercent`; valida `salePrice ≤ originalPrice`.
+- [x] `PUT /api/admin/products/:id` `[auth]` — update parcial.
+- [x] `DELETE /api/admin/products/:id` `[auth]` — soft-delete si hay pedidos que lo referencian; hard-delete (con CASCADE en ProductSize) si no.
 
 > **Nota:** el `ProductForm` del front aún **no captura** `unitCost` ni dimensiones. Al cablear, hay que agregar esos inputs al form o asignar defaults por categoría — si no, los márgenes/reposición salen mal.
 
@@ -312,10 +312,10 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 - [x] `requireAuth` + `requireRole` + rate-limit
 
 **Fase 3 — Catálogo admin**
-- [ ] `GET /api/admin/products`
-- [ ] `POST /api/admin/products`
-- [ ] `PUT /api/admin/products/:id`
-- [ ] `DELETE /api/admin/products/:id`
+- [x] `GET /api/admin/products`
+- [x] `POST /api/admin/products`
+- [x] `PUT /api/admin/products/:id`
+- [x] `DELETE /api/admin/products/:id`
 
 **Fase 4 — Checkout**
 - [ ] `POST /api/orders` (recalcular totales, stock por talla, congelar precios)

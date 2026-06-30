@@ -258,6 +258,29 @@ async function seed() {
       { transaction: t },
     );
     console.log("🏷️  BrandSettings creado");
+
+    // Las filas anteriores se insertan con `id` explícito, lo que en Postgres
+    // NO avanza la secuencia SERIAL de cada tabla. Sin esto, el primer INSERT
+    // posterior con `id DEFAULT` (p. ej. POST /api/admin/products) reusaría ids
+    // ya ocupados y fallaría con UniqueConstraintError. Resincronizamos cada
+    // secuencia a MAX(id) para que el siguiente id sea MAX(id)+1.
+    const tablesWithExplicitIds = [
+      "products",
+      "product_sizes",
+      "orders",
+      "order_items",
+      "brand_settings",
+    ];
+    for (const table of tablesWithExplicitIds) {
+      await sequelize.query(
+        `SELECT setval(
+           pg_get_serial_sequence(:table, 'id'),
+           (SELECT COALESCE(MAX(id), 1) FROM "${table}")
+         )`,
+        { replacements: { table }, transaction: t },
+      );
+    }
+    console.log("🔢 Secuencias de id resincronizadas");
   });
 
   console.log("✅ Seed completado");

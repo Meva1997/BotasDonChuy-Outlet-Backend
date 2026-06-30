@@ -20,11 +20,12 @@ export interface ProductAttributes {
   widthCm: number;
   heightCm: number;
   visible: boolean;
+  deletedAt?: Date | null;
 }
 
 interface ProductCreationAttributes extends Optional<
   ProductAttributes,
-  "id" | "description" | "imageSrc" | "code" | "discountPercent" | "stock" | "sizes"
+  "id" | "description" | "imageSrc" | "code" | "discountPercent" | "stock" | "sizes" | "deletedAt"
 > {}
 
 export class Product
@@ -48,6 +49,7 @@ export class Product
   declare widthCm: number;
   declare heightCm: number;
   declare visible: boolean;
+  declare deletedAt?: Date | null;
   declare productSizes?: ProductSize[];
 
   toJSON() {
@@ -162,6 +164,11 @@ Product.init(
       type: DataTypes.BOOLEAN,
       allowNull: false,
       defaultValue: true,
+    },
+    deletedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      defaultValue: null,
     },
   },
   {

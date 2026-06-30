@@ -68,6 +68,10 @@ CLOUDINARY_API_SECRET=tu_api_secret
 | `POST`   | `/api/auth/login`             | —    | Login con email/password; devuelve JWT y usuario   |
 | `POST`   | `/api/auth/forgot-password`   | —    | Solicita recuperación de contraseña (`{ ok: true }`) |
 | `GET`    | `/api/auth/me`                | ✅   | Devuelve el usuario autenticado desde el token JWT |
+| `GET`    | `/api/admin/products`         | ✅   | Lista **todos** los productos (incl. no visibles y `unitCost`) |
+| `POST`   | `/api/admin/products`         | ✅   | Crea un producto (con tallas/stock)                |
+| `PUT`    | `/api/admin/products/:id`     | ✅   | Actualiza parcialmente un producto                 |
+| `DELETE` | `/api/admin/products/:id`     | ✅   | Elimina un producto (soft-delete si tiene pedidos) |
 
 ### `GET /api/products`
 
@@ -83,6 +87,17 @@ Solo expone productos con `visible: true` y oculta el campo `unitCost`.
 Respuesta: `{ products, total, page, perPage, totalPages, availableSizes }`. `Product.sizes`
 (repetido por talla) y `Product.stock` (total) son campos `VIRTUAL` derivados de la tabla
 `ProductSize` cuando se incluye esa asociación.
+
+### `/api/admin/products` (CRUD admin, requiere JWT)
+
+Todas las rutas están protegidas con `requireAuth`. A diferencia de `/api/products`, exponen
+también los productos no visibles y el campo `unitCost`. El body de `POST`/`PUT` se valida con
+zod (`productSchema` / `productUpdateSchema`): `sizes` acepta un string `"25,25,26"` o un array
+de números (cada repetición = una unidad de stock para esa talla) y se materializa en filas de
+`ProductSize`. `salePrice` no puede superar a `originalPrice`. El `DELETE` hace **soft-delete**
+(`deletedAt` + `visible: false`) si el producto está referenciado por algún pedido, o
+**hard-delete** (con sus `ProductSize` por CASCADE) si no lo está — la respuesta indica
+`{ ok, softDeleted }`.
 
 ## Documentación API (Swagger)
 
@@ -119,6 +134,7 @@ src/
 │   └── requireAuth.ts             # Verifica JWT Bearer, adjunta req.user; requireRole helper
 ├── routes/
 │   ├── product.routes.ts        # Rutas /api/products
+│   ├── adminProduct.routes.ts   # Rutas /api/admin/products (CRUD admin, requireAuth)
 │   └── auth.routes.ts           # Rutas /api/auth
 ├── schemas/
 │   ├── auth.ts                   # Esquema zod de login
