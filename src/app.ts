@@ -8,6 +8,8 @@ import { swaggerSpec } from "./config/swagger";
 import productRoutes from "./routes/product.routes";
 import authRoutes from "./routes/auth.routes";
 import adminProductRoutes from "./routes/adminProduct.routes";
+import orderRoutes from "./routes/order.routes";
+import webhookRoutes from "./routes/webhook.routes";
 import { errorHandler } from "./middlewares/errorHandler";
 import "./models/Product"; // register the model so sync() creates its table
 import "./models/ProductSize";
@@ -40,6 +42,11 @@ app.get("/api/docs.json", (req, res) => {
 app.use("/api/products", productRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/admin/products", adminProductRoutes);
+app.use("/api/orders", orderRoutes); // checkout público
+// Webhook de pagos. Fase 8: el webhook real de Stripe necesita el cuerpo crudo
+// para verificar la firma, montando express.raw({ type: "application/json" })
+// en esta ruta ANTES del express.json() global. El stub actual usa JSON.
+app.use("/api/webhooks", webhookRoutes);
 
 /**
  * @openapi

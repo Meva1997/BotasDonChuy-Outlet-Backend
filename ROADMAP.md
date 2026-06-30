@@ -40,7 +40,7 @@ Este backend usa **Express 5 + Sequelize 6 + PostgreSQL + TypeScript**.
 | Modelos `Order`, `OrderItem`, `AdminUser`, `BrandSettings` | ❌ Falta | Fase 1 |
 | Seed de datos | ❌ Falta | Fase 1 |
 | CRUD admin de productos | ❌ Falta | Fase 3 |
-| Checkout (`POST /api/orders`) | ❌ Falta | Fase 4 |
+| Checkout (`POST /api/orders`) | ✅ Hecho | [src/services/orders.service.ts](src/services/orders.service.ts) |
 | Dashboard, reportes, marca, usuarios | ❌ Falta | Fases 5–7 |
 | Lógica `forecast` / `cart` portada al backend | ❌ Falta | Fase 0 |
 
@@ -152,12 +152,18 @@ POST /api/auth/login  →  { "token": "<jwt>", "user": { "id": "...", "name": "D
 **Por qué ahora:** cierra el ciclo de compra del storefront. Reusa el `cart` service de la Fase 0 y los modelos `Order`/`OrderItem` de la Fase 1.
 
 **Tareas:**
-- [ ] `POST /api/orders` (público) — body `{ items: [{ productId, size, quantity }], customer, shippingCarrier }`.
-  - [ ] Validar `customer` con `shippingSchema`.
-  - [ ] Cargar cada `Product`, **verificar stock por talla** contra la fila `ProductSize` correspondiente.
-  - [ ] **Recalcular** `subtotal`, `savings`, `shipping`, `total` con el service de cart (NUNCA confiar en montos del cliente).
-  - [ ] **Congelar** precios en cada `OrderItem`, descontar stock **atómicamente** sobre `ProductSize.stock` (`UPDATE ... SET stock = stock - 1 WHERE stock > 0`, dentro de una transacción), persistir.
-  - [ ] `409` con detalle del ítem si no hay stock; `400` si validación falla; `201` con `{ order }`.
+- [x] `POST /api/orders` (público) — body `{ items: [{ productId, size, quantity }], customer, shippingCarrier }`.
+  - [x] Validar `customer` con `shippingSchema` (vía `createOrderSchema`).
+  - [x] Cargar cada `Product`, **verificar stock por talla** contra la fila `ProductSize` correspondiente.
+  - [x] **Recalcular** `subtotal`, `savings`, `shipping`, `total` con el service de cart (NUNCA confiar en montos del cliente).
+  - [x] **Congelar** precios en cada `OrderItem`, descontar stock **atómicamente** sobre `ProductSize.stock` (`UPDATE ... SET stock = stock - N WHERE stock >= N`, dentro de una transacción), persistir.
+  - [x] `409` con detalle del ítem si no hay stock; `400` si validación falla; `201` con `{ order, clientSecret }`.
+
+> **Stripe-ready (Fase 8 cableado):** la orden nace en `pending` y el stock se **reserva** al crearla.
+> Columnas `paymentIntentId`/`paymentStatus` en `Order`, `src/services/payment.service.ts` (interfaz
+> de Stripe, hoy no-op) y un stub `POST /api/webhooks/stripe` quedan listos pero inertes. Diferido a
+> Fase 8: instalar `stripe`, cobro real, verificación de firma del webhook y liberación de stock de
+> órdenes `pending` abandonadas.
 
 **Cómo verificar:** `POST /api/orders` con 1 ítem → `201`, totales correctos, stock descontado en la BD. Forzar stock insuficiente → `409`.
 
@@ -318,7 +324,7 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 - [x] `DELETE /api/admin/products/:id`
 
 **Fase 4 — Checkout**
-- [ ] `POST /api/orders` (recalcular totales, stock por talla, congelar precios)
+- [x] `POST /api/orders` (recalcular totales, stock por talla, congelar precios)
 
 **Fase 5 — Dashboard**
 - [ ] `GET /api/admin/dashboard`

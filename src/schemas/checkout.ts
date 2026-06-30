@@ -74,11 +74,22 @@ export type ShippingInput = z.infer<typeof shippingSchema>;
 export const orderItemSchema = z.object({
   productId: z.number().int().positive(),
   size: z.number().int().positive(),
-  quantity: z.number().int().positive(),
+  // Tope duro por renglón para evitar abusos. El límite REAL de existencias por
+  // talla se valida en el servidor al descontar el stock de forma atómica
+  // (orders.service.ts): si solo hay 1 unidad de esa talla, pedir más devuelve
+  // 409 porque la talla no tiene ese stock. Este `.max(99)` es solo un techo.
+  quantity: z
+    .number()
+    .int()
+    .positive()
+    .max(99, "Máximo 99 unidades por artículo"),
 });
 
 export const createOrderSchema = z.object({
-  items: z.array(orderItemSchema).min(1, "El pedido debe tener al menos un artículo"),
+  items: z
+    .array(orderItemSchema)
+    .min(1, "El pedido debe tener al menos un artículo")
+    .max(50, "Demasiados artículos en el pedido"),
   customer: shippingSchema,
   shippingCarrier: z.string().trim().optional(),
 });

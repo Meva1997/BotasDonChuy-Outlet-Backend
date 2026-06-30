@@ -72,6 +72,31 @@ the decoded `{ user }`. Both `/login` and `/forgot-password` are gated behind `a
 verifies it with `JWT_SECRET`, and attaches `req.user: AuthUser`. `requireRole(...roles)`
 checks `req.user.role` and throws `403` if the role isn't in the list.
 
+**Checkout** (`src/routes/order.routes.ts`, `src/controllers/order.controller.ts`,
+`src/services/orders.service.ts`): `POST /api/orders` is **public** (mounted at `/api/orders`).
+The body `{ items: [{ productId, size, quantity }], customer, shippingCarrier? }` is validated with
+`createOrderSchema` (zod, `src/schemas/checkout.ts`). `orders.service.createOrder` does everything
+inside a single `sequelize.transaction`: it **aggregates** duplicate `(productId, size)` lines,
+processes them in deterministic `(productId, size)` order (deadlock avoidance), and for each line
+runs an **atomic** `ProductSize.update({ stock: literal('stock - N') }, { where: { …, stock: { [Op.gte]: N } } })`
+— if `affectedCount === 0` it throws `AppError(409)`, so concurrent buyers of the last unit get
+exactly one `201` and one `409` (the size drops to stock 0). Totals are **recomputed server-side**
+with the `cart` service (the client never sends amounts), and prices are **frozen** into each
+`OrderItem` (`unitOriginalPrice`/`unitSalePrice`/`unitCost`/`nameSnapshot`). `createOrderSchema`
+caps `quantity` at 99/item and `items` at 50/order (the real per-size limit is enforced by the
+atomic decrement → `409`). `unitCost` is frozen in the row but **excluded from the public response**
+(the order is reloaded with `attributes: { exclude: ['unitCost'] }` on `items`), matching the rule
+that cost fields only appear on authenticated admin routes. Orders are created with
+`status: "pending"` / `paymentStatus: "unpaid"`; the response is `{ order, clientSecret }`.
+
+**Payments / Stripe seam** (Fase 8, wired but inert): `src/services/payment.service.ts` exposes
+`createPaymentIntentForOrder` (returns `{ clientSecret: null, paymentIntentId: null }` today) and
+`markOrderPaidFromWebhook`. `Order` has nullable `paymentIntentId` + `paymentStatus`
+(`unpaid|processing|paid|failed`) columns for this. `POST /api/webhooks/stripe`
+(`src/routes/webhook.routes.ts`) is a stub that flips the matching order to `paid`. The `stripe`
+package is **not installed**; activating it (real PaymentIntent, webhook signature verification via
+`express.raw`, releasing stock of abandoned `pending` orders) is deferred to Fase 8.
+
 **Error handling** (`src/middlewares/`): `asyncHandler` wraps async controller functions so
 thrown/rejected errors are forwarded to Express's error pipeline instead of needing try/catch
 in each controller. Controllers throw `AppError(message, statusCode)` for expected failures
