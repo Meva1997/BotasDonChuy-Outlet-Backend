@@ -3,6 +3,8 @@ import { asyncHandler } from "../middlewares/asyncHandler";
 import { createOrderSchema } from "../schemas/checkout";
 import * as ordersService from "../services/orders.service";
 import * as paymentService from "../services/payment.service";
+import { Order } from "../models/Order";
+import { OrderItem } from "../models/OrderItem";
 
 /**
  * POST /api/orders — checkout público.
@@ -49,5 +51,34 @@ export const stripeWebhook: RequestHandler = asyncHandler(
     }
 
     res.json({ received: true });
+  },
+);
+
+/**
+ * GET /api/admin/orders — listado paginado de pedidos (admin).
+ * Incluye items congelados con unitCost (a diferencia de las rutas públicas).
+ */
+export const adminGetOrders: RequestHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const page = Number(req.query.page) || 1;
+    const perPage = Number(req.query.perPage) || 20;
+
+    // Conteo aparte (sin include) para evitar el conteo inflado de findAndCountAll
+    // con asociaciones hasMany; count() sobre Order cuenta pedidos, no filas unidas.
+    const total = await Order.count();
+    const totalPages = Math.max(1, Math.ceil(total / perPage));
+    const pageClamped = Math.min(Math.max(page, 1), totalPages); // clamp a [1, totalPages]
+    const offset = (pageClamped - 1) * perPage;
+
+    // limit + include hasMany: Sequelize aplica subQuery, así que el limit acota
+    // pedidos (no filas unidas) y los items se cargan completos.
+    const orders = await Order.findAll({
+      include: [{ model: OrderItem, as: "items" }],
+      order: [["createdAt", "DESC"]],
+      limit: perPage,
+      offset,
+    });
+
+    res.json({ orders, total, page: pageClamped, perPage, totalPages });
   },
 );

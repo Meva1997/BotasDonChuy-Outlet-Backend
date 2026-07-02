@@ -73,6 +73,8 @@ CLOUDINARY_API_SECRET=tu_api_secret
 | `PUT`    | `/api/admin/products/:id`     | ✅   | Actualiza parcialmente un producto                 |
 | `DELETE` | `/api/admin/products/:id`     | ✅   | Elimina un producto (soft-delete si tiene pedidos) |
 | `POST`   | `/api/orders`                 | —    | Checkout: crea un pedido desde el carrito          |
+| `GET`    | `/api/admin/dashboard`        | ✅   | Métricas agregadas del panel (KPIs, ingresos, ventas recientes, inventario) |
+| `GET`    | `/api/admin/orders`           | ✅   | Lista paginada de pedidos con sus items (incl. `unitCost`) |
 | `POST`   | `/api/webhooks/stripe`        | —    | Webhook de pagos (stub, listo para Stripe en Fase 8) |
 
 ### `GET /api/products`
@@ -127,6 +129,26 @@ La orden nace en `status: "pending"` / `paymentStatus: "unpaid"`. Respuesta `201
 `{ order, clientSecret }` (`clientSecret` es `null` hasta activar Stripe en Fase 8). Errores:
 `400` (body/cliente inválido), `409` (sin stock o producto no disponible, con el ítem en el mensaje).
 
+### `GET /api/admin/dashboard` y `GET /api/admin/orders` (panel admin)
+
+`GET /api/admin/dashboard` calcula todo en memoria a partir de `Order`/`OrderItem`/`Product`
+(sin tablas de agregación): solo cuentan las órdenes con `status: "paid"`.
+
+- `kpis` / `profitKpis`: ventana móvil de **30 días** (`hoy-29d..hoy`) comparada contra los 30 días
+  anteriores para el `trend`. Valores monetarios formateados en `es-MX` (`"$13,531.00"`).
+  `GASTOS FIJOS / MES` es una constante hardcodeada (`$2,000.00`) — no existe un modelo de gastos.
+- `revenueByPeriod`: las tres series `"7" | "30" | "90"` juntas, un punto por día (incluye días en
+  `$0`, no se omiten). El agrupamiento y el formateo de fechas son **ambos en UTC** (`timeZone:
+  "UTC"` explícito), para que el resultado no dependa de la zona horaria del host donde corre el
+  servidor.
+- `recentSales`: últimas 20 órdenes pagadas.
+- `inventory`: todos los productos no borrados (incluye `visible: false`); `valorInventario = stock
+  × unitCost`.
+
+`GET /api/admin/orders` devuelve una página de órdenes (`page`/`perPage`, `perPage` por defecto
+`20`) con sus `items`, más recientes primero, sin excluir `unitCost` (a diferencia de las rutas
+públicas). Responde con `{ orders, total, page, perPage, totalPages }`.
+
 ### Pagos (seam de Stripe, Fase 8)
 
 El cobro real con Stripe está **cableado pero inerte**: `src/services/payment.service.ts` define
@@ -163,7 +185,8 @@ src/
 ├── controllers/
 │   ├── product.controller.ts    # Lógica de productos (listar, obtener por id)
 │   ├── auth.controller.ts       # Login, forgot-password, me
-│   └── order.controller.ts      # Checkout (POST /api/orders) + webhook de pagos
+│   ├── order.controller.ts      # Checkout (POST /api/orders) + admin orders + webhook de pagos
+│   └── dashboard.controller.ts  # GET /api/admin/dashboard
 ├── middlewares/
 │   ├── AppError.ts               # Clase de error con status code para respuestas controladas
 │   ├── asyncHandler.ts            # Wrapper para controllers async (evita try/catch repetido)
@@ -175,6 +198,8 @@ src/
 │   ├── adminProduct.routes.ts   # Rutas /api/admin/products (CRUD admin, requireAuth)
 │   ├── auth.routes.ts           # Rutas /api/auth
 │   ├── order.routes.ts          # Ruta /api/orders (checkout público)
+│   ├── adminOrder.routes.ts     # Ruta /api/admin/orders (requireAuth)
+│   ├── adminDashboard.routes.ts # Ruta /api/admin/dashboard (requireAuth)
 │   └── webhook.routes.ts        # Ruta /api/webhooks/stripe (stub de pagos)
 ├── schemas/
 │   ├── auth.ts                   # Esquema zod de login
@@ -184,6 +209,7 @@ src/
 │   ├── cart.ts                    # computeTotals, computeShipping, SHIPPING_BY_TYPE
 │   ├── orders.service.ts          # Checkout: stock atómico, totales, precios congelados
 │   ├── payment.service.ts         # Seam de Stripe (inerte hasta Fase 8)
+│   ├── dashboard.service.ts       # Agregación en memoria para GET /api/admin/dashboard
 │   └── forecast.ts                # Función pura portada del frontend
 ├── utils/
 │   └── password.ts                # Helpers de hash/verificación de contraseñas (bcrypt)

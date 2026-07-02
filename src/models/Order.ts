@@ -1,5 +1,6 @@
 import { DataTypes, Model, Optional } from "sequelize";
 import { sequelize } from "../config/database";
+import type { OrderItem } from "./OrderItem";
 
 export interface OrderAttributes {
   id: number;
@@ -51,6 +52,9 @@ export class Order
   declare shippingCarrier: string;
   declare paymentIntentId: string | null;
   declare paymentStatus: "unpaid" | "processing" | "paid" | "failed";
+  declare readonly createdAt: Date;
+  declare readonly updatedAt: Date;
+  declare items?: OrderItem[];
 }
 
 Order.init(
