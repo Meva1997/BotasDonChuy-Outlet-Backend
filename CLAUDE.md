@@ -97,6 +97,34 @@ that cost fields only appear on authenticated admin routes. Orders are created w
 package is **not installed**; activating it (real PaymentIntent, webhook signature verification via
 `express.raw`, releasing stock of abandoned `pending` orders) is deferred to Fase 8.
 
+**Dashboard** (`src/routes/adminDashboard.routes.ts`, `src/routes/adminOrder.routes.ts`,
+`src/controllers/dashboard.controller.ts`, `src/controllers/order.controller.ts`,
+`src/services/dashboard.service.ts`): `GET /api/admin/dashboard` `[auth]` returns `DashboardData`
+(`kpis`, `profitKpis`, `revenueByPeriod`, `recentSales`, `inventory`) computed **in memory** from
+`Order`/`OrderItem`/`Product` — no aggregation tables. Only orders with `status: "paid"` count as
+sales (not `paymentStatus`, which the seed leaves at `"unpaid"` — see `src/seed.ts`).
+`kpis`/`profitKpis` use a rolling **30-day window** (`today-29d..today`) vs. the prior 30 days for
+`trend`, so they stay numerically consistent with `revenueByPeriod["30"]` (same window, same
+data). `revenueByPeriod` returns all three `"7"|"30"|"90"` series together (one `RevenuePoint` per
+calendar day, including `$0` days — never skipped); day grouping (`isoDay`) and day-label
+formatting (`formatShortDate`) are **both pinned to UTC** (`timeZone: "UTC"` on every
+`toLocaleDateString`/`toLocaleTimeString` call) so the output doesn't depend on the host's local
+timezone — omitting that option silently rolls the label back a day on hosts west of UTC (caught
+during manual testing on a `America/Mexico_City` dev machine). `GASTOS FIJOS / MES` in
+`profitKpis` is a hardcoded `$2,000.00` constant (`GASTOS_FIJOS` in `dashboard.service.ts`) since
+there's no expenses model. `recentSales` caps at the 20 most recent paid orders; `savings`/`total`
+per row reuse `Order.savings`/`Order.total` directly (already computed by the `cart` service at
+checkout) rather than recomputing from items. `inventory` includes every non-soft-deleted product
+(including `visible: false`) since inventory value must reflect real holdings regardless of
+storefront visibility. `GET /api/admin/orders` `[auth]` (in `order.controller.ts`, alongside
+`createOrder`) returns a **paginated** page of orders (`page`/`perPage`, default `perPage: 20`,
+page clamped to `[1, totalPages]`) with their `items` included, most recent first, **without**
+excluding `unitCost` (admin routes expose cost fields by design, like `adminGetProducts`). The
+envelope is `{ orders, total, page, perPage, totalPages }`; `total` comes from a separate
+`Order.count()` (no `include`) to avoid the inflated row count `findAndCountAll` returns with a
+`hasMany` include, and the `limit` + `items` include relies on Sequelize's subquery so the limit
+bounds orders (not joined rows) while items load in full.
+
 **Error handling** (`src/middlewares/`): `asyncHandler` wraps async controller functions so
 thrown/rejected errors are forwarded to Express's error pipeline instead of needing try/catch
 in each controller. Controllers throw `AppError(message, statusCode)` for expected failures

@@ -41,7 +41,8 @@ Este backend usa **Express 5 + Sequelize 6 + PostgreSQL + TypeScript**.
 | Seed de datos | ❌ Falta | Fase 1 |
 | CRUD admin de productos | ❌ Falta | Fase 3 |
 | Checkout (`POST /api/orders`) | ✅ Hecho | [src/services/orders.service.ts](src/services/orders.service.ts) |
-| Dashboard, reportes, marca, usuarios | ❌ Falta | Fases 5–7 |
+| Dashboard (`GET /api/admin/dashboard`, `GET /api/admin/orders`) | ✅ Hecho | [src/services/dashboard.service.ts](src/services/dashboard.service.ts) |
+| Reportes, marca, usuarios | ❌ Falta | Fases 6–7 |
 | Lógica `forecast` / `cart` portada al backend | ❌ Falta | Fase 0 |
 
 ### ⚠️ Deuda de contrato detectada (arreglar en Fase 0)
@@ -176,11 +177,11 @@ POST /api/auth/login  →  { "token": "<jwt>", "user": { "id": "...", "name": "D
 **Por qué ahora:** ya hay órdenes (Fase 4) y productos (Fase 3) para agregar métricas reales.
 
 **Tareas:**
-- [ ] `GET /api/admin/dashboard` `[auth]` → `DashboardData` (ver tipo exacto en [frontend/components/admin/data/types.ts](../frontend/components/admin/data/types.ts)):
+- [x] `GET /api/admin/dashboard` `[auth]` → `DashboardData` (ver tipo exacto en [frontend/components/admin/data/types.ts](../frontend/components/admin/data/types.ts)):
   - `kpis` y `profitKpis`: **`value` ya formateado en es-MX** (`"$245,506"`, `"58%"`) — el front lo pinta tal cual.
   - `revenueByPeriod`: las **tres** series `"7" | "30" | "90"` juntas (el front alterna en cliente).
   - `recentSales` (`SaleRow[]`) y `inventory` (`InventoryRow[]`, con `valorInventario = stock × unitCost`).
-- [ ] `GET /api/admin/orders` `[auth]` → `Order[]` con items, para la vista de ventas detalladas.
+- [x] `GET /api/admin/orders` `[auth]` → `Order[]` con items, para la vista de ventas detalladas.
 
 **Cómo verificar:** `GET /api/admin/dashboard` con token → JSON con las 3 series de revenue y KPIs como strings formateados. Cablear `DataSection` del front contra el endpoint.
 
@@ -327,8 +328,8 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 - [x] `POST /api/orders` (recalcular totales, stock por talla, congelar precios)
 
 **Fase 5 — Dashboard**
-- [ ] `GET /api/admin/dashboard`
-- [ ] `GET /api/admin/orders`
+- [x] `GET /api/admin/dashboard`
+- [x] `GET /api/admin/orders`
 
 **Fase 6 — Reportes**
 - [ ] `GET /api/admin/reports/monthly`

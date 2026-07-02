@@ -20,6 +20,8 @@ const options: Options = {
       { name: "Admin - Products", description: "CRUD de productos (requiere auth)" },
       { name: "Auth", description: "Autenticación de administradores" },
       { name: "Orders", description: "Checkout y pedidos del cliente" },
+      { name: "Admin - Dashboard", description: "Métricas agregadas del panel (requiere auth)" },
+      { name: "Admin - Orders", description: "Listado completo de pedidos con items (requiere auth)" },
       { name: "Webhooks", description: "Webhooks de pasarelas de pago" },
       { name: "Health", description: "Estado del servicio" },
     ],
@@ -307,6 +309,80 @@ const options: Options = {
                 },
               },
             },
+          },
+        },
+        KpiData: {
+          type: "object",
+          properties: {
+            label: { type: "string", example: "INGRESOS" },
+            value: {
+              type: "string",
+              description: "Ya formateado en es-MX (moneda o porcentaje).",
+              example: "$245,506.00",
+            },
+            trend: {
+              type: "object",
+              nullable: true,
+              properties: {
+                label: { type: "string", example: "+21% vs periodo anterior" },
+                positive: { type: "boolean", example: true },
+              },
+            },
+            subtitle: { type: "string", nullable: true, example: "12 jun" },
+          },
+        },
+        RevenuePoint: {
+          type: "object",
+          properties: {
+            date: { type: "string", description: "Etiqueta corta es-MX, p. ej. \"12 jun\".", example: "12 jun" },
+            revenue: { type: "number", format: "float", example: 7420 },
+          },
+        },
+        SaleRow: {
+          type: "object",
+          properties: {
+            id: { type: "string", example: "5" },
+            date: { type: "string", example: "12 jun · 07:33" },
+            pieces: { type: "integer", example: 1 },
+            items: { type: "string", example: "Bota Ranchera 1972, Bota Exótica de Avestruz ×2" },
+            savings: { type: "number", format: "float", example: 400.0 },
+            total: { type: "number", format: "float", example: 1659.0 },
+            costoTotal: { type: "number", format: "float", example: 800.0 },
+          },
+        },
+        InventoryRow: {
+          type: "object",
+          properties: {
+            id: { type: "integer", example: 1 },
+            name: { type: "string", example: "Bota vaquera de cuero" },
+            type: { type: "string", enum: ["bota", "sombrero", "ropa"], example: "bota" },
+            stock: { type: "integer", example: 12 },
+            salePrice: { type: "number", format: "float", example: 1499.0 },
+            unitCost: { type: "number", format: "float", example: 800.0 },
+            valorInventario: {
+              type: "number",
+              format: "float",
+              description: "stock × unitCost",
+              example: 9600.0,
+            },
+          },
+        },
+        DashboardData: {
+          type: "object",
+          properties: {
+            kpis: { type: "array", items: { $ref: "#/components/schemas/KpiData" } },
+            profitKpis: { type: "array", items: { $ref: "#/components/schemas/KpiData" } },
+            revenueByPeriod: {
+              type: "object",
+              description: "Las tres series juntas; el front alterna en cliente.",
+              properties: {
+                "7": { type: "array", items: { $ref: "#/components/schemas/RevenuePoint" } },
+                "30": { type: "array", items: { $ref: "#/components/schemas/RevenuePoint" } },
+                "90": { type: "array", items: { $ref: "#/components/schemas/RevenuePoint" } },
+              },
+            },
+            recentSales: { type: "array", items: { $ref: "#/components/schemas/SaleRow" } },
+            inventory: { type: "array", items: { $ref: "#/components/schemas/InventoryRow" } },
           },
         },
       },
