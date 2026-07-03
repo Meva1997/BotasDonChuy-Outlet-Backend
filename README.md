@@ -77,6 +77,12 @@ CLOUDINARY_API_SECRET=tu_api_secret
 | `GET`    | `/api/admin/orders`           | ✅   | Lista paginada de pedidos con sus items (incl. `unitCost`) |
 | `GET`    | `/api/admin/reports/monthly`  | ✅   | Ventas por mes por producto (`MonthlyReport[]`; mes en curso con `partial`) |
 | `GET`    | `/api/admin/reports/replenishment` | ✅ | Reposición sugerida (`ReplenishmentRow[]`; pronóstico + cobertura + margen) |
+| `GET`    | `/api/admin/brand`            | —    | Identidad de marca (lectura pública, crea el singleton con defaults si falta) |
+| `PUT`    | `/api/admin/brand`            | ✅   | Actualiza parcialmente la identidad de marca |
+| `GET`    | `/api/admin/users`            | ✅   | Lista los usuarios del panel (sin `passwordHash`) |
+| `POST`   | `/api/admin/users`            | ✅   | Crea un usuario del panel con contraseña temporal |
+| `DELETE` | `/api/admin/users/:id`        | ✅   | Elimina un usuario (bloquea autoeliminación y al último `owner`) |
+| `PUT`    | `/api/admin/account`          | ✅   | Actualiza el correo y/o la contraseña de la cuenta propia |
 | `POST`   | `/api/webhooks/stripe`        | —    | Webhook de pagos (stub, listo para Stripe en Fase 8) |
 
 ### `GET /api/products`
@@ -180,6 +186,23 @@ activar Stripe se rellenan esas funciones, se verifica la firma del webhook sobr
 (`express.raw`) y se libera el stock de órdenes `pending` abandonadas. El paquete `stripe` aún no
 se instala.
 
+### `/api/admin/brand`, `/api/admin/users` y `/api/admin/account` (marca y usuarios)
+
+- `GET /api/admin/brand` es **pública** (la tienda pinta estos textos); usa `findOrCreate` sobre el
+  singleton `id: 1` para no depender de que `pnpm seed` ya haya corrido. `PUT /api/admin/brand`
+  (requiere JWT) acepta updates parciales — cada campo se guarda por separado, como hace
+  `MarcaSection` en el frontend.
+- `GET /api/admin/users` (requiere JWT, cualquier rol) lista los usuarios del panel sin
+  `passwordHash`. `POST /api/admin/users` (requiere JWT, cualquier rol — `owner` y `admin` tienen
+  los mismos permisos) crea un usuario con contraseña temporal hasheada. `DELETE
+  /api/admin/users/:id` bloquea con `400` la autoeliminación y la eliminación del único `owner`
+  restante (evita quedarse sin acceso al panel).
+- `PUT /api/admin/account` (requiere JWT) actualiza la cuenta propia del usuario autenticado:
+  siempre verifica `currentPassword` (defensa en profundidad ante un JWT filtrado) y acepta `email`
+  y/o `newPassword`/`confirmPassword` de forma independiente, para las dos acciones separadas de
+  `ConfigSection` ("Actualizar Correo" / "Cambiar Contraseña"). No reemite el JWT tras un cambio de
+  correo — el token vigente sigue mostrando el correo anterior hasta el siguiente login.
+
 ## Documentación API (Swagger)
 
 Con el servidor en marcha, la documentación interactiva está disponible en:
@@ -209,7 +232,9 @@ src/
 │   ├── auth.controller.ts       # Login, forgot-password, me
 │   ├── order.controller.ts      # Checkout (POST /api/orders) + admin orders + webhook de pagos
 │   ├── dashboard.controller.ts  # GET /api/admin/dashboard
-│   └── reports.controller.ts    # GET /api/admin/reports/monthly y /replenishment
+│   ├── reports.controller.ts    # GET /api/admin/reports/monthly y /replenishment
+│   ├── brand.controller.ts      # GET/PUT /api/admin/brand
+│   └── adminUser.controller.ts  # /api/admin/users + PUT /api/admin/account
 ├── middlewares/
 │   ├── AppError.ts               # Clase de error con status code para respuestas controladas
 │   ├── asyncHandler.ts            # Wrapper para controllers async (evita try/catch repetido)
@@ -224,11 +249,16 @@ src/
 │   ├── adminOrder.routes.ts     # Ruta /api/admin/orders (requireAuth)
 │   ├── adminDashboard.routes.ts # Ruta /api/admin/dashboard (requireAuth)
 │   ├── adminReports.routes.ts   # Rutas /api/admin/reports/* (requireAuth)
+│   ├── brand.routes.ts          # Ruta /api/admin/brand (GET pública, PUT requireAuth)
+│   ├── adminUser.routes.ts      # Rutas /api/admin/users (requireAuth)
+│   ├── account.routes.ts        # Ruta /api/admin/account (requireAuth)
 │   └── webhook.routes.ts        # Ruta /api/webhooks/stripe (stub de pagos)
 ├── schemas/
 │   ├── auth.ts                   # Esquema zod de login
 │   ├── checkout.ts                # Esquema zod de envío/checkout
-│   └── product.ts                 # Esquema zod de producto
+│   ├── product.ts                 # Esquema zod de producto
+│   ├── brand.ts                   # Esquema zod de update parcial de BrandSettings
+│   └── adminUser.ts               # Esquemas zod de alta de usuario y update de cuenta propia
 ├── services/
 │   ├── cart.ts                    # computeTotals, computeShipping, SHIPPING_BY_TYPE
 │   ├── orders.service.ts          # Checkout: stock atómico, totales, precios congelados

@@ -43,7 +43,7 @@ Este backend usa **Express 5 + Sequelize 6 + PostgreSQL + TypeScript**.
 | Checkout (`POST /api/orders`) | ✅ Hecho | [src/services/orders.service.ts](src/services/orders.service.ts) |
 | Dashboard (`GET /api/admin/dashboard`, `GET /api/admin/orders`) | ✅ Hecho | [src/services/dashboard.service.ts](src/services/dashboard.service.ts) |
 | Reportes (`/api/admin/reports/monthly`, `/replenishment`) | ✅ Hecho | [src/services/reports.service.ts](src/services/reports.service.ts) |
-| Marca, usuarios | ❌ Falta | Fase 7 |
+| Marca, usuarios | ✅ Hecho | Fase 7 |
 | Lógica `forecast` / `cart` portada al backend | ❌ Falta | Fase 0 |
 
 ### ⚠️ Deuda de contrato detectada (arreglar en Fase 0)
@@ -214,12 +214,12 @@ POST /api/auth/login  →  { "token": "<jwt>", "user": { "id": "...", "name": "D
 **Por qué ahora:** funcionalidad de configuración, no bloquea el flujo de compra; va al final del core.
 
 **Tareas:**
-- [ ] `GET /api/admin/brand` — **lectura pública** (la tienda pinta estos textos). Devuelve `BrandSettings`.
-- [ ] `PUT /api/admin/brand` `[auth]` — acepta updates **parciales** (`MarcaSection` autoguarda campo por campo).
-- [ ] `GET /api/admin/users` `[auth]` → `AdminUser[]` **sin `passwordHash`**.
-- [ ] `POST /api/admin/users` `[auth]` (**solo `owner`**) — hashea password temporal.
-- [ ] `DELETE /api/admin/users/:id` `[auth]` (**solo `owner`**).
-- [ ] `PUT /api/admin/account` `[auth]` — cambiar correo/contraseña propios (verificar `currentPassword`, exigir `newPassword === confirmPassword` y ≥ 8 chars).
+- [x] `GET /api/admin/brand` — **lectura pública** (la tienda pinta estos textos). Devuelve `BrandSettings`.
+- [x] `PUT /api/admin/brand` `[auth]` — acepta updates **parciales** (`MarcaSection` autoguarda campo por campo).
+- [x] `GET /api/admin/users` `[auth]` → `AdminUser[]` **sin `passwordHash`**.
+- [x] `POST /api/admin/users` `[auth]` — hashea password temporal. **Decisión (Fase 7):** no restringido a `owner`; `owner` y `admin` tienen los mismos permisos en esta ruta (consistente con la nota de Fase 1 de que ambos roles son equivalentes hoy), a diferencia de la redacción original de esta tarea.
+- [x] `DELETE /api/admin/users/:id` `[auth]` — mismo criterio que arriba (no restringido a `owner`); en cambio bloquea con `400` la autoeliminación y la eliminación del último `owner` restante (guardas de integridad, no de rol).
+- [x] `PUT /api/admin/account` `[auth]` — cambiar correo/contraseña propios (verificar `currentPassword`, exigir `newPassword === confirmPassword` y ≥ 8 chars).
 
 **Cómo verificar:** `PUT /api/admin/brand` con un solo campo → persiste; `POST /api/admin/users` con token de `admin` → `403`.
 
@@ -254,7 +254,7 @@ Resumen rápido. El tipo de cada respuesta vive en el frontend (columna "Tipo").
 | GET | `/api/admin/reports/replenishment` | ✅ | → `ReplenishmentRow[]` | `types.ts` |
 | GET | `/api/admin/brand` | — | → `BrandSettings` | `MarcaData` |
 | PUT | `/api/admin/brand` | ✅ | parcial → `BrandSettings` | — |
-| GET/POST/DELETE | `/api/admin/users/:id?` | ✅ (owner) | → `AdminUser[]` (sin hash) | — |
+| GET/POST/DELETE | `/api/admin/users/:id?` | ✅ | → `AdminUser[]` (sin hash) | — |
 | PUT | `/api/admin/account` | ✅ | `{currentPassword,newPassword,confirmPassword}` → `{ok}` | — |
 
 ---
@@ -337,9 +337,9 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 - [x] `GET /api/admin/reports/replenishment`
 
 **Fase 7 — Marca y usuarios**
-- [ ] `GET/PUT /api/admin/brand`
-- [ ] `GET/POST/DELETE /api/admin/users`
-- [ ] `PUT /api/admin/account`
+- [x] `GET/PUT /api/admin/brand`
+- [x] `GET/POST/DELETE /api/admin/users`
+- [x] `PUT /api/admin/account`
 
 **Fase 8 — Después**
 - [ ] Skydropx `POST /api/shipping/rates`
