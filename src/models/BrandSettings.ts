@@ -8,7 +8,7 @@ interface BrandSettingsAttributes {
   tagline: string;
   cartNotice: string;
   footerNote: string;
-  logoUrl: string;
+  logoUrl: string | null;
 }
 
 interface BrandSettingsCreationAttributes extends Optional<
@@ -26,7 +26,7 @@ export class BrandSettings
   declare tagline: string;
   declare cartNotice: string;
   declare footerNote: string;
-  declare logoUrl: string;
+  declare logoUrl: string | null;
 }
 
 BrandSettings.init(

@@ -13,6 +13,9 @@ import webhookRoutes from "./routes/webhook.routes";
 import adminDashboardRoutes from "./routes/adminDashboard.routes";
 import adminOrderRoutes from "./routes/adminOrder.routes";
 import adminReportsRoutes from "./routes/adminReports.routes";
+import brandRoutes from "./routes/brand.routes";
+import adminUserRoutes from "./routes/adminUser.routes";
+import accountRoutes from "./routes/account.routes";
 import { errorHandler } from "./middlewares/errorHandler";
 import "./models/Product"; // register the model so sync() creates its table
 import "./models/ProductSize";
@@ -48,6 +51,9 @@ app.use("/api/admin/products", adminProductRoutes);
 app.use("/api/admin/dashboard", adminDashboardRoutes);
 app.use("/api/admin/orders", adminOrderRoutes);
 app.use("/api/admin/reports", adminReportsRoutes);
+app.use("/api/admin/brand", brandRoutes); // GET pública, PUT protegido dentro del router
+app.use("/api/admin/users", adminUserRoutes);
+app.use("/api/admin/account", accountRoutes);
 app.use("/api/orders", orderRoutes); // checkout público
 // Webhook de pagos. Fase 8: el webhook real de Stripe necesita el cuerpo crudo
 // para verificar la firma, montando express.raw({ type: "application/json" })

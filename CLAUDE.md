@@ -189,6 +189,58 @@ admin routes. The per-product series extraction transposes each month's `byProdu
 `Map<productId, unitsSold>` once (`unitsByMonthMaps`) rather than doing a `.find()` per
 product×month pair, keeping it O(months×products) instead of O(months×products²).
 
+**Marca y usuarios** (`src/routes/brand.routes.ts`, `src/routes/adminUser.routes.ts`,
+`src/routes/account.routes.ts`, `src/controllers/brand.controller.ts`,
+`src/controllers/adminUser.controller.ts`): Fase 7. `GET /api/admin/brand` `[public]` and `PUT
+/api/admin/brand` `[auth]` share one router but **not** a blanket `router.use(requireAuth)` —
+`requireAuth` is applied directly on the `PUT` route only, since the `GET` must stay public (the
+storefront reads brand text from it). Both handlers `findOrCreate` the singleton `BrandSettings`
+row (`id: 1`, defaults duplicated from `src/seed.ts`'s `BRAND_DEFAULTS` — **not imported**, because
+`seed.ts` runs its full `seed()` side effect, including `process.exit`, at module load) instead of
+`findByPk` + `404`, so the route works even on a dev DB where `pnpm seed` was never run (the
+frontend's `MarcaSection` has no "not seeded yet" empty state). `PUT` validates with
+`brandSettingsUpdateSchema` (`src/schemas/brand.ts`, all fields optional — the frontend autosaves
+one field at a time — non-`logoUrl` strings reject empty string since the columns are `NOT NULL`;
+`logoUrl` stays a loose non-empty string, not `.url()`, since Cloudinary upload wiring is still
+deferred and the frontend today even previews via a local `blob:` URL).
+
+`GET /api/admin/users` `[auth]` lists `AdminUser` rows excluding `passwordHash`
+(`attributes: { exclude: ["passwordHash"] }`, same pattern as excluding `unitCost` on public
+product reads). `POST /api/admin/users` `[auth]` creates a user with a bcrypt-hashed
+`tempPassword` — `createAdminUserSchema` requires the **same complexity as `loginSchema`**
+(min 8 chars + uppercase + symbol, via the shared `PASSWORD_UPPERCASE_REGEX`/`PASSWORD_SYMBOL_REGEX`
+in `src/schemas/auth.ts`); a weaker rule here would let a tempPassword hash successfully while
+being permanently unable to pass `POST /api/auth/login`, which validates the same regexes before
+ever touching the DB — and `POST /api/auth/forgot-password` is still a stub, so that would be an
+unrecoverable lockout. A duplicate email is pre-checked (`409` with a specific message) the same
+way `updateOwnAccount` does below. **`owner` and `admin` have identical route access** for all of
+`GET`/`POST`/`DELETE /api/admin/users` — `requireRole` is not used anywhere in this phase, matching
+the Fase 1 seed comment that the two roles carry the same permissions. `DELETE
+/api/admin/users/:id` still enforces two data-integrity guards independent of role: it throws `400`
+if the caller targets their own account (`String(id) === req.user!.id` — `req.user.id` is a string
+from the JWT payload, `AdminUser.id` is an int) and `400` if the target is the last remaining
+`owner`. That second guard runs inside a `sequelize.transaction` that locks the `owner` rows
+(`AdminUser.findAll({ where: { role: "owner" }, lock: t.LOCK.UPDATE })`, i.e. `SELECT ... FOR
+UPDATE`) rather than a plain `count()`, so two concurrent deletes targeting two different owners
+can't both read the same pre-delete count and leave the panel with zero owners; only
+locked/checked when the target itself is an `owner`, to avoid the extra query on every
+`admin`-role delete — both guards protect against the panel losing all access rather than being
+permission checks.
+
+`PUT /api/admin/account` `[auth]`, backed by the same `adminUser.controller.ts` (co-located with
+the `/users` handlers rather than a separate controller file, mirroring `order.controller.ts`
+backing both `order.routes.ts` and `adminOrder.routes.ts`), updates the caller's own row. Body is
+`{ currentPassword, email?, newPassword?, confirmPassword? }` (`updateAccountSchema`,
+`src/schemas/adminUser.ts`) — `currentPassword` is **always** required and verified via
+`comparePassword` (defense-in-depth against a leaked JWT, even for an email-only change); `email`
+and the password fields are independently optional so the same endpoint serves the frontend's two
+separate buttons ("Actualizar Correo" / "Cambiar Contraseña"). `newPassword` requires the same
+complexity as `tempPassword`/`loginSchema` for the same login-lockout reason above. A changed email
+is pre-checked for uniqueness (`409` with a specific message) rather than relying solely on the
+generic `UniqueConstraintError` → 409 handler in `errorHandler.ts` (that handler remains the safety
+net for the small TOCTOU window). **Known limitation:** an email change does not re-sign the JWT,
+so the caller's current token keeps showing the old email until their next login.
+
 **Error handling** (`src/middlewares/`): `asyncHandler` wraps async controller functions so
 thrown/rejected errors are forwarded to Express's error pipeline instead of needing try/catch
 in each controller. Controllers throw `AppError(message, statusCode)` for expected failures
