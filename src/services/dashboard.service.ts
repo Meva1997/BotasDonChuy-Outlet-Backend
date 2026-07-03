@@ -2,7 +2,8 @@ import { Op, type WhereOptions } from "sequelize";
 import { Order, type OrderAttributes } from "../models/Order";
 import { OrderItem } from "../models/OrderItem";
 import { Product } from "../models/Product";
-import { ProductSize } from "../models/ProductSize";
+import { productSizesInclude } from "../utils/productSizesInclude";
+import { addDays, formatShortDate, isoDay, utcDayStart } from "../utils/date";
 
 export interface KpiData {
   label: string;
@@ -52,33 +53,6 @@ const GASTOS_FIJOS = 2000;
 const RECENT_SALES_LIMIT = 20;
 const REVENUE_WINDOW_DAYS = 90;
 const KPI_WINDOW_DAYS = 30;
-
-const productSizesInclude = {
-  model: ProductSize,
-  as: "productSizes",
-  attributes: ["size", "stock"],
-};
-
-function utcDayStart(date: Date): Date {
-  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
-}
-
-function addDays(date: Date, days: number): Date {
-  const d = new Date(date);
-  d.setUTCDate(d.getUTCDate() + days);
-  return d;
-}
-
-function isoDay(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
-
-// Todo el agrupamiento por día usa UTC (ver isoDay/utcDayStart); el formateo
-// también se fija a UTC para que la etiqueta coincida con el día agrupado,
-// sin importar la zona horaria del host donde corra el servidor.
-function formatShortDate(date: Date): string {
-  return date.toLocaleDateString("es-MX", { day: "numeric", month: "short", timeZone: "UTC" });
-}
 
 function formatMoney(n: number): string {
   return `$${n.toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
