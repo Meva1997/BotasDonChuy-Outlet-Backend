@@ -75,6 +75,8 @@ CLOUDINARY_API_SECRET=tu_api_secret
 | `POST`   | `/api/orders`                 | —    | Checkout: crea un pedido desde el carrito          |
 | `GET`    | `/api/admin/dashboard`        | ✅   | Métricas agregadas del panel (KPIs, ingresos, ventas recientes, inventario) |
 | `GET`    | `/api/admin/orders`           | ✅   | Lista paginada de pedidos con sus items (incl. `unitCost`) |
+| `GET`    | `/api/admin/reports/monthly`  | ✅   | Ventas por mes por producto (`MonthlyReport[]`; mes en curso con `partial`) |
+| `GET`    | `/api/admin/reports/replenishment` | ✅ | Reposición sugerida (`ReplenishmentRow[]`; pronóstico + cobertura + margen) |
 | `POST`   | `/api/webhooks/stripe`        | —    | Webhook de pagos (stub, listo para Stripe en Fase 8) |
 
 ### `GET /api/products`
@@ -149,6 +151,26 @@ La orden nace en `status: "pending"` / `paymentStatus: "unpaid"`. Respuesta `201
 `20`) con sus `items`, más recientes primero, sin excluir `unitCost` (a diferencia de las rutas
 públicas). Responde con `{ orders, total, page, perPage, totalPages }`.
 
+### `GET /api/admin/reports/monthly` y `/replenishment` (reportes)
+
+Ambos se calculan **en memoria** (sin tablas de agregación) desde una sola carga compartida de
+órdenes `status: "paid"` (con `items`) + productos no borrados (con `productSizes`). El backend sirve
+solo las filas crudas; las métricas derivadas (% del total, promedios, tendencia vs mes anterior) las
+calcula el frontend.
+
+- `GET /api/admin/reports/monthly` → `MonthlyReport[]`: agrupa unidades por `(mes UTC, productId)` y,
+  para **cada** mes del rango `[mes de la orden más antigua … mes en curso]` (inclusive, sin huecos —
+  los meses sin ventas salen en `$0`), arma `byProduct` sobre **todos** los productos
+  (`revenue = unitsSold × salePrice`, precio **actual**; ordenado desc por `unitsSold`) y `byCategory`
+  (agrupado por `type`, ordenado desc por ingreso). El mes en curso sale con `partial: true`. Las
+  claves/etiquetas de mes están fijadas a **UTC** (`"2026-01"` / `"Enero 2026"`).
+- `GET /api/admin/reports/replenishment` → `ReplenishmentRow[]`: se computa on-the-fly. Por producto,
+  toma la serie mensual de `unitsSold` de los meses **completos** (excluye el mes `partial`) y la pasa
+  a `computeForecast` (`src/services/forecast.ts`); calcula `diasCobertura` (`999` = sin ventas),
+  `suggestedOrder = max(0, round(forecast × 2) − stock)`, `ingresoMensual`, `margenMensual`,
+  `costoEstimadoPedido` y `priority` (`urgente` <15 días · `pronto` <45 · `ok`). Las filas se ordenan
+  por urgencia de cobertura y, dentro de cada nivel, por `margenMensual` desc.
+
 ### Pagos (seam de Stripe, Fase 8)
 
 El cobro real con Stripe está **cableado pero inerte**: `src/services/payment.service.ts` define
@@ -186,7 +208,8 @@ src/
 │   ├── product.controller.ts    # Lógica de productos (listar, obtener por id)
 │   ├── auth.controller.ts       # Login, forgot-password, me
 │   ├── order.controller.ts      # Checkout (POST /api/orders) + admin orders + webhook de pagos
-│   └── dashboard.controller.ts  # GET /api/admin/dashboard
+│   ├── dashboard.controller.ts  # GET /api/admin/dashboard
+│   └── reports.controller.ts    # GET /api/admin/reports/monthly y /replenishment
 ├── middlewares/
 │   ├── AppError.ts               # Clase de error con status code para respuestas controladas
 │   ├── asyncHandler.ts            # Wrapper para controllers async (evita try/catch repetido)
@@ -200,6 +223,7 @@ src/
 │   ├── order.routes.ts          # Ruta /api/orders (checkout público)
 │   ├── adminOrder.routes.ts     # Ruta /api/admin/orders (requireAuth)
 │   ├── adminDashboard.routes.ts # Ruta /api/admin/dashboard (requireAuth)
+│   ├── adminReports.routes.ts   # Rutas /api/admin/reports/* (requireAuth)
 │   └── webhook.routes.ts        # Ruta /api/webhooks/stripe (stub de pagos)
 ├── schemas/
 │   ├── auth.ts                   # Esquema zod de login
@@ -210,6 +234,7 @@ src/
 │   ├── orders.service.ts          # Checkout: stock atómico, totales, precios congelados
 │   ├── payment.service.ts         # Seam de Stripe (inerte hasta Fase 8)
 │   ├── dashboard.service.ts       # Agregación en memoria para GET /api/admin/dashboard
+│   ├── reports.service.ts         # Reportes mensuales + reposición (usa forecast.ts)
 │   └── forecast.ts                # Función pura portada del frontend
 ├── utils/
 │   └── password.ts                # Helpers de hash/verificación de contraseñas (bcrypt)

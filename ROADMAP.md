@@ -42,7 +42,8 @@ Este backend usa **Express 5 + Sequelize 6 + PostgreSQL + TypeScript**.
 | CRUD admin de productos | ❌ Falta | Fase 3 |
 | Checkout (`POST /api/orders`) | ✅ Hecho | [src/services/orders.service.ts](src/services/orders.service.ts) |
 | Dashboard (`GET /api/admin/dashboard`, `GET /api/admin/orders`) | ✅ Hecho | [src/services/dashboard.service.ts](src/services/dashboard.service.ts) |
-| Reportes, marca, usuarios | ❌ Falta | Fases 6–7 |
+| Reportes (`/api/admin/reports/monthly`, `/replenishment`) | ✅ Hecho | [src/services/reports.service.ts](src/services/reports.service.ts) |
+| Marca, usuarios | ❌ Falta | Fase 7 |
 | Lógica `forecast` / `cart` portada al backend | ❌ Falta | Fase 0 |
 
 ### ⚠️ Deuda de contrato detectada (arreglar en Fase 0)
@@ -194,8 +195,8 @@ POST /api/auth/login  →  { "token": "<jwt>", "user": { "id": "...", "name": "D
 **Por qué ahora:** depende de tener histórico de ventas (seed/órdenes) y del `forecast` service de la Fase 0.
 
 **Tareas:**
-- [ ] `GET /api/admin/reports/monthly` `[auth]` → `MonthlyReport[]` — agrupa ventas por mes; `revenue = unitsSold × salePrice`; **marcar `partial: true` el mes en curso**.
-- [ ] `GET /api/admin/reports/replenishment` `[auth]` → `ReplenishmentRow[]` — **se computa on-the-fly** (no se persiste):
+- [x] `GET /api/admin/reports/monthly` `[auth]` → `MonthlyReport[]` — agrupa ventas por mes; `revenue = unitsSold × salePrice`; **marcar `partial: true` el mes en curso**.
+- [x] `GET /api/admin/reports/replenishment` `[auth]` → `ReplenishmentRow[]` — **se computa on-the-fly** (no se persiste):
   - Por producto, sobre meses **completos** (excluir `partial`), extraer `unitsSold` → `computeForecast(monthlySales)`.
   - Calcular `diasCobertura`, `suggestedOrder = max(0, forecast × 2 − stock)`, `costoEstimadoPedido`, `ingresoMensual`, `margenMensual`, `priority` (`urgente` <15 días · `pronto` <45 · `ok`).
   - **Orden:** por urgencia de cobertura primero; dentro de cada nivel, por `margenMensual` desc.
@@ -332,8 +333,8 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 - [x] `GET /api/admin/orders`
 
 **Fase 6 — Reportes**
-- [ ] `GET /api/admin/reports/monthly`
-- [ ] `GET /api/admin/reports/replenishment`
+- [x] `GET /api/admin/reports/monthly`
+- [x] `GET /api/admin/reports/replenishment`
 
 **Fase 7 — Marca y usuarios**
 - [ ] `GET/PUT /api/admin/brand`

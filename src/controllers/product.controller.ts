@@ -2,17 +2,12 @@ import type { Request, RequestHandler, Response } from "express";
 import { Op, type WhereOptions } from "sequelize";
 import { Product, type ProductAttributes } from "../models/Product";
 import { ProductSize } from "../models/ProductSize";
+import { productSizesInclude } from "../utils/productSizesInclude";
 import { OrderItem } from "../models/OrderItem";
 import { asyncHandler } from "../middlewares/asyncHandler";
 import { AppError } from "../middlewares/AppError";
 import { productSchema, productUpdateSchema } from "../schemas/product";
 import { sequelize } from "../config/database";
-
-const productSizesInclude = {
-  model: ProductSize,
-  as: "productSizes",
-  attributes: ["size", "stock"],
-};
 
 export const getProducts: RequestHandler = asyncHandler(async (req: Request, res: Response) => {
   const categoria = req.query.categoria as string | undefined;
