@@ -16,6 +16,9 @@ export interface CartTotals {
 
 // Tarifa fija por tipo de producto (el tipo más caro del carrito determina el costo).
 // Bota: caja grande y pesada. Sombrero: voluminoso. Ropa: ligera.
+// ⚠️ Duplicado a propósito con frontend/lib/cart.ts (este backend es la autoridad
+// de precios). Si cambias una tarifa, cámbiala también allí o el formulario del
+// checkout mostrará un envío y la confirmación otro.
 const SHIPPING_BY_TYPE: Record<string, number> = {
   bota: 160,
   sombrero: 130,
