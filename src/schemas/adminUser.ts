@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { PASSWORD_UPPERCASE_REGEX, PASSWORD_SYMBOL_REGEX } from "./auth";
+import { PASSWORD_UPPERCASE_REGEX, PASSWORD_NUMBER_REGEX, PASSWORD_SYMBOL_REGEX } from "./auth";
 
 export const createAdminUserSchema = z.object({
   name: z.string().trim().min(2, "El nombre es muy corto").max(120),
@@ -9,6 +9,7 @@ export const createAdminUserSchema = z.object({
     .trim()
     .min(8, "La contraseña temporal debe tener al menos 8 caracteres")
     .regex(PASSWORD_UPPERCASE_REGEX, "La contraseña temporal debe tener al menos una mayúscula")
+    .regex(PASSWORD_NUMBER_REGEX, "La contraseña temporal debe tener al menos un número")
     .regex(PASSWORD_SYMBOL_REGEX, "La contraseña temporal debe tener al menos un signo"),
   role: z.enum(["owner", "admin"]).optional().default("admin"),
 });
@@ -24,6 +25,7 @@ export const updateAccountSchema = z
       .trim()
       .min(8, "La nueva contraseña debe tener al menos 8 caracteres")
       .regex(PASSWORD_UPPERCASE_REGEX, "La nueva contraseña debe tener al menos una mayúscula")
+      .regex(PASSWORD_NUMBER_REGEX, "La nueva contraseña debe tener al menos un número")
       .regex(PASSWORD_SYMBOL_REGEX, "La nueva contraseña debe tener al menos un signo")
       .optional(),
     confirmPassword: z.string().optional(),
