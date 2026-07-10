@@ -1,8 +1,10 @@
 import type { Request, RequestHandler, Response } from "express";
+import Stripe from "stripe";
 import { asyncHandler } from "../middlewares/asyncHandler";
 import { createOrderSchema } from "../schemas/checkout";
 import * as ordersService from "../services/orders.service";
 import * as paymentService from "../services/payment.service";
+import { stripe, STRIPE_WEBHOOK_SECRET } from "../config/stripe";
 import { Order } from "../models/Order";
 import { OrderItem } from "../models/OrderItem";
 
@@ -33,21 +35,62 @@ export const createOrder: RequestHandler = asyncHandler(
 );
 
 /**
- * POST /api/webhooks/stripe — stub de webhook de pagos.
+ * POST /api/webhooks/stripe — webhook de pagos de Stripe.
  *
- * Fase 8: aquí se verificará la firma del evento con
- * `stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET)`, lo que
- * requiere montar la ruta con `express.raw({ type: "application/json" })` (el
- * cuerpo crudo, antes del `express.json()` global). Por ahora acepta JSON y, si
- * trae un paymentIntentId, marca la orden como pagada.
+ * La ruta se monta con `express.raw({ type: "application/json" })` (antes del
+ * `express.json()` global), así que `req.body` es el `Buffer` crudo que exige
+ * `constructEvent` para verificar la firma `Stripe-Signature`. Una firma inválida
+ * responde 400 (Stripe no lo cuenta como entregado); cualquier evento verificado
+ * responde 200 aunque no lo manejemos, para no provocar reintentos en bucle.
+ *
+ * Eventos manejados:
+ *  - `payment_intent.succeeded`      → orden `paid`.
+ *  - `payment_intent.payment_failed` → orden `failed` (sigue `pending`; el barrido
+ *                                      repondrá el stock si se abandona).
+ *  - `payment_intent.canceled`       → restock inmediato + orden `cancelled`.
  */
 export const stripeWebhook: RequestHandler = asyncHandler(
   async (req: Request, res: Response) => {
-    const paymentIntentId =
-      req.body?.data?.object?.id ?? req.body?.paymentIntentId;
+    const sig = req.headers["stripe-signature"];
+    if (!sig) {
+      res.status(400).json({ message: "Falta la firma de Stripe" });
+      return;
+    }
 
-    if (paymentIntentId) {
-      await paymentService.markOrderPaidFromWebhook(String(paymentIntentId));
+    let event: Stripe.Event;
+    try {
+      event = stripe.webhooks.constructEvent(
+        req.body as Buffer,
+        sig,
+        STRIPE_WEBHOOK_SECRET,
+      );
+    } catch (err) {
+      console.warn(
+        `[stripe] firma de webhook inválida: ${(err as Error).message}`,
+      );
+      res.status(400).json({ message: "Firma de webhook inválida" });
+      return;
+    }
+
+    switch (event.type) {
+      case "payment_intent.succeeded": {
+        const pi = event.data.object as Stripe.PaymentIntent;
+        await paymentService.markOrderPaidFromWebhook(pi.id);
+        break;
+      }
+      case "payment_intent.payment_failed": {
+        const pi = event.data.object as Stripe.PaymentIntent;
+        await paymentService.markOrderPaymentFailed(pi.id);
+        break;
+      }
+      case "payment_intent.canceled": {
+        const pi = event.data.object as Stripe.PaymentIntent;
+        const orderId = Number(pi.metadata?.orderId);
+        if (orderId) await ordersService.releaseOrderStock(orderId);
+        break;
+      }
+      default:
+        break;
     }
 
     res.json({ received: true });

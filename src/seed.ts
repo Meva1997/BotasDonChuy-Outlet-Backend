@@ -201,6 +201,7 @@ async function seed() {
       const order = await Order.create(
         {
           status: "paid",
+          paymentStatus: "paid",
           subtotal: totals.subtotal,
           savings: totals.savings,
           shipping: totals.shipping,

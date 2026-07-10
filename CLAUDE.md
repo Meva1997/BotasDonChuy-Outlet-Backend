@@ -89,13 +89,47 @@ atomic decrement → `409`). `unitCost` is frozen in the row but **excluded from
 that cost fields only appear on authenticated admin routes. Orders are created with
 `status: "pending"` / `paymentStatus: "unpaid"`; the response is `{ order, clientSecret }`.
 
-**Payments / Stripe seam** (Fase 8, wired but inert): `src/services/payment.service.ts` exposes
-`createPaymentIntentForOrder` (returns `{ clientSecret: null, paymentIntentId: null }` today) and
-`markOrderPaidFromWebhook`. `Order` has nullable `paymentIntentId` + `paymentStatus`
-(`unpaid|processing|paid|failed`) columns for this. `POST /api/webhooks/stripe`
-(`src/routes/webhook.routes.ts`) is a stub that flips the matching order to `paid`. The `stripe`
-package is **not installed**; activating it (real PaymentIntent, webhook signature verification via
-`express.raw`, releasing stock of abandoned `pending` orders) is deferred to Fase 8.
+**Payments / Stripe** (Fase 8, activo — solo Stripe; Skydropx sigue diferido): the `stripe`
+package is installed and configured in `src/config/stripe.ts` (its own `dotenv.config()` at module
+top, like `database.ts`, since imports run before `app.ts`'s `dotenv.config()`). That module
+**hard-requires** `STRIPE_SECRET_KEY` **and** `STRIPE_WEBHOOK_SECRET` (throws at startup if either
+is missing — no inert fallback) and exports the shared `stripe` client, `STRIPE_WEBHOOK_SECRET`,
+`STRIPE_CURRENCY` (default `"mxn"`), and the sweeper knobs `PENDING_ORDER_TTL_MINUTES` (30) /
+`PENDING_ORDER_SWEEP_INTERVAL_MINUTES` (10). Keys are **test/sandbox** for now. `Order` carries the
+nullable `paymentIntentId` + `paymentStatus` (`unpaid|processing|paid|failed`) columns.
+
+`src/services/payment.service.ts`: `createPaymentIntentForOrder(order)` creates a **real**
+PaymentIntent (`amount: Math.round(order.total * 100)` cents, `currency: STRIPE_CURRENCY`,
+`metadata.orderId`, `automatic_payment_methods`) and returns `{ clientSecret, paymentIntentId }`;
+`order.controller.ts`'s `createOrder` persists that `paymentIntentId` (+ `paymentStatus:
+"processing"`) on the order and returns the `clientSecret` to the client. `markOrderPaidFromWebhook`
+(→ `paid`) and `markOrderPaymentFailed` (→ `paymentStatus: "failed"`, keeps `status: "pending"` so a
+transient decline can be retried on the same PaymentIntent) are **idempotent** and **tolerant of a
+missing order** (log + return, never `throw`, so a verified event always 200s and Stripe doesn't
+retry in a loop).
+
+`POST /api/webhooks/stripe` (`src/routes/webhook.routes.ts` → `stripeWebhook`): mounted in
+`src/app.ts` with `express.raw({ type: "application/json" })` **before** the global
+`express.json()` (so `req.body` is the raw `Buffer` that `stripe.webhooks.constructEvent` needs to
+verify the `Stripe-Signature` header against `STRIPE_WEBHOOK_SECRET`). A missing/invalid signature
+returns **400** (Stripe won't count it as delivered); any verified event returns `{ received: true }`
+(200) even when unhandled, to avoid retry loops. Handled events: `payment_intent.succeeded` →
+`markOrderPaidFromWebhook`; `payment_intent.payment_failed` → `markOrderPaymentFailed`;
+`payment_intent.canceled` → `releaseOrderStock` (restock + `cancelled`). **Postgres note:** `express`
+raw parsing means the webhook route must be mounted before `express.json()`, not after.
+
+`orders.service.releaseOrderStock(orderId)` is the exact inverse of `createOrder`'s atomic stock
+decrement: in a transaction it locks the `Order` row **alone** (`FOR UPDATE` — *not* with the `items`
+include, since Postgres rejects `FOR UPDATE` on the nullable side of the `items` LEFT JOIN), loads
+its `OrderItem`s separately, `ProductSize.update({ stock: literal('stock + N') })` per line, and sets
+`status: "cancelled"` / `paymentStatus: "failed"`. It's **idempotent** (only acts while `status ===
+"pending"`) and **never restocks a paid order**, so the webhook `canceled` path and the sweeper can't
+double-restock. `src/services/pendingOrderSweeper.ts` (`startPendingOrderSweeper`, started from
+`app.ts` after `connectDB()`; skipped when `NODE_ENV === "test"`, timer `unref()`ed) runs every
+`PENDING_ORDER_SWEEP_INTERVAL_MINUTES`, finds `pending` orders older than
+`PENDING_ORDER_TTL_MINUTES` with a `paymentIntentId`, and **reconciles each against Stripe**
+(`retrieve`): if the PaymentIntent is `succeeded` it marks the order `paid` (recovers a missed
+webhook), otherwise it cancels the PaymentIntent and calls `releaseOrderStock`.
 
 **Dashboard** (`src/routes/adminDashboard.routes.ts`, `src/routes/adminOrder.routes.ts`,
 `src/controllers/dashboard.controller.ts`, `src/controllers/order.controller.ts`,
@@ -277,10 +311,13 @@ populates all of the above from the frontend's mock data.
 - TypeScript runs in `strict` mode with decorators enabled (`experimentalDecorators`,
   `emitDecoratorMetadata`); source in `src/`, output in `dist/`.
 - Configuration comes exclusively from environment variables (`PORT`, `NODE_ENV`,
-  `DATABASE_URL`, `CORS_ORIGIN`, `JWT_SECRET`, `JWT_EXPIRES_IN`, plus Cloudinary keys).
-  `.env` is gitignored — never commit it.
+  `DATABASE_URL`, `CORS_ORIGIN`, `JWT_SECRET`, `JWT_EXPIRES_IN`, `STRIPE_SECRET_KEY`,
+  `STRIPE_WEBHOOK_SECRET` (both required — the server throws at startup without them),
+  optional `STRIPE_CURRENCY`/`PENDING_ORDER_TTL_MINUTES`/`PENDING_ORDER_SWEEP_INTERVAL_MINUTES`,
+  plus Cloudinary keys). `.env` is gitignored — never commit it (the Stripe keys are test/sandbox).
 - Dependencies wired in: `jsonwebtoken` + `bcrypt` (auth), `zod` (validation),
-  `express-rate-limit` (auth routes), `swagger-jsdoc` + `swagger-ui-express` (API docs).
+  `express-rate-limit` (auth routes), `swagger-jsdoc` + `swagger-ui-express` (API docs),
+  `stripe` (payments — real PaymentIntent + signed webhook).
   Dependencies installed but not yet wired: `cloudinary` + `multer` +
   `multer-storage-cloudinary` (image uploads — Fase 3+).
   Prefer these existing libraries when implementing those features.
