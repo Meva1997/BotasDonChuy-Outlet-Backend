@@ -230,7 +230,7 @@ POST /api/auth/login  →  { "token": "<jwt>", "user": { "id": "...", "name": "D
 No bloquean el lanzamiento; hacerlos cuando el volumen lo justifique.
 
 - [ ] **Skydropx** — `POST /api/shipping/rates`: construir payload `POST {SKYDROPX_BASE_URL}/api/v1/quotations` con las dimensiones del producto; normalizar respuesta a `ShippingRate[]`. Mapeo `ShippingData → Skydropx` en [frontend/BACKEND.md](../frontend/BACKEND.md) §5.4. Hasta entonces, el front calcula envío localmente (`computeShipping`).
-- [ ] **Stripe** — `POST /api/orders` crea el pedido en `pending`, se genera el PaymentIntent, y un webhook `POST /api/webhooks/stripe` lo pasa a `paid`.
+- [x] **Stripe** (✅ hecho, solo test/sandbox) — `POST /api/orders` crea el pedido en `pending` y genera un PaymentIntent real (`src/services/payment.service.ts`); `POST /api/webhooks/stripe` verifica la firma sobre el cuerpo crudo (`express.raw`) y maneja `payment_intent.succeeded` → `paid`, `payment_intent.payment_failed` → `failed` y `payment_intent.canceled` → restock + `cancelled`. Un barrido (`src/services/pendingOrderSweeper.ts`) libera el stock de órdenes `pending` abandonadas reconciliándolas contra Stripe. Llaves exigidas: `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET`.
 
 ---
 
@@ -343,7 +343,7 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 
 **Fase 8 — Después**
 - [ ] Skydropx `POST /api/shipping/rates`
-- [ ] Stripe PaymentIntent + webhook
+- [x] Stripe PaymentIntent + webhook (solo test/sandbox; firma verificada + barrido de `pending`)
 
 **Ya hecho ✅**
 - [x] Express + Sequelize + PostgreSQL + `/health`

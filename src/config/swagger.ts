@@ -293,8 +293,9 @@ const options: Options = {
             clientSecret: {
               type: "string",
               nullable: true,
-              description: "Secreto del PaymentIntent de Stripe (null hasta Fase 8).",
-              example: null,
+              description:
+                "Secreto del PaymentIntent de Stripe; el cliente lo usa para confirmar el pago.",
+              example: "pi_3Abc123_secret_XyZ",
             },
           },
         },

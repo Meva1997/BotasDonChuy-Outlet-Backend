@@ -23,7 +23,7 @@ const router: Router = Router();
  *             $ref: '#/components/schemas/CreateOrderInput'
  *     responses:
  *       201:
- *         description: Pedido creado. `clientSecret` es null hasta activar Stripe (Fase 8).
+ *         description: Pedido creado (`pending`). Devuelve el `clientSecret` del PaymentIntent de Stripe para confirmar el pago.
  *         content:
  *           application/json:
  *             schema:

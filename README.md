@@ -44,10 +44,21 @@ JWT_EXPIRES_IN=7d
 CLOUDINARY_CLOUD_NAME=tu_cloud_name
 CLOUDINARY_API_KEY=tu_api_key
 CLOUDINARY_API_SECRET=tu_api_secret
+
+# Stripe (test/sandbox) — ambas son OBLIGATORIAS: el server no arranca sin ellas
+STRIPE_SECRET_KEY=sk_test_...           # o una restricted key rk_test_... con permiso de PaymentIntents
+STRIPE_WEBHOOK_SECRET=whsec_...         # de `stripe listen` (local) o del endpoint del dashboard
+STRIPE_CURRENCY=mxn                      # opcional (default mxn)
+PENDING_ORDER_TTL_MINUTES=30            # opcional: antigüedad para reciclar órdenes pending
+PENDING_ORDER_SWEEP_INTERVAL_MINUTES=10 # opcional: cada cuánto corre el barrido
 ```
 
 > En `NODE_ENV=development` los modelos se sincronizan automáticamente con
 > `sequelize.sync({ alter: true })`.
+
+> **Stripe (solo test/sandbox por ahora).** El PaymentIntent y el webhook son reales, con
+> llaves de test. Para obtener el `STRIPE_WEBHOOK_SECRET` en local y probar los eventos, ver
+> [Probar Stripe en local](#probar-stripe-en-local).
 
 ## Scripts
 
@@ -83,7 +94,7 @@ CLOUDINARY_API_SECRET=tu_api_secret
 | `POST`   | `/api/admin/users`            | ✅   | Crea un usuario del panel con contraseña temporal |
 | `DELETE` | `/api/admin/users/:id`        | ✅   | Elimina un usuario (bloquea autoeliminación y al último `owner`) |
 | `PUT`    | `/api/admin/account`          | ✅   | Actualiza el correo y/o la contraseña de la cuenta propia |
-| `POST`   | `/api/webhooks/stripe`        | —    | Webhook de pagos (stub, listo para Stripe en Fase 8) |
+| `POST`   | `/api/webhooks/stripe`        | 🔑   | Webhook de Stripe (firma verificada; lo invoca Stripe, no de uso manual) |
 
 ### `GET /api/products`
 
@@ -133,8 +144,9 @@ Convierte el carrito del cliente en un pedido persistido. Body:
   si se exceden). El límite **real** de existencias por talla lo impone el descuento atómico: pedir
   más unidades de las que hay en esa talla (o una talla inexistente) devuelve `409`.
 
-La orden nace en `status: "pending"` / `paymentStatus: "unpaid"`. Respuesta `201`:
-`{ order, clientSecret }` (`clientSecret` es `null` hasta activar Stripe en Fase 8). Errores:
+La orden nace en `status: "pending"` / `paymentStatus: "unpaid"`, se le crea un **PaymentIntent real
+de Stripe** y se guarda su `paymentIntentId` (`paymentStatus: "processing"`). Respuesta `201`:
+`{ order, clientSecret }` — el `clientSecret` sirve para que el cliente confirme el pago. Errores:
 `400` (body/cliente inválido), `409` (sin stock o producto no disponible, con el ítem en el mensaje).
 
 ### `GET /api/admin/dashboard` y `GET /api/admin/orders` (panel admin)
@@ -177,14 +189,67 @@ calcula el frontend.
   `costoEstimadoPedido` y `priority` (`urgente` <15 días · `pronto` <45 · `ok`). Las filas se ordenan
   por urgencia de cobertura y, dentro de cada nivel, por `margenMensual` desc.
 
-### Pagos (seam de Stripe, Fase 8)
+### Pagos con Stripe (Fase 8 — solo test/sandbox)
 
-El cobro real con Stripe está **cableado pero inerte**: `src/services/payment.service.ts` define
-`createPaymentIntentForOrder` (hoy devuelve `null`) y `markOrderPaidFromWebhook`, y
-`POST /api/webhooks/stripe` es un stub que marca la orden como `paid` por `paymentIntentId`. Al
-activar Stripe se rellenan esas funciones, se verifica la firma del webhook sobre el cuerpo crudo
-(`express.raw`) y se libera el stock de órdenes `pending` abandonadas. El paquete `stripe` aún no
-se instala.
+El cobro con Stripe está **activo** (solo Stripe; Skydropx sigue diferido). `src/config/stripe.ts`
+exige `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET` (el server no arranca sin ellas).
+
+- **PaymentIntent real:** `createPaymentIntentForOrder` (`src/services/payment.service.ts`) crea el
+  PaymentIntent con el `total` en centavos y `metadata.orderId`; `POST /api/orders` guarda el
+  `paymentIntentId` y devuelve el `clientSecret`.
+- **Webhook firmado:** `POST /api/webhooks/stripe` se monta con `express.raw` (antes del
+  `express.json()` global) y verifica la firma `Stripe-Signature` con `constructEvent`. Firma
+  inválida → `400`; evento verificado → `200`. Maneja `payment_intent.succeeded` → `paid`,
+  `payment_intent.payment_failed` → `failed` (sigue `pending`, permite reintento) y
+  `payment_intent.canceled` → restock + `cancelled`.
+- **Restock idempotente:** `orders.service.releaseOrderStock` revierte el descuento de stock (con
+  lock de la fila de la orden, solo mientras esté `pending`).
+- **Barrido:** `src/services/pendingOrderSweeper.ts` corre cada `PENDING_ORDER_SWEEP_INTERVAL_MINUTES`,
+  reconcilia las órdenes `pending` viejas contra Stripe y libera su stock (o las marca `paid` si el
+  PaymentIntent ya se pagó y se perdió el webhook).
+
+#### Probar Stripe en local
+
+El webhook verifica la firma `Stripe-Signature` contra `STRIPE_WEBHOOK_SECRET`. En local ese
+secreto lo genera la **Stripe CLI**, que además hace de túnel: recibe los eventos de Stripe y los
+reenvía a tu `localhost`.
+
+1. **Instala la Stripe CLI** (una sola vez):
+
+   ```bash
+   brew install stripe/stripe-cli/stripe   # macOS (Homebrew)
+   ```
+
+2. **Levanta dos terminales** — el backend y el túnel de webhooks:
+
+   ```bash
+   # Terminal 1 — backend
+   pnpm dev
+
+   # Terminal 2 — túnel de webhooks (reenvía eventos a la ruta local)
+   stripe listen --forward-to localhost:4000/api/webhooks/stripe
+   ```
+
+   > Si tu `STRIPE_SECRET_KEY` es una **restricted key** (`rk_test_…`), añade
+   > `--api-key rk_test_…` (necesita el permiso *Debugging Tools · Write*). Con `stripe login`
+   > (sesión completa) no hace falta el flag.
+
+3. **Copia el `whsec_…`** que imprime `stripe listen` al arrancar y pégalo en `.env` como
+   `STRIPE_WEBHOOK_SECRET`. Es **estable** para la cuenta (no rota al reiniciar `stripe listen`),
+   así que solo se pega una vez.
+
+4. **Dispara eventos de prueba** sin cobrar de verdad:
+
+   ```bash
+   stripe trigger payment_intent.succeeded        # → la orden pasa a "paid"
+   stripe trigger payment_intent.payment_failed   # → paymentStatus "failed" (sigue pending)
+   stripe trigger payment_intent.canceled         # → restock + "cancelled"
+   ```
+
+   Desde el frontend, la tarjeta de prueba es `4242 4242 4242 4242` (cualquier fecha futura y CVC).
+
+Sin el `stripe listen` corriendo, un pago se cobra en Stripe (test) pero la orden **no pasa a
+`paid`** porque el webhook nunca llega — hasta que el barrido la reconcilie contra Stripe.
 
 ### `/api/admin/brand`, `/api/admin/users` y `/api/admin/account` (marca y usuarios)
 
@@ -226,6 +291,7 @@ src/
 ├── seed.ts                      # Script de seed (productos, histórico, admin, marca)
 ├── config/
 │   ├── database.ts              # Conexión Sequelize a PostgreSQL
+│   ├── stripe.ts                # Cliente Stripe + llaves exigidas (test/sandbox)
 │   └── swagger.ts               # Spec OpenAPI base (swagger-jsdoc) servida en /api/docs
 ├── controllers/
 │   ├── product.controller.ts    # Lógica de productos (listar, obtener por id)
@@ -252,7 +318,7 @@ src/
 │   ├── brand.routes.ts          # Ruta /api/admin/brand (GET pública, PUT requireAuth)
 │   ├── adminUser.routes.ts      # Rutas /api/admin/users (requireAuth)
 │   ├── account.routes.ts        # Ruta /api/admin/account (requireAuth)
-│   └── webhook.routes.ts        # Ruta /api/webhooks/stripe (stub de pagos)
+│   └── webhook.routes.ts        # Ruta /api/webhooks/stripe (webhook de Stripe, firma verificada)
 ├── schemas/
 │   ├── auth.ts                   # Esquema zod de login
 │   ├── checkout.ts                # Esquema zod de envío/checkout
@@ -261,8 +327,9 @@ src/
 │   └── adminUser.ts               # Esquemas zod de alta de usuario y update de cuenta propia
 ├── services/
 │   ├── cart.ts                    # computeTotals, computeShipping, SHIPPING_BY_TYPE
-│   ├── orders.service.ts          # Checkout: stock atómico, totales, precios congelados
-│   ├── payment.service.ts         # Seam de Stripe (inerte hasta Fase 8)
+│   ├── orders.service.ts          # Checkout: stock atómico, totales, precios congelados; releaseOrderStock (restock)
+│   ├── payment.service.ts         # Stripe: crea PaymentIntent, concilia pagos/fallos del webhook
+│   ├── pendingOrderSweeper.ts     # Barrido de órdenes pending abandonadas (libera stock, reconcilia con Stripe)
 │   ├── dashboard.service.ts       # Agregación en memoria para GET /api/admin/dashboard
 │   ├── reports.service.ts         # Reportes mensuales + reposición (usa forecast.ts)
 │   └── forecast.ts                # Función pura portada del frontend

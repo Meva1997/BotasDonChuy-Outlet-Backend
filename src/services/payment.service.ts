@@ -1,27 +1,13 @@
 import { Order } from "../models/Order";
-import { AppError } from "../middlewares/AppError";
+import { stripe, STRIPE_CURRENCY } from "../config/stripe";
 
 /**
- * Seam de pagos — listo para Stripe, hoy inerte.
+ * Integración de pagos con Stripe (Fase 8, activa).
  *
- * El paquete `stripe` NO está instalado todavía (es tarea de Fase 8). Estas dos
- * funciones definen el contrato que el resto del backend usa, de modo que
- * activar Stripe sea solo rellenar el cuerpo:
- *
- *   import Stripe from "stripe";
- *   const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
- *
- * En `createPaymentIntentForOrder`:
- *   const intent = await stripe.paymentIntents.create({
- *     amount: Math.round(order.total * 100), // centavos
- *     currency: "mxn",
- *     metadata: { orderId: String(order.id) },
- *   });
- *   return { clientSecret: intent.client_secret, paymentIntentId: intent.id };
- *
- * Y el webhook (ver webhook.routes.ts) verificará la firma con
- * `stripe.webhooks.constructEvent(rawBody, sig, STRIPE_WEBHOOK_SECRET)` antes de
- * llamar a `markOrderPaidFromWebhook`.
+ * `createPaymentIntentForOrder` crea el PaymentIntent real de la orden recién
+ * persistida; su `clientSecret` viaja al cliente para confirmar el pago. La
+ * conciliación (orden → `paid`/`failed`) ocurre por webhook verificado por firma
+ * (ver `stripeWebhook` en order.controller.ts), nunca por callback del cliente.
  */
 
 export interface PaymentIntentResult {
@@ -30,27 +16,60 @@ export interface PaymentIntentResult {
 }
 
 /**
- * Crea (o simula) el PaymentIntent de una orden recién creada.
- * Hoy devuelve nulls: la orden queda en `pending`/`unpaid` sin cobro real.
+ * Crea el PaymentIntent de una orden. El monto se calcula en el servidor a partir
+ * del `total` ya recalculado (autoritativo) y se convierte a centavos. Se guarda
+ * `orderId` en metadata para conciliar el webhook aunque el lookup por
+ * `paymentIntentId` fallara.
  */
 export async function createPaymentIntentForOrder(
-  _order: Order,
+  order: Order,
 ): Promise<PaymentIntentResult> {
-  // TODO Fase 8: crear el PaymentIntent real con Stripe (ver cabecera).
-  return { clientSecret: null, paymentIntentId: null };
+  const intent = await stripe.paymentIntents.create({
+    amount: Math.round(order.total * 100), // total en pesos → centavos
+    currency: STRIPE_CURRENCY,
+    metadata: { orderId: String(order.id) },
+    automatic_payment_methods: { enabled: true },
+  });
+  return { clientSecret: intent.client_secret, paymentIntentId: intent.id };
 }
 
 /**
- * Marca una orden como pagada a partir de un evento de webhook.
- * Idempotente: si ya estaba pagada no hace nada.
+ * Marca una orden como pagada a partir de un evento de webhook ya verificado.
+ * Idempotente: si ya estaba pagada no hace nada. Tolerante a "orden no
+ * encontrada" (loguea y retorna sin lanzar) para que un evento verificado siempre
+ * responda 200 y Stripe no reintente en bucle por un PaymentIntent ajeno.
  */
 export async function markOrderPaidFromWebhook(
   paymentIntentId: string,
 ): Promise<void> {
   const order = await Order.findOne({ where: { paymentIntentId } });
   if (!order) {
-    throw new AppError("Orden no encontrada para el pago recibido", 404);
+    console.warn(
+      `[stripe] payment_intent.succeeded sin orden asociada: ${paymentIntentId}`,
+    );
+    return;
   }
   if (order.paymentStatus === "paid") return;
   await order.update({ status: "paid", paymentStatus: "paid" });
+}
+
+/**
+ * Marca una orden como pago fallido. Deja `status: "pending"` a propósito: un
+ * `payment_intent.payment_failed` suele ser un rechazo transitorio que el cliente
+ * reintenta con el MISMO PaymentIntent, así que no se libera el stock aquí; si la
+ * orden sigue sin pagarse, el barrido de órdenes vencidas hará el restock tras el
+ * TTL. Idempotente y tolerante a orden inexistente.
+ */
+export async function markOrderPaymentFailed(
+  paymentIntentId: string,
+): Promise<void> {
+  const order = await Order.findOne({ where: { paymentIntentId } });
+  if (!order) {
+    console.warn(
+      `[stripe] payment_intent.payment_failed sin orden asociada: ${paymentIntentId}`,
+    );
+    return;
+  }
+  if (order.paymentStatus === "paid") return; // ya pagada: ignorar un failed tardío
+  await order.update({ paymentStatus: "failed" });
 }

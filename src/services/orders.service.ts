@@ -149,3 +149,55 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
   });
   return full!;
 }
+
+/**
+ * Reversa del descuento de stock de una orden que no se pagó (cancelada o
+ * abandonada). Es la operación inversa exacta del descuento atómico de
+ * `createOrder`: por cada `OrderItem` devuelve su cantidad a la fila
+ * `ProductSize` correspondiente.
+ *
+ * Garantías:
+ *  - **Idempotente**: bloquea la fila de la orden (`FOR UPDATE`) y solo repone si
+ *    aún está `pending`. Si otra ruta (webhook `canceled` vs. barrido) ya la
+ *    cerró, no vuelve a sumar stock.
+ *  - **Nunca repone una orden pagada**: si `status`/`paymentStatus` es `paid`, sale
+ *    sin tocar nada (defensa contra una carrera con `payment_intent.succeeded`).
+ *  - **Atómica**: todo ocurre en una transacción; cualquier fallo revierte tanto la
+ *    reposición como el cambio de estado.
+ */
+export async function releaseOrderStock(
+  orderId: number,
+  finalStatus: "cancelled" = "cancelled",
+): Promise<void> {
+  await sequelize.transaction(async (t) => {
+    // Se bloquea SOLO la fila de la orden (sin incluir items): Postgres rechaza
+    // `FOR UPDATE` sobre el lado nullable de un LEFT JOIN, y para la idempotencia
+    // basta con serializar el acceso a la orden.
+    const order = await Order.findByPk(orderId, {
+      lock: t.LOCK.UPDATE,
+      transaction: t,
+    });
+    // Solo se repone una orden que sigue reservando stock (pending). Una orden ya
+    // pagada, cancelada o entregada no debe devolver stock.
+    if (!order || order.status !== "pending") return;
+
+    const items = await OrderItem.findAll({
+      where: { orderId },
+      transaction: t,
+    });
+    for (const item of items) {
+      await ProductSize.update(
+        { stock: sequelize.literal(`stock + ${item.quantity}`) },
+        {
+          where: { productId: item.productId, size: item.size },
+          transaction: t,
+        },
+      );
+    }
+
+    await order.update(
+      { status: finalStatus, paymentStatus: "failed" },
+      { transaction: t },
+    );
+  });
+}

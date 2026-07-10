@@ -7,26 +7,33 @@ const router: Router = Router();
  * @openapi
  * /api/webhooks/stripe:
  *   post:
- *     summary: Webhook de pagos (stub, listo para Stripe en Fase 8)
+ *     summary: Webhook de pagos de Stripe
  *     description: >
- *       Recibe eventos de la pasarela y, cuando corresponde, marca la orden
- *       asociada como pagada. Hoy es un stub: acepta JSON y concilia por
- *       `paymentIntentId`. En Fase 8 se verificará la firma del evento con el
- *       secreto de Stripe sobre el cuerpo crudo (`express.raw`).
+ *       Endpoint que recibe los eventos de Stripe. La ruta se monta con
+ *       `express.raw`, así que el cuerpo llega crudo y se verifica la firma del
+ *       header `Stripe-Signature` con `STRIPE_WEBHOOK_SECRET` antes de procesar
+ *       nada. Eventos manejados: `payment_intent.succeeded` (orden → `paid`),
+ *       `payment_intent.payment_failed` (orden → `failed`, sigue `pending`) y
+ *       `payment_intent.canceled` (restock + orden `cancelled`). Los demás eventos
+ *       se aceptan (200) sin acción. **No es de uso manual**: lo invoca Stripe.
  *     tags: [Webhooks]
+ *     parameters:
+ *       - in: header
+ *         name: Stripe-Signature
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Firma del evento generada por Stripe.
  *     requestBody:
  *       required: true
+ *       description: Cuerpo crudo del evento de Stripe (Event object). No parsear.
  *       content:
  *         application/json:
  *           schema:
  *             type: object
- *             properties:
- *               paymentIntentId:
- *                 type: string
- *                 example: pi_3Abc123
  *     responses:
  *       200:
- *         description: Evento recibido.
+ *         description: Evento recibido (verificado). Puede o no haber tenido efecto.
  *         content:
  *           application/json:
  *             schema:
@@ -35,8 +42,8 @@ const router: Router = Router();
  *                 received:
  *                   type: boolean
  *                   example: true
- *       404:
- *         description: No existe una orden con ese pago.
+ *       400:
+ *         description: Falta la firma o la verificación de la firma falló.
  *         content:
  *           application/json:
  *             schema:

@@ -17,6 +17,7 @@ import brandRoutes from "./routes/brand.routes";
 import adminUserRoutes from "./routes/adminUser.routes";
 import accountRoutes from "./routes/account.routes";
 import { errorHandler } from "./middlewares/errorHandler";
+import { startPendingOrderSweeper } from "./services/pendingOrderSweeper";
 import "./models/Product"; // register the model so sync() creates its table
 import "./models/ProductSize";
 import "./models/AdminUser";
@@ -31,10 +32,16 @@ const app: Express = express();
 const PORT = process.env.PORT || 4000;
 
 connectDB();
+startPendingOrderSweeper(); // libera stock de órdenes pending abandonadas (Stripe)
 
 //Global Middleware
 app.use(helmet());
 app.use(cors({ origin: process.env.CORS_ORIGIN }));
+
+// Webhook de Stripe: la verificación de firma exige el cuerpo CRUDO, así que se
+// monta con express.raw ANTES del express.json() global (que solo parsea el resto).
+app.use("/api/webhooks", express.raw({ type: "application/json" }), webhookRoutes);
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -55,10 +62,8 @@ app.use("/api/admin/brand", brandRoutes); // GET pública, PUT protegido dentro 
 app.use("/api/admin/users", adminUserRoutes);
 app.use("/api/admin/account", accountRoutes);
 app.use("/api/orders", orderRoutes); // checkout público
-// Webhook de pagos. Fase 8: el webhook real de Stripe necesita el cuerpo crudo
-// para verificar la firma, montando express.raw({ type: "application/json" })
-// en esta ruta ANTES del express.json() global. El stub actual usa JSON.
-app.use("/api/webhooks", webhookRoutes);
+// (El webhook de Stripe se monta arriba, antes de express.json(), para verificar
+// la firma sobre el cuerpo crudo.)
 
 /**
  * @openapi
