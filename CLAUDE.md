@@ -234,9 +234,10 @@ row (`id: 1`, defaults duplicated from `src/seed.ts`'s `BRAND_DEFAULTS` — **no
 `findByPk` + `404`, so the route works even on a dev DB where `pnpm seed` was never run (the
 frontend's `MarcaSection` has no "not seeded yet" empty state). `PUT` validates with
 `brandSettingsUpdateSchema` (`src/schemas/brand.ts`, all fields optional — the frontend autosaves
-one field at a time — non-`logoUrl` strings reject empty string since the columns are `NOT NULL`;
-`logoUrl` stays a loose non-empty string, not `.url()`, since Cloudinary upload wiring is still
-deferred and the frontend today even previews via a local `blob:` URL).
+one field at a time — all strings reject empty string since the columns are `NOT NULL`). The
+**logo is not handled here** (Fase 3 wired Cloudinary): `logoUrl`/`logoPublicId` are managed by the
+dedicated `POST`/`DELETE /api/admin/brand/logo` endpoints, and `brandSettingsUpdateSchema` no longer
+accepts `logoUrl` at all (see the **Imágenes / Cloudinary** section below).
 
 `GET /api/admin/users` `[auth]` lists `AdminUser` rows excluding `passwordHash`
 (`attributes: { exclude: ["passwordHash"] }`, same pattern as excluding `unitCost` on public
@@ -275,6 +276,50 @@ generic `UniqueConstraintError` → 409 handler in `errorHandler.ts` (that handl
 net for the small TOCTOU window). **Known limitation:** an email change does not re-sign the JWT,
 so the caller's current token keeps showing the old email until their next login.
 
+**Imágenes / Cloudinary** (Fase 3, activo — `src/config/cloudinary.ts`, `src/middlewares/upload.ts`,
+`src/services/image.service.ts`): product and brand-logo images live in **Cloudinary**.
+`src/config/cloudinary.ts` (its own `dotenv.config()` at module top, like `stripe.ts`/`database.ts`)
+**hard-requires** `CLOUDINARY_CLOUD_NAME` + `CLOUDINARY_API_KEY` + `CLOUDINARY_API_SECRET` (throws at
+startup if any is missing — side-effect imported from `app.ts` for fail-fast) and exports the shared
+`cloudinary` v2 client plus the folder constants `CLOUDINARY_PRODUCTS_FOLDER` /
+`CLOUDINARY_BRAND_FOLDER`. `src/middlewares/upload.ts` is **multer with `memoryStorage`** (buffers
+never touch disk; `fileFilter` allows only PNG/JPEG/WEBP → `AppError(400)`, `limits.fileSize` 5 MB) —
+`uploadProductImages` (`upload.array("images", 3)`) and `uploadLogo` (`upload.single("logo")`).
+`src/services/image.service.ts` uploads each buffer with `cloudinary.uploader.upload_stream`
+(returning `{ url, publicId }`) and deletes via `uploader.destroy` — **not**
+`multer-storage-cloudinary` (its peer-deps want multer/cloudinary 1.x; also, doing the upload
+manually keeps the `public_id` on hand for later deletion). `destroyImage` is idempotent/tolerant
+(no-op on a missing `publicId`, swallows "not found").
+
+**Product images** (`product.controller.ts`): `POST /api/admin/products/:id/images` `[auth]`
+(`uploadProductImages` middleware) uploads 1–3 images and appends them to `Product.images`, capping
+at 3 total. The cap is checked early (before uploading) **and** re-checked under a row lock
+(`SELECT … FOR UPDATE` in a transaction) so two concurrent adds can't both pass a stale count and
+clobber each other. Uploads are **all-or-nothing** (`uploadAllOrCleanup`: if any of several fails,
+the ones that succeeded are `destroy`ed so no orphan assets survive an un-persisted op), and if the
+DB transaction throws, the just-uploaded assets are cleaned up too. `DELETE
+/api/admin/products/:id/images` `[auth]` removes one image by `publicId` (in the body, validated by
+`deleteProductImageSchema`) under a row lock, **persists the DB change first, then** `destroy`s the
+Cloudinary asset best-effort (a failed `destroy` leaves an orphan — acceptable — never a dangling
+reference that would break the image in the store). Public product reads (`getProducts`,
+`getProductById`) run every row through `toPublicProduct`, which **strips `publicId`** from each
+image (internal Cloudinary management id) so the storefront only sees `url`/`imageSrc`. The admin
+`DELETE /api/admin/products/:id` hard-delete path also `destroy`s the product's images; the
+soft-delete path keeps them (the row survives for order history). Note `productSchema`/
+`productUpdateSchema` **no longer accept `imageSrc`** — images are set only through these dedicated
+endpoints.
+
+**Brand logo** (`brand.controller.ts`): `POST /api/admin/brand/logo` `[auth]` (`uploadLogo`) uploads
+the logo and, after persisting the new `logoUrl`/`logoPublicId`, `destroy`s the previous asset
+best-effort (new asset persisted before deleting the old, so a failed `destroy` never loses the
+current logo). `DELETE /api/admin/brand/logo` `[auth]` nulls both columns then `destroy`s
+best-effort. `BrandSettings` gained the nullable `logoPublicId` column alongside `logoUrl`.
+
+**Multer errors**: `errorHandler` maps `MulterError` (from parsing `multipart/form-data`) to `400`
+with a Spanish message — `LIMIT_FILE_SIZE` (>5 MB), `LIMIT_FILE_COUNT`, and `LIMIT_UNEXPECTED_FILE`
+(wrong field name or over the count — `err.field` disambiguates) — otherwise these would fall to the
+generic 500.
+
 **Error handling** (`src/middlewares/`): `asyncHandler` wraps async controller functions so
 thrown/rejected errors are forwarded to Express's error pipeline instead of needing try/catch
 in each controller. Controllers throw `AppError(message, statusCode)` for expected failures
@@ -300,7 +345,11 @@ database must be PostgreSQL. `discountPercent`, `stock`, and `sizes` are all `VI
 per unit, e.g. `[25, 25, 26]`) are derived from the `ProductSize` association (`productId`,
 `size`, `stock`, unique per `(productId, size)`) — the real source of truth for stock per size.
 Controllers must `include` the `productSizes` association for `stock`/`sizes` to resolve;
-without it they default to `0`/`[]`. `Order` holds a frozen snapshot of totals and shipping
+without it they default to `0`/`[]`. Product images live in the `images` column (`JSONB`, default
+`[]`, shape `[{ url, publicId }]` — the Cloudinary gallery, up to 3); `imageSrc` is a read-only
+`VIRTUAL` that returns `images[0]?.url ?? null` (kept for frontend compat — the source of truth is
+`images`, so there's no physical column to keep in sync). See the **Imágenes / Cloudinary** section.
+`Order` holds a frozen snapshot of totals and shipping
 data; `OrderItem` freezes per-unit prices (`unitOriginalPrice`, `unitSalePrice`, `unitCosto`) so
 historical orders aren't affected by later `Product` price changes. `AdminUser` and
 `BrandSettings` (singleton) round out the Fase 1 data model. `src/seed.ts` (`pnpm seed`)
@@ -317,9 +366,9 @@ populates all of the above from the frontend's mock data.
   plus Cloudinary keys). `.env` is gitignored — never commit it (the Stripe keys are test/sandbox).
 - Dependencies wired in: `jsonwebtoken` + `bcrypt` (auth), `zod` (validation),
   `express-rate-limit` (auth routes), `swagger-jsdoc` + `swagger-ui-express` (API docs),
-  `stripe` (payments — real PaymentIntent + signed webhook).
-  Dependencies installed but not yet wired: `cloudinary` + `multer` +
-  `multer-storage-cloudinary` (image uploads — Fase 3+).
+  `stripe` (payments — real PaymentIntent + signed webhook),
+  `cloudinary` + `multer` (image uploads — Fase 3: multer memory storage → Cloudinary
+  `upload_stream`; `multer-storage-cloudinary` is installed but **unused**, see the image section).
   Prefer these existing libraries when implementing those features.
 - `pnpm-workspace.yaml` holds the pnpm `allowBuilds` map (decides which dependency lifecycle
   scripts may run, e.g. `bcrypt: true`, `@scarf/scarf: false`). pnpm v11 errors on undecided

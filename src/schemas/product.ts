@@ -33,7 +33,9 @@ const productBaseSchema = z.object({
     sizesFromString,
     z.array(z.number().int().positive()).min(1, "Agrega al menos una talla"),
   ]),
-  imageSrc: z.string().trim().optional().or(z.literal("")),
+  // Las imágenes NO se setean por POST/PUT: se gestionan solo por los endpoints
+  // dedicados (POST/DELETE /api/admin/products/:id/images), que mantienen la BD
+  // sincronizada con Cloudinary. `imageSrc` ya no se acepta aquí.
   code: z.string().trim().max(40).optional().or(z.literal("")),
   weightKg: z.number().nonnegative(),
   lengthCm: z.number().nonnegative(),
@@ -68,3 +70,10 @@ export const productUpdateSchema = productBaseSchema
   });
 
 export type ProductUpdateInput = z.infer<typeof productUpdateSchema>;
+
+/** Body de DELETE /api/admin/products/:id/images — identifica la imagen a borrar. */
+export const deleteProductImageSchema = z.object({
+  publicId: z.string().trim().min(1, "Se requiere el publicId de la imagen"),
+});
+
+export type DeleteProductImageInput = z.infer<typeof deleteProductImageSchema>;

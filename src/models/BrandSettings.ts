@@ -9,11 +9,12 @@ interface BrandSettingsAttributes {
   cartNotice: string;
   footerNote: string;
   logoUrl: string | null;
+  logoPublicId: string | null;
 }
 
 interface BrandSettingsCreationAttributes extends Optional<
   BrandSettingsAttributes,
-  "logoUrl"
+  "logoUrl" | "logoPublicId"
 > {}
 
 export class BrandSettings
@@ -27,6 +28,7 @@ export class BrandSettings
   declare cartNotice: string;
   declare footerNote: string;
   declare logoUrl: string | null;
+  declare logoPublicId: string | null;
 }
 
 BrandSettings.init(
@@ -57,6 +59,12 @@ BrandSettings.init(
       allowNull: false,
     },
     logoUrl: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    logoPublicId: {
+      // public_id de Cloudinary del logo, para poder destruir el anterior al
+      // reemplazarlo. No se expone como dato sensible (va en la propia URL).
       type: DataTypes.STRING,
       allowNull: true,
     },

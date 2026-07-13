@@ -2,6 +2,12 @@ import { DataTypes, Model, Optional } from "sequelize";
 import { sequelize } from "../config/database";
 import type { ProductSize } from "./ProductSize";
 
+/** Imagen de producto en Cloudinary: URL pública + public_id para poder borrarla. */
+export interface ProductImage {
+  url: string;
+  publicId: string;
+}
+
 export interface ProductAttributes {
   id: number;
   name: string;
@@ -13,7 +19,8 @@ export interface ProductAttributes {
   readonly stock: number;
   type: "bota" | "sombrero" | "ropa";
   readonly sizes: number[];
-  imageSrc?: string;
+  readonly imageSrc: string | null;
+  images: ProductImage[];
   code?: string;
   weightKg: number;
   lengthCm: number;
@@ -25,7 +32,7 @@ export interface ProductAttributes {
 
 interface ProductCreationAttributes extends Optional<
   ProductAttributes,
-  "id" | "description" | "imageSrc" | "code" | "discountPercent" | "stock" | "sizes" | "deletedAt"
+  "id" | "description" | "imageSrc" | "images" | "code" | "discountPercent" | "stock" | "sizes" | "deletedAt"
 > {}
 
 export class Product
@@ -42,7 +49,8 @@ export class Product
   declare readonly stock: number;
   declare type: "bota" | "sombrero" | "ropa";
   declare readonly sizes: number[];
-  declare imageSrc?: string;
+  declare readonly imageSrc: string | null;
+  declare images: ProductImage[];
   declare code?: string;
   declare weightKg: number;
   declare lengthCm: number;
@@ -133,8 +141,21 @@ Product.init(
       },
     },
     imageSrc: {
-      type: DataTypes.STRING,
-      allowNull: true,
+      // Derivado de images[0].url (primera imagen). VIRTUAL de solo lectura por
+      // compatibilidad con los consumidores del front que leen `imageSrc`: la
+      // fuente de verdad es `images`, así no hay columna física que sincronizar.
+      type: DataTypes.VIRTUAL,
+      get(this: Product) {
+        const images = this.getDataValue("images");
+        return images?.[0]?.url ?? null;
+      },
+    },
+    images: {
+      // Galería de hasta 3 imágenes en Cloudinary: [{ url, publicId }]. El
+      // public_id es lo que uploader.destroy necesita para borrar el asset.
+      type: DataTypes.JSONB,
+      allowNull: false,
+      defaultValue: [],
     },
     code: {
       type: DataTypes.STRING,

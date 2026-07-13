@@ -11,7 +11,7 @@ Construido con Express 5, TypeScript y Sequelize sobre PostgreSQL.
 - **Seguridad:** Helmet, CORS, express-rate-limit, bcrypt, JSON Web Tokens
 - **Validación:** Zod
 - **Documentación API:** Swagger UI (OpenAPI 3.0) vía swagger-jsdoc + swagger-ui-express
-- **Imágenes:** Cloudinary + multer / multer-storage-cloudinary
+- **Imágenes:** Cloudinary + multer (subida en memoria → `upload_stream`)
 - **Gestor de paquetes:** pnpm
 
 ## Requisitos
@@ -83,13 +83,17 @@ PENDING_ORDER_SWEEP_INTERVAL_MINUTES=10 # opcional: cada cuánto corre el barrid
 | `POST`   | `/api/admin/products`         | ✅   | Crea un producto (con tallas/stock)                |
 | `PUT`    | `/api/admin/products/:id`     | ✅   | Actualiza parcialmente un producto                 |
 | `DELETE` | `/api/admin/products/:id`     | ✅   | Elimina un producto (soft-delete si tiene pedidos) |
+| `POST`   | `/api/admin/products/:id/images` | ✅ | Sube de 1 a 3 imágenes del producto a Cloudinary |
+| `DELETE` | `/api/admin/products/:id/images` | ✅ | Borra una imagen del producto (por `publicId`) de Cloudinary |
 | `POST`   | `/api/orders`                 | —    | Checkout: crea un pedido desde el carrito          |
 | `GET`    | `/api/admin/dashboard`        | ✅   | Métricas agregadas del panel (KPIs, ingresos, ventas recientes, inventario) |
 | `GET`    | `/api/admin/orders`           | ✅   | Lista paginada de pedidos con sus items (incl. `unitCost`) |
 | `GET`    | `/api/admin/reports/monthly`  | ✅   | Ventas por mes por producto (`MonthlyReport[]`; mes en curso con `partial`) |
 | `GET`    | `/api/admin/reports/replenishment` | ✅ | Reposición sugerida (`ReplenishmentRow[]`; pronóstico + cobertura + margen) |
 | `GET`    | `/api/admin/brand`            | —    | Identidad de marca (lectura pública, crea el singleton con defaults si falta) |
-| `PUT`    | `/api/admin/brand`            | ✅   | Actualiza parcialmente la identidad de marca |
+| `PUT`    | `/api/admin/brand`            | ✅   | Actualiza parcialmente la identidad de marca (textos, no el logo) |
+| `POST`   | `/api/admin/brand/logo`       | ✅   | Sube el logo de la tienda a Cloudinary (reemplaza el anterior) |
+| `DELETE` | `/api/admin/brand/logo`       | ✅   | Quita el logo de la tienda (y lo borra de Cloudinary) |
 | `GET`    | `/api/admin/users`            | ✅   | Lista los usuarios del panel (sin `passwordHash`) |
 | `POST`   | `/api/admin/users`            | ✅   | Crea un usuario del panel con contraseña temporal |
 | `DELETE` | `/api/admin/users/:id`        | ✅   | Elimina un usuario (bloquea autoeliminación y al último `owner`) |
@@ -117,10 +121,12 @@ Todas las rutas están protegidas con `requireAuth`. A diferencia de `/api/produ
 también los productos no visibles y el campo `unitCost`. El body de `POST`/`PUT` se valida con
 zod (`productSchema` / `productUpdateSchema`): `sizes` acepta un string `"25,25,26"` o un array
 de números (cada repetición = una unidad de stock para esa talla) y se materializa en filas de
-`ProductSize`. `salePrice` no puede superar a `originalPrice`. El `DELETE` hace **soft-delete**
-(`deletedAt` + `visible: false`) si el producto está referenciado por algún pedido, o
-**hard-delete** (con sus `ProductSize` por CASCADE) si no lo está — la respuesta indica
-`{ ok, softDeleted }`.
+`ProductSize`. `salePrice` no puede superar a `originalPrice`. **Las imágenes no se setean por
+`POST`/`PUT`**: se gestionan por los endpoints dedicados de imágenes (ver más abajo). El `DELETE`
+hace **soft-delete** (`deletedAt` + `visible: false`) si el producto está referenciado por algún
+pedido — sus imágenes permanecen en Cloudinary para conservar el histórico —, o **hard-delete**
+(con sus `ProductSize` por CASCADE y borrando sus imágenes de Cloudinary) si no lo está — la
+respuesta indica `{ ok, softDeleted }`.
 
 ### `POST /api/orders` (checkout público)
 
@@ -268,6 +274,30 @@ Sin el `stripe listen` corriendo, un pago se cobra en Stripe (test) pero la orde
   `ConfigSection` ("Actualizar Correo" / "Cambiar Contraseña"). No reemite el JWT tras un cambio de
   correo — el token vigente sigue mostrando el correo anterior hasta el siguiente login.
 
+### Imágenes con Cloudinary (Fase 3)
+
+Las imágenes de producto y el logo de marca viven en **Cloudinary**. `src/config/cloudinary.ts`
+exige `CLOUDINARY_CLOUD_NAME` + `CLOUDINARY_API_KEY` + `CLOUDINARY_API_SECRET` (como `stripe.ts`,
+carga su propio `.env` y el server **no arranca** sin ellas). Las subidas se reciben por
+`multipart/form-data` con **multer en memoria** (sin tocar disco, máx **5 MB**, solo
+PNG/JPEG/WEBP) y se suben con `upload_stream` (`src/services/image.service.ts`) — no se usa
+`multer-storage-cloudinary` porque su versión peer-depende de multer/cloudinary 1.x.
+
+- **Producto:** `POST /api/admin/products/:id/images` sube de 1 a 3 imágenes (campo `images`),
+  respetando un tope de **3 en total** revalidado bajo lock de fila (`SELECT … FOR UPDATE`) contra
+  adds concurrentes. `DELETE /api/admin/products/:id/images` borra una imagen por su `publicId`
+  (en el body). La galería se guarda en la columna `Product.images` (`JSONB`, `[{ url, publicId }]`);
+  `imageSrc` es un `VIRTUAL` de solo lectura que devuelve la URL de la **primera** imagen. Las rutas
+  **públicas** ocultan el `publicId` de cada imagen (identificador interno de Cloudinary) — el
+  storefront solo consume `url`/`imageSrc`.
+- **Marca:** `POST /api/admin/brand/logo` sube el logo (campo `logo`) y **destruye el anterior**;
+  `DELETE /api/admin/brand/logo` lo quita. `BrandSettings` guarda `logoUrl` + `logoPublicId`.
+- **Consistencia BD ↔ Cloudinary:** las subidas de producto son **todo o nada** (si una de varias
+  falla, se destruyen las que sí subieron); los borrados se **persisten en la BD antes** de destruir
+  el asset (un fallo del `destroy` deja un huérfano en Cloudinary, nunca una referencia colgante que
+  rompería la imagen en la tienda). Los errores de multer (tamaño/formato/campo inesperado) se mapean
+  a `400` en el `errorHandler`.
+
 ## Documentación API (Swagger)
 
 Con el servidor en marcha, la documentación interactiva está disponible en:
@@ -292,6 +322,7 @@ src/
 ├── config/
 │   ├── database.ts              # Conexión Sequelize a PostgreSQL
 │   ├── stripe.ts                # Cliente Stripe + llaves exigidas (test/sandbox)
+│   ├── cloudinary.ts            # Cliente Cloudinary + llaves exigidas (fail-fast al arrancar)
 │   └── swagger.ts               # Spec OpenAPI base (swagger-jsdoc) servida en /api/docs
 ├── controllers/
 │   ├── product.controller.ts    # Lógica de productos (listar, obtener por id)
@@ -306,7 +337,8 @@ src/
 │   ├── asyncHandler.ts            # Wrapper para controllers async (evita try/catch repetido)
 │   ├── errorHandler.ts            # Middleware centralizado de manejo de errores
 │   ├── rateLimit.ts               # authRateLimiter: 10 req / 15 min en rutas de auth
-│   └── requireAuth.ts             # Verifica JWT Bearer, adjunta req.user; requireRole helper
+│   ├── requireAuth.ts             # Verifica JWT Bearer, adjunta req.user; requireRole helper
+│   └── upload.ts                  # multer en memoria (uploadProductImages / uploadLogo)
 ├── routes/
 │   ├── product.routes.ts        # Rutas /api/products
 │   ├── adminProduct.routes.ts   # Rutas /api/admin/products (CRUD admin, requireAuth)
@@ -330,6 +362,7 @@ src/
 │   ├── orders.service.ts          # Checkout: stock atómico, totales, precios congelados; releaseOrderStock (restock)
 │   ├── payment.service.ts         # Stripe: crea PaymentIntent, concilia pagos/fallos del webhook
 │   ├── pendingOrderSweeper.ts     # Barrido de órdenes pending abandonadas (libera stock, reconcilia con Stripe)
+│   ├── image.service.ts           # Cloudinary: sube buffer (upload_stream) y borra asset (destroy)
 │   ├── dashboard.service.ts       # Agregación en memoria para GET /api/admin/dashboard
 │   ├── reports.service.ts         # Reportes mensuales + reposición (usa forecast.ts)
 │   └── forecast.ts                # Función pura portada del frontend

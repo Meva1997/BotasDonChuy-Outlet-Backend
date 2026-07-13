@@ -80,7 +80,26 @@ const options: Options = {
             imageSrc: {
               type: "string",
               nullable: true,
+              readOnly: true,
+              description:
+                "Derivado de images[0].url (primera imagen). Campo calculado de solo lectura: las imágenes se gestionan por POST/DELETE /api/admin/products/{id}/images.",
               example: "https://res.cloudinary.com/demo/image/upload/bota.jpg",
+            },
+            images: {
+              type: "array",
+              readOnly: true,
+              description:
+                "Galería de hasta 3 imágenes en Cloudinary. Se gestiona por los endpoints dedicados, no por POST/PUT del producto.",
+              items: {
+                type: "object",
+                properties: {
+                  url: {
+                    type: "string",
+                    example: "https://res.cloudinary.com/demo/image/upload/v1/botasdonchuy/products/abc.jpg",
+                  },
+                  publicId: { type: "string", example: "botasdonchuy/products/abc" },
+                },
+              },
             },
             code: { type: "string", nullable: true, example: "BTA-001" },
             weightKg: { type: "number", format: "float", example: 1.2 },
@@ -179,7 +198,6 @@ const options: Options = {
                 { type: "array", items: { type: "integer" }, example: [25, 25, 26] },
               ],
             },
-            imageSrc: { type: "string", nullable: true },
             code: { type: "string", nullable: true, example: "BTA-001" },
             weightKg: { type: "number", format: "float", example: 1.2 },
             lengthCm: { type: "number", format: "float", example: 30 },
@@ -479,21 +497,35 @@ const options: Options = {
               type: "string",
               example: "Liquidación de inventario · piezas finales · sin reposición",
             },
-            logoUrl: { type: "string", nullable: true, example: null },
+            logoUrl: {
+              type: "string",
+              nullable: true,
+              readOnly: true,
+              description:
+                "URL del logo en Cloudinary. Solo lectura: se gestiona por POST/DELETE /api/admin/brand/logo, no por PUT.",
+              example: null,
+            },
+            logoPublicId: {
+              type: "string",
+              nullable: true,
+              readOnly: true,
+              description: "public_id de Cloudinary del logo (para borrarlo al reemplazar).",
+              example: null,
+            },
             createdAt: { type: "string", format: "date-time" },
             updatedAt: { type: "string", format: "date-time" },
           },
         },
         BrandSettingsUpdateInput: {
           type: "object",
-          description: "Update parcial — envía solo los campos que cambian.",
+          description:
+            "Update parcial de textos — envía solo los campos que cambian. El logo NO se maneja aquí (ver POST/DELETE /api/admin/brand/logo).",
           properties: {
             brandName: { type: "string", example: "Botas Don Chuy Outlet" },
             heroText: { type: "string", example: "Liquidación final · Sin reposición" },
             tagline: { type: "string", example: "Piezas únicas. Sin reposición.\nCuando se acaba, se acaba." },
             cartNotice: { type: "string", example: "Estos artículos no se reservan" },
             footerNote: { type: "string", example: "Liquidación de inventario · piezas finales · sin reposición" },
-            logoUrl: { type: "string", nullable: true },
           },
         },
         AdminUser: {
