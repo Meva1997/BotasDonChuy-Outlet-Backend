@@ -1,13 +1,34 @@
 import type { Request, RequestHandler, Response } from "express";
 import { Op, type WhereOptions } from "sequelize";
-import { Product, type ProductAttributes } from "../models/Product";
+import { Product, type ProductAttributes, type ProductImage } from "../models/Product";
 import { ProductSize } from "../models/ProductSize";
 import { productSizesInclude } from "../utils/productSizesInclude";
 import { OrderItem } from "../models/OrderItem";
 import { asyncHandler } from "../middlewares/asyncHandler";
 import { AppError } from "../middlewares/AppError";
-import { productSchema, productUpdateSchema } from "../schemas/product";
+import {
+  productSchema,
+  productUpdateSchema,
+  deleteProductImageSchema,
+} from "../schemas/product";
 import { sequelize } from "../config/database";
+import { CLOUDINARY_PRODUCTS_FOLDER } from "../config/cloudinary";
+import { uploadImageBuffer, destroyImage } from "../services/image.service";
+
+const MAX_IMAGES_PER_PRODUCT = 3;
+
+/**
+ * Serializa un producto para las rutas PÚBLICAS: quita el `publicId` de cada
+ * imagen (identificador interno de gestión de Cloudinary que solo necesitan las
+ * rutas admin para borrar el asset). El storefront solo consume `url`/`imageSrc`.
+ */
+function toPublicProduct(product: Product): Record<string, unknown> {
+  const json = product.toJSON() as Record<string, unknown> & { images?: ProductImage[] };
+  if (Array.isArray(json.images)) {
+    json.images = json.images.map((img) => ({ url: img.url })) as ProductImage[];
+  }
+  return json;
+}
 
 export const getProducts: RequestHandler = asyncHandler(async (req: Request, res: Response) => {
   const categoria = req.query.categoria as string | undefined;
@@ -39,7 +60,7 @@ export const getProducts: RequestHandler = asyncHandler(async (req: Request, res
   const totalPages = Math.max(1, Math.ceil(total / perPage));
   const pageClamped = Math.min(Math.max(page, 1), totalPages); // clamp a [1, totalPages]
   const inicio = (pageClamped - 1) * perPage;
-  const products = filtrados.slice(inicio, inicio + perPage);
+  const products = filtrados.slice(inicio, inicio + perPage).map(toPublicProduct);
 
   res.json({
     products,
@@ -64,7 +85,7 @@ export const getProductById: RequestHandler = asyncHandler(async (req: Request, 
     throw new AppError("Producto no encontrado", 404);
   }
 
-  res.json(product);
+  res.json(toPublicProduct(product));
 });
 
 // ── Admin handlers ────────────────────────────────────────────────────────────
@@ -95,7 +116,6 @@ export const adminCreateProduct: RequestHandler = asyncHandler(async (req: Reque
         salePrice: data.salePrice,
         unitCost: data.unitCost,
         type: data.type,
-        imageSrc: data.imageSrc ?? undefined,
         code: data.code ?? undefined,
         weightKg: data.weightKg,
         lengthCm: data.lengthCm,
@@ -165,9 +185,14 @@ export const adminDeleteProduct: RequestHandler = asyncHandler(async (req: Reque
   const referenced = await OrderItem.count({ where: { productId: id } });
 
   if (referenced > 0) {
+    // Soft-delete: la fila (y sus imágenes) siguen en la BD para preservar el
+    // historial de pedidos, así que sus assets deben permanecer en Cloudinary.
     await product.update({ deletedAt: new Date(), visible: false });
     res.json({ ok: true, softDeleted: true });
   } else {
+    // Hard-delete: la fila desaparece, así que borramos también sus imágenes de
+    // Cloudinary para no dejar assets huérfanos. Primero Cloudinary, luego la BD.
+    await Promise.all((product.images ?? []).map((img) => destroyImage(img.publicId)));
     await sequelize.transaction(async (t) => {
       await ProductSize.destroy({ where: { productId: id }, transaction: t });
       await product.destroy({ transaction: t });
@@ -175,3 +200,131 @@ export const adminDeleteProduct: RequestHandler = asyncHandler(async (req: Reque
     res.json({ ok: true, softDeleted: false });
   }
 });
+
+// ── Imágenes de producto (Cloudinary) ──────────────────────────────────────────
+
+/**
+ * Sube varios buffers a Cloudinary de forma "todo o nada": si alguna subida
+ * falla, destruye las que sí se completaron y relanza, para no dejar assets
+ * huérfanos cuando la operación no se persiste en la BD.
+ */
+async function uploadAllOrCleanup(
+  files: Express.Multer.File[],
+  folder: string,
+): Promise<ProductImage[]> {
+  const results = await Promise.allSettled(
+    files.map((file) => uploadImageBuffer(file.buffer, folder)),
+  );
+
+  const uploaded = results
+    .filter((r): r is PromiseFulfilledResult<ProductImage> => r.status === "fulfilled")
+    .map((r) => r.value);
+
+  if (uploaded.length !== files.length) {
+    await Promise.all(uploaded.map((u) => destroyImage(u.publicId).catch(() => {})));
+    throw new AppError("No se pudieron subir todas las imágenes. Intenta de nuevo.", 502);
+  }
+
+  return uploaded;
+}
+
+/**
+ * POST /api/admin/products/:id/images
+ * Sube de 1 a 3 imágenes (campo multipart `images`) a Cloudinary y las agrega al
+ * producto, respetando el tope de 3 en total. `imageSrc` (VIRTUAL) refleja la primera.
+ */
+export const adminAddProductImages: RequestHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const id = Number(req.params.id);
+    const files = (req.files as Express.Multer.File[] | undefined) ?? [];
+    if (files.length === 0) {
+      throw new AppError("No se recibió ninguna imagen", 400);
+    }
+
+    const product = await Product.findByPk(id, { include: [productSizesInclude] });
+    if (!product) throw new AppError("Producto no encontrado", 404);
+
+    // Chequeo temprano (mejor UX: evita subir a Cloudinary si obviamente excede),
+    // revalidado luego bajo el lock de fila contra concurrencia.
+    if ((product.images ?? []).length + files.length > MAX_IMAGES_PER_PRODUCT) {
+      throw new AppError(
+        `Máximo ${MAX_IMAGES_PER_PRODUCT} imágenes por producto (ya tiene ${(product.images ?? []).length})`,
+        400,
+      );
+    }
+
+    // Sube todas o ninguna: si una falla, destruye las que sí subieron para no
+    // dejar assets huérfanos en Cloudinary.
+    const uploaded = await uploadAllOrCleanup(files, CLOUDINARY_PRODUCTS_FOLDER);
+
+    // Persistir bajo un lock de fila (SELECT ... FOR UPDATE) serializa dos adds
+    // concurrentes: sin él, ambos leen la misma galería y uno pisa al otro
+    // (imágenes perdidas en BD → huérfanas en Cloudinary).
+    try {
+      await sequelize.transaction(async (t) => {
+        const locked = await Product.findByPk(id, { lock: t.LOCK.UPDATE, transaction: t });
+        if (!locked) throw new AppError("Producto no encontrado", 404);
+
+        const current = locked.images ?? [];
+        if (current.length + uploaded.length > MAX_IMAGES_PER_PRODUCT) {
+          throw new AppError(
+            `Máximo ${MAX_IMAGES_PER_PRODUCT} imágenes por producto (ya tiene ${current.length})`,
+            400,
+          );
+        }
+
+        const images = [...current, ...uploaded];
+        await locked.update({ images }, { transaction: t });
+        // Reutiliza la instancia ya cargada con productSizes (evita un 2º findByPk):
+        // imageSrc (VIRTUAL) deriva de images, que acabamos de setear.
+        product.setDataValue("images", images);
+      });
+    } catch (err) {
+      // La transacción no escribió nada; limpia los assets recién subidos.
+      await Promise.all(uploaded.map((u) => destroyImage(u.publicId).catch(() => {})));
+      throw err;
+    }
+
+    res.status(201).json(product);
+  },
+);
+
+/**
+ * DELETE /api/admin/products/:id/images
+ * Borra una imagen (identificada por `publicId` en el body) del producto y de
+ * Cloudinary; `imageSrc` (VIRTUAL) pasa a reflejar la nueva primera imagen (o null).
+ */
+export const adminDeleteProductImage: RequestHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const id = Number(req.params.id);
+    const { publicId } = deleteProductImageSchema.parse(req.body);
+
+    const product = await Product.findByPk(id, { include: [productSizesInclude] });
+    if (!product) throw new AppError("Producto no encontrado", 404);
+
+    // Bajo lock de fila para no pisar un add/delete concurrente. Se persiste el
+    // cambio ANTES de borrar en Cloudinary (igual que uploadBrandLogo): así un
+    // fallo del destroy deja un huérfano —no una referencia colgante que rompería
+    // la imagen en la tienda—.
+    await sequelize.transaction(async (t) => {
+      const locked = await Product.findByPk(id, { lock: t.LOCK.UPDATE, transaction: t });
+      if (!locked) throw new AppError("Producto no encontrado", 404);
+
+      const current = locked.images ?? [];
+      if (!current.some((img) => img.publicId === publicId)) {
+        throw new AppError("Imagen no encontrada en el producto", 404);
+      }
+
+      const images = current.filter((img) => img.publicId !== publicId);
+      await locked.update({ images }, { transaction: t });
+      // Reutiliza la instancia con productSizes ya cargados (evita un 2º findByPk).
+      product.setDataValue("images", images);
+    });
+
+    // Cambio ya persistido: borrar el asset es best-effort. Si falla, queda un
+    // huérfano en Cloudinary (aceptable) pero la BD queda consistente.
+    await destroyImage(publicId).catch(() => {});
+
+    res.json(product);
+  },
+);
