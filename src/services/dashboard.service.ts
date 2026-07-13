@@ -22,6 +22,7 @@ export type Period = "7" | "30" | "90";
 export interface SaleRow {
   id: string;
   date: string;
+  day: string; // clave ISO en UTC ("2026-07-13") para filtrar por día en el front
   pieces: number;
   items: string;
   savings: number;
@@ -205,6 +206,7 @@ function buildSaleRow(order: Order): SaleRow {
   return {
     id: String(order.id),
     date,
+    day: isoDay(order.createdAt),
     pieces,
     items: itemsLabel,
     savings: order.savings,
