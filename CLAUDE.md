@@ -134,19 +134,30 @@ webhook), otherwise it cancels the PaymentIntent and calls `releaseOrderStock`.
 **Dashboard** (`src/routes/adminDashboard.routes.ts`, `src/routes/adminOrder.routes.ts`,
 `src/controllers/dashboard.controller.ts`, `src/controllers/order.controller.ts`,
 `src/services/dashboard.service.ts`): `GET /api/admin/dashboard` `[auth]` returns `DashboardData`
-(`kpis`, `profitKpis`, `revenueByPeriod`, `recentSales`, `inventory`) computed **in memory** from
-`Order`/`OrderItem`/`Product` — no aggregation tables. Only orders with `status: "paid"` count as
-sales (not `paymentStatus`, which the seed leaves at `"unpaid"` — see `src/seed.ts`).
-`kpis`/`profitKpis` use a rolling **30-day window** (`today-29d..today`) vs. the prior 30 days for
-`trend`, so they stay numerically consistent with `revenueByPeriod["30"]` (same window, same
-data). `revenueByPeriod` returns all three `"7"|"30"|"90"` series together (one `RevenuePoint` per
-calendar day, including `$0` days — never skipped); day grouping (`isoDay`) and day-label
-formatting (`formatShortDate`) are **both pinned to UTC** (`timeZone: "UTC"` on every
+(`kpisByPeriod`, `profitKpisByPeriod`, `revenueByPeriod`, `recentSales`, `inventory`) computed **in
+memory** from `Order`/`OrderItem`/`Product` — no aggregation tables. Only orders with
+`status: "paid"` count as sales (not `paymentStatus`, which the seed leaves at `"unpaid"` — see
+`src/seed.ts`). `kpisByPeriod`/`profitKpisByPeriod` follow the same shape as `revenueByPeriod`: all
+three `"7"|"30"|"90"` windows computed together in one response (no query param — the frontend
+alternates client-side in `DataSection`), via `buildKpisForWindow(dailyAgg, windowDays, todayStart)`.
+Per-order aggregation (revenue/COGS/pieces/order-count) is folded into a single day-bucketed pass
+(`buildDailyAggregates` → `Map<isoDay, DayAggregate>`) so each order's `unitCost` is summed once
+instead of being re-scanned per KPI window; each window (and its prior comparison window) then sums
+straight from that map — the same UTC-day-bucket the revenue series uses. Each window's `trend`
+compares against its own equal-length prior window (e.g. `"90"`
+compares `today-89d..today` vs. the 90 days before that), which is why the shared order fetch
+(`ordersHistory`) reaches back `2 * REVENUE_WINDOW_DAYS` (180) days — the widest KPI window (90)
+needs a full prior 90-day period behind it for the comparison, not just the 90 days `revenueByPeriod`
+itself displays. `revenueByPeriod` returns all three `"7"|"30"|"90"` series together (one
+`RevenuePoint` per calendar day, including `$0` days — never skipped); day grouping (`isoDay`) and
+day-label formatting (`formatShortDate`) are **both pinned to UTC** (`timeZone: "UTC"` on every
 `toLocaleDateString`/`toLocaleTimeString` call) so the output doesn't depend on the host's local
 timezone — omitting that option silently rolls the label back a day on hosts west of UTC (caught
-during manual testing on a `America/Mexico_City` dev machine). `GASTOS FIJOS / MES` in
-`profitKpis` is a hardcoded `$2,000.00` constant (`GASTOS_FIJOS` in `dashboard.service.ts`) since
-there's no expenses model. `recentSales` caps at the 20 most recent paid orders; `savings`/`total`
+during manual testing on a `America/Mexico_City` dev machine). `GASTOS FIJOS` in `profitKpis` is a
+hardcoded `$2,000.00` **monthly** constant (`GASTOS_FIJOS` in `dashboard.service.ts`, no expenses
+model exists) prorated to each window (`GASTOS_FIJOS × windowDays/30`) so `"7"`/`"90"` don't
+subtract a flat month of fixed costs from a week's or a quarter's gross profit. `recentSales` caps
+at the 20 most recent paid orders; `savings`/`total`
 per row reuse `Order.savings`/`Order.total` directly (already computed by the `cart` service at
 checkout) rather than recomputing from items. `inventory` includes every non-soft-deleted product
 (including `visible: false`) since inventory value must reflect real holdings regardless of
@@ -167,7 +178,7 @@ Both endpoints are computed **in memory** from a single shared fetch (`loadRepor
 `productSizes` via the shared `productSizesInclude` from `src/utils/productSizesInclude.ts` — also
 reused by `dashboard.service.ts` and `product.controller.ts` — so the `Product.stock` virtual
 resolves) — no aggregation tables. Since neither report can be time-windowed the way the dashboard's
-90-day queries are (they cover full history by design), `loadReportData` caches its in-flight/settled
+180-day queries are (they cover full history by design), `loadReportData` caches its in-flight/settled
 promise for `REPORT_CACHE_TTL_MS` (60s); a failed fetch clears the cache immediately instead of
 repeating the error until the TTL expires. This keeps a single admin page load that hits both
 `/monthly` and `/replenishment` back-to-back from scanning the full order history twice.

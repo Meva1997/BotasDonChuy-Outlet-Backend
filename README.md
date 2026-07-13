@@ -160,9 +160,12 @@ de Stripe** y se guarda su `paymentIntentId` (`paymentStatus: "processing"`). Re
 `GET /api/admin/dashboard` calcula todo en memoria a partir de `Order`/`OrderItem`/`Product`
 (sin tablas de agregación): solo cuentan las órdenes con `status: "paid"`.
 
-- `kpis` / `profitKpis`: ventana móvil de **30 días** (`hoy-29d..hoy`) comparada contra los 30 días
-  anteriores para el `trend`. Valores monetarios formateados en `es-MX` (`"$13,531.00"`).
-  `GASTOS FIJOS / MES` es una constante hardcodeada (`$2,000.00`) — no existe un modelo de gastos.
+- `kpisByPeriod` / `profitKpisByPeriod`: igual patrón que `revenueByPeriod` — las tres ventanas
+  `"7" | "30" | "90"` juntas, cada una comparada contra su propio periodo anterior (p. ej. "30"
+  compara `hoy-29d..hoy` vs los 30 días previos) para el `trend`. El frontend alterna en cliente
+  (`DataSection`), sin query params. Valores monetarios formateados en `es-MX` (`"$13,531.00"`).
+  `GASTOS FIJOS` es una constante mensual hardcodeada (`$2,000.00`, no existe un modelo de gastos)
+  prorrateada a la ventana seleccionada (`$2,000 × ventana/30`).
 - `revenueByPeriod`: las tres series `"7" | "30" | "90"` juntas, un punto por día (incluye días en
   `$0`, no se omiten). El agrupamiento y el formateo de fechas son **ambos en UTC** (`timeZone:
   "UTC"` explícito), para que el resultado no dependa de la zona horaria del host donde corre el
@@ -254,8 +257,16 @@ reenvía a tu `localhost`.
 
    Desde el frontend, la tarjeta de prueba es `4242 4242 4242 4242` (cualquier fecha futura y CVC).
 
-Sin el `stripe listen` corriendo, un pago se cobra en Stripe (test) pero la orden **no pasa a
-`paid`** porque el webhook nunca llega — hasta que el barrido la reconcilie contra Stripe.
+> ⚠️ **Deja `stripe listen` corriendo en paralelo a `pnpm dev` durante todo el desarrollo.**
+> Sin el túnel, un pago se cobra en Stripe (test) pero la orden se queda en
+> `paymentStatus: "processing"` / `status: "pending"` porque el evento
+> `payment_intent.succeeded` nunca llega al webhook local. No es un bug: es el síntoma de
+> que falta el túnel. La orden **no se pierde** — el barrido (`pendingOrderSweeper.ts`) la
+> reconcilia contra Stripe y la marca `paid` en su siguiente pasada, pero recién tras el TTL:
+> corre cada `PENDING_ORDER_SWEEP_INTERVAL_MINUTES` (10 por defecto) sobre órdenes con más de
+> `PENDING_ORDER_TTL_MINUTES` (30) de antigüedad, así que la recuperación automática tarda
+> ~30–40 min y exige que el backend siga levantado. Con `stripe listen` activo, en cambio, la
+> orden pasa a `paid` en segundos.
 
 ### `/api/admin/brand`, `/api/admin/users` y `/api/admin/account` (marca y usuarios)
 

@@ -40,8 +40,8 @@ export interface InventoryRow {
 }
 
 export interface DashboardData {
-  kpis: KpiData[];
-  profitKpis: KpiData[];
+  kpisByPeriod: Record<Period, KpiData[]>;
+  profitKpisByPeriod: Record<Period, KpiData[]>;
   revenueByPeriod: Record<Period, RevenuePoint[]>;
   recentSales: SaleRow[];
   inventory: InventoryRow[];
@@ -52,7 +52,7 @@ export interface DashboardData {
 const GASTOS_FIJOS = 2000;
 const RECENT_SALES_LIMIT = 20;
 const REVENUE_WINDOW_DAYS = 90;
-const KPI_WINDOW_DAYS = 30;
+const PERIODS: Period[] = ["7", "30", "90"];
 
 function formatMoney(n: number): string {
   return `$${n.toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -74,16 +74,119 @@ function orderCost(order: Order): number {
   return (order.items ?? []).reduce((acc, item) => acc + item.unitCost * item.quantity, 0);
 }
 
-function buildRevenuePeriod(dailyRevenue: Map<string, number>, days: number, todayStart: Date): RevenuePoint[] {
+// Agregado por día calendario (UTC), acumulado en una sola pasada sobre el
+// historial. Las tres ventanas de KPIs (7/30/90) y sus periodos previos se
+// suman desde este mapa en vez de re-escanear ordersHistory por ventana.
+interface DayAggregate {
+  revenue: number;
+  cogs: number;
+  pieces: number;
+  orders: number;
+}
+
+function buildDailyAggregates(orders: Order[]): Map<string, DayAggregate> {
+  const byDay = new Map<string, DayAggregate>();
+  for (const order of orders) {
+    const key = isoDay(order.createdAt);
+    let agg = byDay.get(key);
+    if (!agg) {
+      agg = { revenue: 0, cogs: 0, pieces: 0, orders: 0 };
+      byDay.set(key, agg);
+    }
+    agg.revenue += order.total;
+    agg.cogs += orderCost(order);
+    agg.pieces += (order.items ?? []).reduce((a, i) => a + i.quantity, 0);
+    agg.orders += 1;
+  }
+  return byDay;
+}
+
+function buildRevenuePeriod(dailyAgg: Map<string, DayAggregate>, days: number, todayStart: Date): RevenuePoint[] {
   const points: RevenuePoint[] = [];
   for (let i = days - 1; i >= 0; i -= 1) {
     const day = addDays(todayStart, -i);
     points.push({
       date: formatShortDate(day),
-      revenue: dailyRevenue.get(isoDay(day)) ?? 0,
+      revenue: dailyAgg.get(isoDay(day))?.revenue ?? 0,
     });
   }
   return points;
+}
+
+function buildKpisForWindow(
+  dailyAgg: Map<string, DayAggregate>,
+  windowDays: number,
+  todayStart: Date,
+): { kpis: KpiData[]; profitKpis: KpiData[] } {
+  const currentWindowStart = addDays(todayStart, -(windowDays - 1));
+  const previousWindowStart = addDays(todayStart, -(2 * windowDays - 1));
+
+  let ingresos = 0;
+  let cogs = 0;
+  let piezasVendidas = 0;
+  let currentOrderCount = 0;
+  let ingresosPrev = 0;
+  let cogsPrev = 0;
+  let mejorDia: { date: Date; revenue: number } | null = null;
+
+  for (let i = 0; i < windowDays; i += 1) {
+    const day = addDays(currentWindowStart, i);
+    const agg = dailyAgg.get(isoDay(day));
+    const revenue = agg?.revenue ?? 0;
+    ingresos += revenue;
+    cogs += agg?.cogs ?? 0;
+    piezasVendidas += agg?.pieces ?? 0;
+    currentOrderCount += agg?.orders ?? 0;
+    if (!mejorDia || revenue > mejorDia.revenue) {
+      mejorDia = { date: day, revenue };
+    }
+
+    const prevAgg = dailyAgg.get(isoDay(addDays(previousWindowStart, i)));
+    ingresosPrev += prevAgg?.revenue ?? 0;
+    cogsPrev += prevAgg?.cogs ?? 0;
+  }
+
+  const ticketPromedio = currentOrderCount ? ingresos / currentOrderCount : 0;
+
+  const gananciaBruta = ingresos - cogs;
+  const gananciaBrutaPrev = ingresosPrev - cogsPrev;
+  const margenBruto = ingresos ? Math.round((gananciaBruta / ingresos) * 100) : 0;
+  // Gastos fijos prorrateados a la ventana seleccionada (el placeholder es mensual).
+  const gastosFijosWindow = GASTOS_FIJOS * (windowDays / 30);
+  const gananciaNeta = gananciaBruta - gastosFijosWindow;
+  const gananciaNetaPrev = gananciaBrutaPrev - gastosFijosWindow;
+
+  const kpis: KpiData[] = [
+    { label: "INGRESOS", value: formatMoney(ingresos), trend: computeTrend(ingresos, ingresosPrev) },
+    { label: "PIEZAS VENDIDAS", value: piezasVendidas.toLocaleString("es-MX") },
+    { label: "TICKET PROMEDIO", value: formatMoney(ticketPromedio) },
+    {
+      label: "MEJOR DÍA",
+      value: formatMoney(mejorDia?.revenue ?? 0),
+      subtitle: mejorDia ? formatShortDate(mejorDia.date) : undefined,
+    },
+  ];
+
+  const profitKpis: KpiData[] = [
+    {
+      label: "GANANCIA BRUTA",
+      value: formatMoney(gananciaBruta),
+      trend: computeTrend(gananciaBruta, gananciaBrutaPrev),
+    },
+    { label: "MARGEN BRUTO", value: `${margenBruto}%`, subtitle: "sobre precio de venta outlet" },
+    {
+      label: "GASTOS FIJOS",
+      value: formatMoney(gastosFijosWindow),
+      subtitle: `estimado · ventana de ${windowDays} días`,
+    },
+    {
+      label: "GANANCIA NETA",
+      value: formatMoney(gananciaNeta),
+      trend: computeTrend(gananciaNeta, gananciaNetaPrev),
+    },
+  ];
+
+  return { kpis, profitKpis };
 }
 
 function buildSaleRow(order: Order): SaleRow {
@@ -113,13 +216,15 @@ function buildSaleRow(order: Order): SaleRow {
 export async function getDashboardData(): Promise<DashboardData> {
   const now = new Date();
   const todayStart = utcDayStart(now);
-  const since90 = addDays(todayStart, -(REVENUE_WINDOW_DAYS - 1));
+  // La ventana de KPIs más ancha (90 días) necesita otros 90 días previos para
+  // el trend "vs periodo anterior" → se buscan 180 días de historial.
+  const sinceHistory = addDays(todayStart, -(2 * REVENUE_WINDOW_DAYS - 1));
 
-  const [orders90, recentOrders, products] = await Promise.all([
+  const [ordersHistory, recentOrders, products] = await Promise.all([
     Order.findAll({
       where: {
         status: "paid",
-        createdAt: { [Op.gte]: since90 },
+        createdAt: { [Op.gte]: sinceHistory },
       } as WhereOptions<OrderAttributes>,
       include: [{ model: OrderItem, as: "items" }],
       order: [["createdAt", "ASC"]],
@@ -136,77 +241,21 @@ export async function getDashboardData(): Promise<DashboardData> {
     }),
   ]);
 
-  const dailyRevenue = new Map<string, number>();
-  for (const order of orders90) {
-    const key = isoDay(order.createdAt);
-    dailyRevenue.set(key, (dailyRevenue.get(key) ?? 0) + order.total);
-  }
+  const dailyAgg = buildDailyAggregates(ordersHistory);
 
   const revenueByPeriod: Record<Period, RevenuePoint[]> = {
-    "7": buildRevenuePeriod(dailyRevenue, 7, todayStart),
-    "30": buildRevenuePeriod(dailyRevenue, 30, todayStart),
-    "90": buildRevenuePeriod(dailyRevenue, REVENUE_WINDOW_DAYS, todayStart),
+    "7": buildRevenuePeriod(dailyAgg, 7, todayStart),
+    "30": buildRevenuePeriod(dailyAgg, 30, todayStart),
+    "90": buildRevenuePeriod(dailyAgg, REVENUE_WINDOW_DAYS, todayStart),
   };
 
-  const currentWindowStart = addDays(todayStart, -(KPI_WINDOW_DAYS - 1));
-  const previousWindowStart = addDays(todayStart, -(2 * KPI_WINDOW_DAYS - 1));
-  const previousWindowEnd = currentWindowStart;
-
-  const currentOrders = orders90.filter((o) => o.createdAt >= currentWindowStart);
-  const previousOrders = orders90.filter(
-    (o) => o.createdAt >= previousWindowStart && o.createdAt < previousWindowEnd,
-  );
-
-  const ingresos = currentOrders.reduce((acc, o) => acc + o.total, 0);
-  const ingresosPrev = previousOrders.reduce((acc, o) => acc + o.total, 0);
-  const piezasVendidas = currentOrders.reduce(
-    (acc, o) => acc + (o.items ?? []).reduce((a, i) => a + i.quantity, 0),
-    0,
-  );
-  const ticketPromedio = currentOrders.length ? ingresos / currentOrders.length : 0;
-
-  let mejorDia: { date: Date; revenue: number } | null = null;
-  for (let i = 0; i < KPI_WINDOW_DAYS; i += 1) {
-    const day = addDays(currentWindowStart, i);
-    const revenue = dailyRevenue.get(isoDay(day)) ?? 0;
-    if (!mejorDia || revenue > mejorDia.revenue) {
-      mejorDia = { date: day, revenue };
-    }
+  const kpisByPeriod = {} as Record<Period, KpiData[]>;
+  const profitKpisByPeriod = {} as Record<Period, KpiData[]>;
+  for (const period of PERIODS) {
+    const { kpis, profitKpis } = buildKpisForWindow(dailyAgg, Number(period), todayStart);
+    kpisByPeriod[period] = kpis;
+    profitKpisByPeriod[period] = profitKpis;
   }
-
-  const cogs = currentOrders.reduce((acc, o) => acc + orderCost(o), 0);
-  const cogsPrev = previousOrders.reduce((acc, o) => acc + orderCost(o), 0);
-  const gananciaBruta = ingresos - cogs;
-  const gananciaBrutaPrev = ingresosPrev - cogsPrev;
-  const margenBruto = ingresos ? Math.round((gananciaBruta / ingresos) * 100) : 0;
-  const gananciaNeta = gananciaBruta - GASTOS_FIJOS;
-  const gananciaNetaPrev = gananciaBrutaPrev - GASTOS_FIJOS;
-
-  const kpis: KpiData[] = [
-    { label: "INGRESOS", value: formatMoney(ingresos), trend: computeTrend(ingresos, ingresosPrev) },
-    { label: "PIEZAS VENDIDAS", value: piezasVendidas.toLocaleString("es-MX") },
-    { label: "TICKET PROMEDIO", value: formatMoney(ticketPromedio) },
-    {
-      label: "MEJOR DÍA",
-      value: formatMoney(mejorDia?.revenue ?? 0),
-      subtitle: mejorDia ? formatShortDate(mejorDia.date) : undefined,
-    },
-  ];
-
-  const profitKpis: KpiData[] = [
-    {
-      label: "GANANCIA BRUTA",
-      value: formatMoney(gananciaBruta),
-      trend: computeTrend(gananciaBruta, gananciaBrutaPrev),
-    },
-    { label: "MARGEN BRUTO", value: `${margenBruto}%`, subtitle: "sobre precio de venta outlet" },
-    { label: "GASTOS FIJOS / MES", value: formatMoney(GASTOS_FIJOS), subtitle: "dominio · comisión pasarela" },
-    {
-      label: "GANANCIA NETA",
-      value: formatMoney(gananciaNeta),
-      trend: computeTrend(gananciaNeta, gananciaNetaPrev),
-    },
-  ];
 
   const recentSales = recentOrders.map(buildSaleRow);
 
@@ -220,5 +269,5 @@ export async function getDashboardData(): Promise<DashboardData> {
     valorInventario: p.stock * p.unitCost,
   }));
 
-  return { kpis, profitKpis, revenueByPeriod, recentSales, inventory };
+  return { kpisByPeriod, profitKpisByPeriod, revenueByPeriod, recentSales, inventory };
 }

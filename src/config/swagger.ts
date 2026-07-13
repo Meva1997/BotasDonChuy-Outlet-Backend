@@ -393,8 +393,24 @@ const options: Options = {
         DashboardData: {
           type: "object",
           properties: {
-            kpis: { type: "array", items: { $ref: "#/components/schemas/KpiData" } },
-            profitKpis: { type: "array", items: { $ref: "#/components/schemas/KpiData" } },
+            kpisByPeriod: {
+              type: "object",
+              description: "Las tres ventanas juntas; el front alterna en cliente.",
+              properties: {
+                "7": { type: "array", items: { $ref: "#/components/schemas/KpiData" } },
+                "30": { type: "array", items: { $ref: "#/components/schemas/KpiData" } },
+                "90": { type: "array", items: { $ref: "#/components/schemas/KpiData" } },
+              },
+            },
+            profitKpisByPeriod: {
+              type: "object",
+              description: "Las tres ventanas juntas; el front alterna en cliente.",
+              properties: {
+                "7": { type: "array", items: { $ref: "#/components/schemas/KpiData" } },
+                "30": { type: "array", items: { $ref: "#/components/schemas/KpiData" } },
+                "90": { type: "array", items: { $ref: "#/components/schemas/KpiData" } },
+              },
+            },
             revenueByPeriod: {
               type: "object",
               description: "Las tres series juntas; el front alterna en cliente.",
