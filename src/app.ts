@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import swaggerUi from "swagger-ui-express";
 import { connectDB } from "./config/database";
 import "./config/cloudinary"; // valida las llaves de Cloudinary al arrancar (fail-fast)
+import "./config/resend"; // valida RESEND_API_KEY + EMAIL_FROM al arrancar (fail-fast)
 import { swaggerSpec } from "./config/swagger";
 import productRoutes from "./routes/product.routes";
 import authRoutes from "./routes/auth.routes";

@@ -7,10 +7,22 @@ export interface AdminUserAttributes {
   email: string;
   passwordHash: string;
   role: "owner" | "admin";
+  // Flujo de recuperación de contraseña (Fase 9). El código nunca se guarda en
+  // claro: solo su hash sha256. Nulos cuando no hay un reset en curso.
+  resetPasswordCodeHash: string | null;
+  resetPasswordExpiresAt: Date | null;
+  resetPasswordAttempts: number;
 }
 
 interface AdminUserCreationAttributes
-  extends Optional<AdminUserAttributes, "id" | "role"> {}
+  extends Optional<
+    AdminUserAttributes,
+    | "id"
+    | "role"
+    | "resetPasswordCodeHash"
+    | "resetPasswordExpiresAt"
+    | "resetPasswordAttempts"
+  > {}
 
 export class AdminUser
   extends Model<AdminUserAttributes, AdminUserCreationAttributes>
@@ -21,6 +33,9 @@ export class AdminUser
   declare email: string;
   declare passwordHash: string;
   declare role: "owner" | "admin";
+  declare resetPasswordCodeHash: string | null;
+  declare resetPasswordExpiresAt: Date | null;
+  declare resetPasswordAttempts: number;
 }
 
 AdminUser.init(
@@ -47,6 +62,19 @@ AdminUser.init(
       type: DataTypes.ENUM("owner", "admin"),
       allowNull: false,
       defaultValue: "admin",
+    },
+    resetPasswordCodeHash: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    resetPasswordExpiresAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+    resetPasswordAttempts: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 0,
     },
   },
   {

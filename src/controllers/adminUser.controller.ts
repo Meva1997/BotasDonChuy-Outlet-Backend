@@ -10,7 +10,14 @@ import { sequelize } from "../config/database";
 export const listAdminUsers: RequestHandler = asyncHandler(
   async (_req, res: Response) => {
     const users = await AdminUser.findAll({
-      attributes: { exclude: ["passwordHash"] },
+      attributes: {
+        exclude: [
+          "passwordHash",
+          "resetPasswordCodeHash",
+          "resetPasswordExpiresAt",
+          "resetPasswordAttempts",
+        ],
+      },
       order: [["id", "ASC"]],
     });
     res.json(users);
@@ -32,7 +39,15 @@ export const createAdminUser: RequestHandler = asyncHandler(
       role: data.role,
     });
 
-    const { passwordHash: _omit, ...safeUser } = user.toJSON() as AdminUserAttributes;
+    // Mismo criterio que listAdminUsers: nunca serializamos el hash ni las
+    // columnas de recuperación de contraseña (aunque al crear estén en null/0).
+    const {
+      passwordHash: _omit,
+      resetPasswordCodeHash: _codeHash,
+      resetPasswordExpiresAt: _expiresAt,
+      resetPasswordAttempts: _attempts,
+      ...safeUser
+    } = user.toJSON() as AdminUserAttributes;
     res.status(201).json(safeUser);
   },
 );
