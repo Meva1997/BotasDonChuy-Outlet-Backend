@@ -65,12 +65,50 @@ schemas via `$ref: '#/components/schemas/...'` (add new schemas to `src/config/s
 
 **Auth** (`src/routes/auth.routes.ts`, `src/controllers/auth.controller.ts`): mounted at
 `/api/auth`. `POST /api/auth/login` validates the body with `loginSchema` (zod), looks up
-`AdminUser` by email, compares bcrypt hash, and returns `{ token, user }`. `POST /api/auth/forgot-password`
-always returns `{ ok: true }`. `GET /api/auth/me` is protected by `requireAuth` and returns
-the decoded `{ user }`. Both `/login` and `/forgot-password` are gated behind `authRateLimiter`
+`AdminUser` by email, compares bcrypt hash, and returns `{ token, user }`. `GET /api/auth/me` is
+protected by `requireAuth` and returns the decoded `{ user }`. `/login`, `/forgot-password`,
+`/verify-reset-code` and `/reset-password` are all gated behind `authRateLimiter`
 (10 req / 15 min). `requireAuth` (`src/middlewares/requireAuth.ts`) extracts the Bearer token,
 verifies it with `JWT_SECRET`, and attaches `req.user: AuthUser`. `requireRole(...roles)`
 checks `req.user.role` and throws `403` if the role isn't in the list.
+
+**Password reset via 5-digit code** (Fase 9.2 — `auth.controller.ts`, `src/utils/resetCode.ts`):
+the forgot-password flow uses a **5-digit numeric code** emailed to the user (not a reset link).
+`AdminUser` carries three nullable columns for it: `resetPasswordCodeHash` (sha256 of the code —
+never stored in clear; sha256 not bcrypt because the code is short-lived, single-use, and
+attempt-limited), `resetPasswordExpiresAt` (now + `RESET_CODE_TTL_MINUTES`, 15), and
+`resetPasswordAttempts` (counter). All three are **excluded from `GET /api/admin/users`** alongside
+`passwordHash`. `POST /api/auth/forgot-password` validates with `forgotPasswordSchema`, and **if
+the email exists** generates a code (`crypto.randomInt(0,100000)` padded to 5 digits), stores its
+hash + expiry (attempts reset to 0), and emails it via `email.service`; it **always** returns
+`{ ok: true }` (exists or not) so it never reveals whether an email is registered. `POST
+/api/auth/verify-reset-code` (`{ email, code }`) validates the code but **does not consume it** —
+it only unlocks the frontend's reset page; the real security is at reset. `POST
+/api/auth/reset-password` (`{ email, code, newPassword, confirmPassword }`, `resetPasswordSchema`
+enforces the same password complexity as `loginSchema`) **re-validates** the code, updates the
+`passwordHash`, and clears the three reset columns (single-use). A shared `assertValidResetCode`
+helper backs both endpoints: it rejects (generic `400 "Código inválido o expirado"`) when the
+user/code is missing, expired, or over `RESET_CODE_MAX_ATTEMPTS` (5), and on a wrong code it
+increments `resetPasswordAttempts` (burning the code once the max is hit) — the error message is
+identical for missing-email/wrong-code/expired so none of them is distinguishable. This flow is
+**independent** of `PUT /api/admin/account` (which requires `currentPassword`); the reset path
+needs no current password precisely because the user forgot it.
+
+**Emails / Resend** (Fase 9.1 — `src/config/resend.ts`, `src/services/email.service.ts`,
+`src/services/email/templates/`): transactional emails go through **Resend**.
+`src/config/resend.ts` (its own `dotenv.config()` at module top, like `stripe.ts`/`cloudinary.ts`)
+**hard-requires** `RESEND_API_KEY` **and** `EMAIL_FROM` (throws at startup if either is missing —
+side-effect imported from `app.ts` for fail-fast) and exports the shared `resend` client,
+`EMAIL_FROM`, and `FRONTEND_URL`. `src/services/email.service.ts` exposes `sendEmail({ to, subject,
+html, idempotencyKey? })` wrapping `resend.emails.send(...)`; it **logs but never throws** — the
+Resend SDK returns `{ data, error }` (it doesn't throw on API errors), so the wrapper handles both
+the returned `error` **and** a network exception via try/catch, and returns in both cases. A failed
+email must never take down the request that triggered it (forgot-password, checkout, Stripe
+webhook) — ROADMAP §6. HTML templates live in `src/services/email/templates/` as plain functions
+returning a string (no template engine); the first is `passwordResetCodeTemplate({ code, name? })`.
+**Domain caveat:** without a verified domain, `EMAIL_FROM` must be `onboarding@resend.dev` and
+Resend only delivers to the account owner's address (`403` to anyone else — swallowed by
+`sendEmail`); production needs a verified domain (manual DNS step, no code).
 
 **Checkout** (`src/routes/order.routes.ts`, `src/controllers/order.controller.ts`,
 `src/services/orders.service.ts`): `POST /api/orders` is **public** (mounted at `/api/orders`).
@@ -363,8 +401,10 @@ without it they default to `0`/`[]`. Product images live in the `images` column 
 `Order` holds a frozen snapshot of totals and shipping
 data; `OrderItem` freezes per-unit prices (`unitOriginalPrice`, `unitSalePrice`, `unitCosto`) so
 historical orders aren't affected by later `Product` price changes. `AdminUser` and
-`BrandSettings` (singleton) round out the Fase 1 data model. `src/seed.ts` (`pnpm seed`)
-populates all of the above from the frontend's mock data.
+`BrandSettings` (singleton) round out the Fase 1 data model; `AdminUser` also gained three
+nullable password-reset columns in Fase 9 (`resetPasswordCodeHash`, `resetPasswordExpiresAt`,
+`resetPasswordAttempts` — see the **Password reset via 5-digit code** section). `src/seed.ts`
+(`pnpm seed`) populates all of the above from the frontend's mock data.
 
 ## Conventions
 
@@ -374,12 +414,15 @@ populates all of the above from the frontend's mock data.
   `DATABASE_URL`, `CORS_ORIGIN`, `JWT_SECRET`, `JWT_EXPIRES_IN`, `STRIPE_SECRET_KEY`,
   `STRIPE_WEBHOOK_SECRET` (both required — the server throws at startup without them),
   optional `STRIPE_CURRENCY`/`PENDING_ORDER_TTL_MINUTES`/`PENDING_ORDER_SWEEP_INTERVAL_MINUTES`,
-  plus Cloudinary keys). `.env` is gitignored — never commit it (the Stripe keys are test/sandbox).
+  plus Cloudinary keys, `RESEND_API_KEY` + `EMAIL_FROM` (both required — the server throws at
+  startup without them) and optional `FRONTEND_URL`). `.env` is gitignored — never commit it
+  (the Stripe/Resend keys are test/sandbox).
 - Dependencies wired in: `jsonwebtoken` + `bcrypt` (auth), `zod` (validation),
   `express-rate-limit` (auth routes), `swagger-jsdoc` + `swagger-ui-express` (API docs),
   `stripe` (payments — real PaymentIntent + signed webhook),
   `cloudinary` + `multer` (image uploads — Fase 3: multer memory storage → Cloudinary
-  `upload_stream`; `multer-storage-cloudinary` is installed but **unused**, see the image section).
+  `upload_stream`; `multer-storage-cloudinary` is installed but **unused**, see the image section),
+  `resend` (transactional emails — Fase 9: password-reset code, see the Emails section).
   Prefer these existing libraries when implementing those features.
 - `pnpm-workspace.yaml` holds the pnpm `allowBuilds` map (decides which dependency lifecycle
   scripts may run, e.g. `bcrypt: true`, `@scarf/scarf: false`). pnpm v11 errors on undecided

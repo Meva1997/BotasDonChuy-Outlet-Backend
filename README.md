@@ -51,6 +51,11 @@ STRIPE_WEBHOOK_SECRET=whsec_...         # de `stripe listen` (local) o del endpo
 STRIPE_CURRENCY=mxn                      # opcional (default mxn)
 PENDING_ORDER_TTL_MINUTES=30            # opcional: antigüedad para reciclar órdenes pending
 PENDING_ORDER_SWEEP_INTERVAL_MINUTES=10 # opcional: cada cuánto corre el barrido
+
+# Resend (emails transaccionales) — ambas OBLIGATORIAS: el server no arranca sin ellas
+RESEND_API_KEY=re_...                    # del dashboard de Resend
+EMAIL_FROM=Botas Don Chuy <onboarding@resend.dev>  # sin dominio verificado, usar onboarding@resend.dev
+FRONTEND_URL=http://localhost:3000       # opcional: base para links dentro de los correos
 ```
 
 > En `NODE_ENV=development` los modelos se sincronizan automáticamente con
@@ -77,7 +82,9 @@ PENDING_ORDER_SWEEP_INTERVAL_MINUTES=10 # opcional: cada cuánto corre el barrid
 | `GET`    | `/api/products`               | —    | Lista productos visibles (paginados y filtrables)  |
 | `GET`    | `/api/products/:id`           | —    | Devuelve un producto visible por `id`              |
 | `POST`   | `/api/auth/login`             | —    | Login con email/password; devuelve JWT y usuario   |
-| `POST`   | `/api/auth/forgot-password`   | —    | Solicita recuperación de contraseña (`{ ok: true }`) |
+| `POST`   | `/api/auth/forgot-password`   | —    | Envía un código de 5 dígitos por correo (`{ ok: true }` siempre) |
+| `POST`   | `/api/auth/verify-reset-code` | —    | Verifica el código de recuperación (desbloquea el reset en el front) |
+| `POST`   | `/api/auth/reset-password`    | —    | Restablece la contraseña con el código (un solo uso) |
 | `GET`    | `/api/auth/me`                | ✅   | Devuelve el usuario autenticado desde el token JWT |
 | `GET`    | `/api/admin/products`         | ✅   | Lista **todos** los productos (incl. no visibles y `unitCost`) |
 | `POST`   | `/api/admin/products`         | ✅   | Crea un producto (con tallas/stock)                |

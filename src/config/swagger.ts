@@ -159,6 +159,51 @@ const options: Options = {
             },
           },
         },
+        VerifyResetCodeInput: {
+          type: "object",
+          required: ["email", "code"],
+          properties: {
+            email: {
+              type: "string",
+              format: "email",
+              example: "admin@botasdonchuy.com",
+            },
+            code: {
+              type: "string",
+              description: "Código de 5 dígitos numéricos recibido por correo.",
+              example: "04829",
+            },
+          },
+        },
+        ResetPasswordInput: {
+          type: "object",
+          required: ["email", "code", "newPassword", "confirmPassword"],
+          properties: {
+            email: {
+              type: "string",
+              format: "email",
+              example: "admin@botasdonchuy.com",
+            },
+            code: {
+              type: "string",
+              description: "Código de 5 dígitos numéricos recibido por correo.",
+              example: "04829",
+            },
+            newPassword: {
+              type: "string",
+              format: "password",
+              description:
+                "Mín. 8 caracteres, al menos una mayúscula, un número y un signo.",
+              example: "NuevoSecreto_123",
+            },
+            confirmPassword: {
+              type: "string",
+              format: "password",
+              description: "Debe coincidir con newPassword.",
+              example: "NuevoSecreto_123",
+            },
+          },
+        },
         AuthUser: {
           type: "object",
           properties: {

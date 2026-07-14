@@ -34,6 +34,7 @@
     "multer-storage-cloudinary": "^4.0.0",
     "pg": "^8.22.0",
     "pg-hstore": "^2.3.4",
+    "resend": "^6.17.2",
     "sequelize": "^6.37.8",
     "stripe": "^22.3.0",
     "swagger-jsdoc": "^6.3.0",
