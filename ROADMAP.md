@@ -44,7 +44,7 @@ Este backend usa **Express 5 + Sequelize 6 + PostgreSQL + TypeScript**.
 | Marca, usuarios | ✅ Hecho | Fase 7 |
 | Imágenes de producto + logo de marca (Cloudinary) | ✅ Hecho | Fase 3 (ver Imágenes) |
 | Lógica `forecast` / `cart` portada al backend | ✅ Hecho | [src/services/forecast.ts](src/services/forecast.ts) / [src/services/cart.ts](src/services/cart.ts) |
-| Emails transaccionales — forgot-password real (código 5 dígitos), Resend | 🔨 Parcial (falta confirmación de pedido) | Fase 9 |
+| Emails transaccionales — forgot-password (código 5 dígitos) + confirmación de pedido, Resend | ✅ Hecho | Fase 9 |
 
 ### ⚠️ Deuda de contrato detectada (arreglar en Fase 0)
 
@@ -289,10 +289,10 @@ Fase 7):
 - [x] `POST /api/auth/reset-password` (nuevo, público, `authRateLimiter`): valida `{ email, code, newPassword, confirmPassword }` con `resetPasswordSchema` (misma complejidad que `loginSchema`/`tempPassword`). **Revalida** el código, hashea la nueva password, limpia el código (de un solo uso) y devuelve `{ ok: true }`.
 
 **9.3 — Email de confirmación de pedido**
-- [ ] Disparar el envío **dentro de `markOrderPaidFromWebhook`** (`src/services/payment.service.ts`), no en un lugar nuevo — es el único punto por el que un pedido pasa a `paid`, tanto desde el webhook `payment_intent.succeeded` como desde la reconciliación del `pendingOrderSweeper`, así que ya hereda la idempotencia que ese servicio necesita.
-- [ ] **Idempotencia real, no solo la del SDK:** `markOrderPaidFromWebhook` debe enviar el correo únicamente en la transición `paymentStatus !== "paid" → "paid"` (comparar el estado *antes* del update), para que un reintento del webhook de Stripe sobre un pedido que ya estaba `paid` no reenvíe el correo. Además, pasar `idempotencyKey: order-confirmation/${order.id}` a `resend.emails.send` como cinturón de seguridad.
-- [ ] Plantilla de confirmación (`src/services/email/templates/orderConfirmation.ts`): resumen de `OrderItem`s (nombre, talla, cantidad, precio — **usar los precios congelados del `OrderItem`, nunca `Product` actual**), `subtotal`/`savings`/`shipping`/`total` de la orden, y datos de envío (`street`, `city`, etc.). **No incluir `unitCost`** (el correo lo ve el cliente).
-- [ ] Como nota a futuro (ver bloque de Skydropx en Fase 8): dejar la plantilla lista para agregar, más adelante, una sección de rastreo si `Order` gana esos campos — no bloquea esta fase, solo evita tener que reescribir la plantilla dos veces.
+- [x] Disparar el envío **dentro de `markOrderPaidFromWebhook`** (`src/services/payment.service.ts`), no en un lugar nuevo — es el único punto por el que un pedido pasa a `paid`, tanto desde el webhook `payment_intent.succeeded` como desde la reconciliación del `pendingOrderSweeper`, así que ya hereda la idempotencia que ese servicio necesita.
+- [x] **Idempotencia real, no solo la del SDK:** `markOrderPaidFromWebhook` hace la transición a `paid` con un **UPDATE atómico condicional** (`Order.update({...}, { where: { id, paymentStatus: { [Op.ne]: "paid" } } })`) y solo envía el correo cuando `affectedCount === 1`. El `WHERE paymentStatus != 'paid'` serializa a nivel de BD el webhook y el barrido concurrentes (un guard en memoria no bastaría: dos llamadas podrían leer `processing` antes de que cualquiera escriba y ambas enviarían). Además, `idempotencyKey: order-confirmation/${order.id}` en `resend.emails.send` como segundo cinturón (24h). El envío se aísla en `sendOrderConfirmationEmail(order)` y se dispara **fire-and-forget** (`void`, sin `await`) para no bloquear la respuesta `200` del webhook con la API de Resend (un Resend lento haría que Stripe excediera su timeout y reintentara en bucle).
+- [x] Plantilla de confirmación (`src/services/email/templates/orderConfirmation.ts`): resumen de `OrderItem`s (nombre, talla, cantidad, precio — **usar los precios congelados del `OrderItem`, nunca `Product` actual**), `subtotal`/`savings`/`shipping`/`total` de la orden, y datos de envío (`street`, `city`, etc.). **No incluir `unitCost`** (el correo lo ve el cliente). Todos los campos de texto controlados por cliente/producto (nombre, dirección, `nameSnapshot`, paquetería) pasan por un `escapeHtml` local antes de interpolarse en el HTML.
+- [x] Como nota a futuro (ver bloque de Skydropx en Fase 8): dejar la plantilla lista para agregar, más adelante, una sección de rastreo si `Order` gana esos campos — no bloquea esta fase, solo evita tener que reescribir la plantilla dos veces.
 
 **Cómo verificar:** con `RESEND_API_KEY` de prueba y **sin** dominio verificado — `POST /api/auth/forgot-password` con tu propio correo (el de la cuenta de Resend) → llega el email con el link; con otro correo distinto no debe tronar el request (el error 403 de Resend se traga y loguea). Confirmar un pedido de prueba vía Stripe test mode → llega el correo de confirmación; reenviar el mismo evento de webhook (Stripe permite reintentar desde el dashboard) → **no** se duplica el correo.
 
@@ -423,7 +423,7 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 **Fase 9 — Emails transaccionales (Resend)**
 - [x] Cimientos: `src/config/resend.ts`, `src/services/email.service.ts`, plantillas
 - [x] `POST /api/auth/forgot-password` real (deja de ser stub) + `POST /api/auth/verify-reset-code` + `POST /api/auth/reset-password` (código de 5 dígitos, ver desviación en Fase 9.2)
-- [ ] Email de confirmación de pedido al pasar a `paid`
+- [x] Email de confirmación de pedido al pasar a `paid`
 - [ ] Dominio verificado en Resend (manual, fuera del código) antes de enviar a clientes reales
 
 **Ya hecho ✅**

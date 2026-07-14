@@ -105,7 +105,23 @@ Resend SDK returns `{ data, error }` (it doesn't throw on API errors), so the wr
 the returned `error` **and** a network exception via try/catch, and returns in both cases. A failed
 email must never take down the request that triggered it (forgot-password, checkout, Stripe
 webhook) — ROADMAP §6. HTML templates live in `src/services/email/templates/` as plain functions
-returning a string (no template engine); the first is `passwordResetCodeTemplate({ code, name? })`.
+returning a string (no template engine): `passwordResetCodeTemplate({ code, name? })` and
+`orderConfirmationTemplate(...)` (Fase 9.3 — order confirmation, see the **Payments / Stripe**
+section for its trigger). `orderConfirmationTemplate` renders the itemized order (using the
+**frozen `OrderItem` prices**, never current `Product` prices — original price struck through when
+discounted), the `subtotal`/`savings`/`shipping`/`total`, the shipping address, and a **conditional
+shipping block**: today (no Skydropx) a "Estamos preparando tu envío" placeholder, but the signature
+already accepts an optional `tracking: { number, url?, carrier? }` so a future "tu pedido fue enviado"
+email can reuse it without a redesign (ROADMAP Fase 8↔9 note). It **never** receives or renders
+`unitCost`, formats money with a local `formatMoney` (es-MX `$1,920.50`, duplicated from
+`dashboard.service.ts` since that one isn't exported), and formats the order date pinned to
+`America/Mexico_City` (a **deliberate** deviation from the repo's UTC-pinning, which exists for
+aggregation stability — this is a customer receipt for a store in Celaya, GTO, so local time is
+correct). Every customer/product-controlled string it interpolates (`customerName`, `nameSnapshot`,
+the address fields, `shippingCarrier`, and the future `tracking` fields) is run through a **local
+`escapeHtml`** before interpolation — without it a legitimate `&`/`<`/`>` in an address breaks the
+render and a hostile value would inject markup; the numeric fields (size, quantity, prices, id) are
+not escaped.
 **Domain caveat:** without a verified domain, `EMAIL_FROM` must be `onboarding@resend.dev` and
 Resend only delivers to the account owner's address (`403` to anyone else — swallowed by
 `sendEmail`); production needs a verified domain (manual DNS step, no code).
@@ -144,7 +160,21 @@ PaymentIntent (`amount: Math.round(order.total * 100)` cents, `currency: STRIPE_
 (→ `paid`) and `markOrderPaymentFailed` (→ `paymentStatus: "failed"`, keeps `status: "pending"` so a
 transient decline can be retried on the same PaymentIntent) are **idempotent** and **tolerant of a
 missing order** (log + return, never `throw`, so a verified event always 200s and Stripe doesn't
-retry in a loop).
+retry in a loop). **Order-confirmation email** (Fase 9.3): `markOrderPaidFromWebhook` transitions the
+order to `paid` with an **atomic conditional UPDATE** — `Order.update({ status: "paid", paymentStatus:
+"paid" }, { where: { id, paymentStatus: { [Op.ne]: "paid" } } })` — and only sends the confirmation
+email when `affectedCount === 1`. This is the single funnel every order passes through (both the
+`payment_intent.succeeded` webhook and the `pendingOrderSweeper` recovery path call it), and the
+`WHERE paymentStatus != 'paid'` guard **serializes at the DB level** against concurrent webhook +
+sweeper runs: only one UPDATE affects the row, so the email fires exactly once. A plain in-memory
+guard (`if (order.paymentStatus === "paid")`) would **not** give this — two callers could both read
+`processing` before either writes and both send. A `idempotencyKey: order-confirmation/${order.id}`
+passed to Resend is a second 24h safety net. The send is extracted into a `sendOrderConfirmationEmail(order)`
+helper that `order.reload({ include: items excluding unitCost })` then templates + `sendEmail`, wrapped
+in its own `try/catch` that only logs. It is dispatched **fire-and-forget** (`void`, **not** awaited):
+the email must never block the webhook's `200` — if Resend were slow, Stripe could exceed its response
+timeout and retry the event in a loop. The order is already `paid`, so the send runs in the background
+and a failed email/reload can never propagate.
 
 `POST /api/webhooks/stripe` (`src/routes/webhook.routes.ts` → `stripeWebhook`): mounted in
 `src/app.ts` with `express.raw({ type: "application/json" })` **before** the global
