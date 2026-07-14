@@ -223,6 +223,12 @@ exige `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET` (el server no arranca sin el
 - **Barrido:** `src/services/pendingOrderSweeper.ts` corre cada `PENDING_ORDER_SWEEP_INTERVAL_MINUTES`,
   reconcilia las órdenes `pending` viejas contra Stripe y libera su stock (o las marca `paid` si el
   PaymentIntent ya se pagó y se perdió el webhook).
+- **Correo de confirmación (Fase 9.3):** al pasar a `paid`, `markOrderPaidFromWebhook` dispara el
+  correo de confirmación (Resend) con el resumen del pedido. La transición a `paid` es un **UPDATE
+  atómico condicional** (`WHERE paymentStatus != 'paid'`): garantiza que el correo se envíe **una sola
+  vez** aunque el webhook y el barrido lleguen a la vez (con un `idempotencyKey` de Resend como segundo
+  respaldo). El envío es **fire-and-forget** (no bloquea la respuesta `200` del webhook) y nunca tumba
+  el evento si Resend falla.
 
 #### Probar Stripe en local
 
@@ -379,11 +385,11 @@ src/
 ├── services/
 │   ├── cart.ts                    # computeTotals, computeShipping, SHIPPING_BY_TYPE
 │   ├── orders.service.ts          # Checkout: stock atómico, totales, precios congelados; releaseOrderStock (restock)
-│   ├── payment.service.ts         # Stripe: crea PaymentIntent, concilia pagos/fallos del webhook
+│   ├── payment.service.ts         # Stripe: crea PaymentIntent, concilia pagos/fallos del webhook; manda el correo de confirmación al pasar a paid
 │   ├── pendingOrderSweeper.ts     # Barrido de órdenes pending abandonadas (libera stock, reconcilia con Stripe)
 │   ├── image.service.ts           # Cloudinary: sube buffer (upload_stream) y borra asset (destroy)
 │   ├── email.service.ts           # sendEmail(...) sobre Resend; loguea pero nunca lanza
-│   ├── email/templates/           # Plantillas HTML como funciones (ej. passwordResetCode.ts)
+│   ├── email/templates/           # Plantillas HTML como funciones (passwordResetCode.ts, orderConfirmation.ts)
 │   ├── dashboard.service.ts       # Agregación en memoria para GET /api/admin/dashboard
 │   ├── reports.service.ts         # Reportes mensuales + reposición (usa forecast.ts)
 │   └── forecast.ts                # Función pura portada del frontend
