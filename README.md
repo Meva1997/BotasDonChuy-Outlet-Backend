@@ -341,6 +341,7 @@ src/
 │   ├── database.ts              # Conexión Sequelize a PostgreSQL
 │   ├── stripe.ts                # Cliente Stripe + llaves exigidas (test/sandbox)
 │   ├── cloudinary.ts            # Cliente Cloudinary + llaves exigidas (fail-fast al arrancar)
+│   ├── resend.ts                # Cliente Resend + RESEND_API_KEY/EMAIL_FROM exigidos (fail-fast)
 │   └── swagger.ts               # Spec OpenAPI base (swagger-jsdoc) servida en /api/docs
 ├── controllers/
 │   ├── product.controller.ts    # Lógica de productos (listar, obtener por id)
@@ -381,11 +382,16 @@ src/
 │   ├── payment.service.ts         # Stripe: crea PaymentIntent, concilia pagos/fallos del webhook
 │   ├── pendingOrderSweeper.ts     # Barrido de órdenes pending abandonadas (libera stock, reconcilia con Stripe)
 │   ├── image.service.ts           # Cloudinary: sube buffer (upload_stream) y borra asset (destroy)
+│   ├── email.service.ts           # sendEmail(...) sobre Resend; loguea pero nunca lanza
+│   ├── email/templates/           # Plantillas HTML como funciones (ej. passwordResetCode.ts)
 │   ├── dashboard.service.ts       # Agregación en memoria para GET /api/admin/dashboard
 │   ├── reports.service.ts         # Reportes mensuales + reposición (usa forecast.ts)
 │   └── forecast.ts                # Función pura portada del frontend
 ├── utils/
-│   └── password.ts                # Helpers de hash/verificación de contraseñas (bcrypt)
+│   ├── password.ts                # Helpers de hash/verificación de contraseñas (bcrypt)
+│   ├── date.ts                    # Helpers de fecha UTC (isoDay/isoMonth/formatShortDate/...)
+│   ├── productSizesInclude.ts     # Include reusado para resolver los VIRTUAL stock/sizes de Product
+│   └── resetCode.ts               # Genera/hashea el código de recuperación de 5 dígitos
 └── models/
     ├── Product.ts                # Modelo Product (bota | sombrero | ropa)
     ├── ProductSize.ts            # Stock por talla (productId, size, stock), único por (productId, size)

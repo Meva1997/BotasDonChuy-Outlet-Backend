@@ -34,8 +34,6 @@ Este backend usa **Express 5 + Sequelize 6 + PostgreSQL + TypeScript**.
 | `GET /api/products` (filtros, paginación, `availableSizes`, oculta costo) | ✅ Hecho | [src/controllers/product.controller.ts](src/controllers/product.controller.ts) |
 | `GET /api/products/:id` (filtra `visible`, 404) | ✅ Hecho | mismo archivo |
 | `/health` | ✅ Hecho | [src/app.ts](src/app.ts) |
-| jsonwebtoken, bcrypt, zod, express-rate-limit, cloudinary, multer, sequelize-cli | 🔨 Instalados, **sin cablear** | `package.json` |
-| Carpetas `src/middlewares/`, `src/schemas/`, `src/services/` | 🔨 Vacías, listas | `src/` |
 | Auth (login, JWT, `requireAuth`) | ✅ Hecho | [src/routes/auth.routes.ts](src/routes/auth.routes.ts) |
 | Modelos `Order`, `OrderItem`, `AdminUser`, `BrandSettings` | ✅ Hecho | [src/models/](src/models/) |
 | Seed de datos | ✅ Hecho | [src/seed.ts](src/seed.ts) |
@@ -44,6 +42,7 @@ Este backend usa **Express 5 + Sequelize 6 + PostgreSQL + TypeScript**.
 | Dashboard (`GET /api/admin/dashboard`, `GET /api/admin/orders`) | ✅ Hecho | [src/services/dashboard.service.ts](src/services/dashboard.service.ts) |
 | Reportes (`/api/admin/reports/monthly`, `/replenishment`) | ✅ Hecho | [src/services/reports.service.ts](src/services/reports.service.ts) |
 | Marca, usuarios | ✅ Hecho | Fase 7 |
+| Imágenes de producto + logo de marca (Cloudinary) | ✅ Hecho | Fase 3 (ver Imágenes) |
 | Lógica `forecast` / `cart` portada al backend | ✅ Hecho | [src/services/forecast.ts](src/services/forecast.ts) / [src/services/cart.ts](src/services/cart.ts) |
 | Emails transaccionales — forgot-password real (código 5 dígitos), Resend | 🔨 Parcial (falta confirmación de pedido) | Fase 9 |
 
@@ -144,7 +143,22 @@ POST /api/auth/login  →  { "token": "<jwt>", "user": { "id": "...", "name": "D
 
 > **Nota (✅ resuelta):** el `ProductForm` del front ya captura `unitCost` y las dimensiones (`weightKg`, `lengthCm`, `widthCm`, `heightCm`), con defaults por categoría vía `DEFAULT_DIMENSIONS` — ver [frontend/components/admin/products/ProductForm.tsx](../frontend/components/admin/products/ProductForm.tsx).
 
-**Cómo verificar:** `POST` un producto con token → `201` con `discountPercent` calculado; sin token → `401`. `GET /api/products` público sigue **sin** `unitCost`.
+**Imágenes de producto y logo de marca (Cloudinary).** Implementado más tarde en la cronología real
+(rama `feature/fase-3-imagenes-cloudinary`, PR #12, mergeada **después** de la Fase 8) pero se agrupa
+aquí porque extiende temáticamente el CRUD de productos (y, para el logo, la identidad de marca de la
+Fase 7):
+- [x] `src/config/cloudinary.ts` (hard-require de `CLOUDINARY_CLOUD_NAME`/`_API_KEY`/`_API_SECRET`) +
+  `src/middlewares/upload.ts` (multer en memoria, solo PNG/JPEG/WEBP, máx. 5 MB) +
+  `src/services/image.service.ts` (`upload_stream`/`destroy`).
+- [x] `POST /api/admin/products/:id/images` `[auth]` — sube de 1 a 3 imágenes, tope de 3 en total
+  revalidado bajo lock de fila (`SELECT ... FOR UPDATE`); subida **todo o nada** (si falla una, se
+  destruyen las que sí subieron).
+- [x] `DELETE /api/admin/products/:id/images` `[auth]` — borra una imagen por `publicId`; persiste el
+  cambio en BD antes de destruir el asset en Cloudinary (nunca al revés).
+- [x] `POST /api/admin/brand/logo` `[auth]` / `DELETE /api/admin/brand/logo` `[auth]` — sube o quita
+  el logo de marca, destruyendo el anterior en Cloudinary tras persistir el nuevo.
+
+**Cómo verificar:** `POST` un producto con token → `201` con `discountPercent` calculado; sin token → `401`. `GET /api/products` público sigue **sin** `unitCost`. `POST /api/admin/products/:id/images` con 1-3 archivos → `201` con las imágenes agregadas a `Product.images` (máx. 3 en total).
 
 ---
 
@@ -162,57 +176,12 @@ POST /api/auth/login  →  { "token": "<jwt>", "user": { "id": "...", "name": "D
   - [x] **Congelar** precios en cada `OrderItem`, descontar stock **atómicamente** sobre `ProductSize.stock` (`UPDATE ... SET stock = stock - N WHERE stock >= N`, dentro de una transacción), persistir.
   - [x] `409` con detalle del ítem si no hay stock; `400` si validación falla; `201` con `{ order, clientSecret }`.
 
-> **Stripe-ready (Fase 8 cableado):** la orden nace en `pending` y el stock se **reserva** al crearla.
-> Columnas `paymentIntentId`/`paymentStatus` en `Order`, `src/services/payment.service.ts` (interfaz
-> de Stripe, hoy no-op) y un stub `POST /api/webhooks/stripe` quedan listos pero inertes. Diferido a
-> Fase 8: instalar `stripe`, cobro real, verificación de firma del webhook y liberación de stock de
-> órdenes `pending` abandonadas.
+> **Stripe (Fase 8, ✅ hecho):** la orden nace en `pending` con el stock **reservado** al crearla.
+> Columnas `paymentIntentId`/`paymentStatus` en `Order`; `src/services/payment.service.ts` crea un
+> PaymentIntent real y `POST /api/webhooks/stripe` verifica la firma del evento y reconcilia el pago
+> (`succeeded`/`payment_failed`/`canceled`). Ver Fase 8 para el detalle completo.
 
 **Cómo verificar:** `POST /api/orders` con 1 ítem → `201`, totales correctos, stock descontado en la BD. Forzar stock insuficiente → `409`.
-
----
-
-### Fase 9 — Emails transaccionales (Resend)
-
-**Objetivo:** que `forgot-password` deje de ser un stub (`{ ok: true }` sin enviar nada) y que el cliente reciba un correo de confirmación cuando su pedido pasa a `paid`.
-
-**Por qué ahora (y por qué no antes):** depende de Auth (Fase 2, para el flujo de reset) y de Checkout + Stripe (Fase 4/8, para saber cuándo un pedido está pagado). No bloquea nada del core — es la primera pieza de "Después" que sí tiene impacto directo en el usuario final, a diferencia de Skydropx que hoy el front ya resuelve localmente.
-
-**Por qué Resend y no Nodemailer/SendGrid:** SDK simple (`resend.emails.send(...)`), no requiere gestionar SMTP propio, y el plan gratuito alcanza para el volumen de esta tienda. **Confirmado con la documentación oficial (Context7, `/websites/resend`):**
-- **Plan gratis:** 100 emails/día y 3,000 emails/mes (transaccional; envíos + recibidos cuentan juntos; cada destinatario en `to`/`cc`/`bcc` cuenta como un email separado). Sin límite diario en planes de pago.
-- **⚠️ Restricción crítica mientras no se verifique un dominio propio:** usando el remitente de pruebas `onboarding@resend.dev`, la API **solo permite enviar al correo de la cuenta de Resend** (error `403 validation_error` a cualquier otro destinatario). Esto es suficiente para desarrollar y probar `forgot-password`/confirmación contra tu propio correo, **pero no sirve para producción** — para que un cliente real reciba su confirmación de pedido hace falta verificar un dominio propio (registros DNS SPF/DKIM en Resend) y usar un remitente de ese dominio (p. ej. `pedidos@botasdonchuy.com`). Ver tarea de dominio más abajo — es un paso manual, no de código.
-- El SDK soporta `idempotencyKey` (expira a las 24h) para evitar duplicados si el mismo evento se procesa dos veces — clave para el email de confirmación, que puede dispararse tanto desde el webhook de Stripe como desde el barrido de `pending` (Fase 8).
-
-**Tareas:**
-
-**9.1 — Cimientos**
-- [x] Instalar `resend` (`pnpm add resend`).
-- [x] `src/config/resend.ts`: mismo patrón que `src/config/stripe.ts`/`cloudinary.ts` — `dotenv.config()` propio al inicio del módulo, **hard-require** de `RESEND_API_KEY` (throw al arrancar si falta) y `EMAIL_FROM` (p. ej. `"Botas Don Chuy <pedidos@botasdonchuy.com>"`, o `onboarding@resend.dev` mientras no haya dominio verificado). Exporta el cliente `resend` ya inicializado.
-- [x] `src/services/email.service.ts`: función base `sendEmail({ to, subject, html, idempotencyKey? })` que envuelve `resend.emails.send(...)`, hace `try/catch` y **loguea pero no lanza** en caso de error de Resend (un email fallido nunca debe tumbar el request que lo dispara — ni el login/checkout ni el webhook de Stripe). Las plantillas HTML viven en `src/services/email/templates/` (funciones que devuelven un string, no un motor de plantillas nuevo — no hace falta esa dependencia extra para 2 correos).
-- [x] Documentar en `.env`/README las nuevas variables: `RESEND_API_KEY`, `EMAIL_FROM`, `FRONTEND_URL`.
-
-**9.2 — `forgot-password` real + verificación de código + `reset-password`**
-
-> **Desviación del diseño original (decidida con el usuario):** en vez de un **link con token**
-> (`/reset-password?token=...`), se usa un **código de 5 dígitos numéricos** que el usuario teclea
-> en el frontend. Esto añade un endpoint intermedio `POST /api/auth/verify-reset-code` que valida
-> el código y desbloquea la página de reset en el front. El token largo con `crypto.randomBytes` se
-> sustituye por `crypto.randomInt(0,100000)` (hash sha256 igual). Columnas: `resetPasswordCodeHash`
-> en vez de `resetPasswordTokenHash`, más `resetPasswordAttempts` (anti-fuerza-bruta: el espacio de
-> 5 dígitos es pequeño). Expiración 15 min, un solo uso, invalidado tras 5 intentos fallidos.
-
-- [x] Migrar `AdminUser`: agregar `resetPasswordCodeHash` (nullable), `resetPasswordExpiresAt` (nullable) y `resetPasswordAttempts` (default 0). El código **nunca se guarda en claro** — se genera con `crypto.randomInt`, se manda por correo, y solo su hash (sha256) se persiste. Excluir las 3 columnas de `GET /api/admin/users`.
-- [x] `POST /api/auth/forgot-password`: si el `email` existe, genera el código, lo guarda hasheado con expiración de 15 min, y llama a `email.service` para mandar el correo con el código. **Sigue devolviendo `{ ok: true }` siempre** (exista o no el correo).
-- [x] `POST /api/auth/verify-reset-code` (nuevo, público, `authRateLimiter`): valida `{ email, code }` con `verifyResetCodeSchema`. Confirma que el código coincide y no expiró ni agotó intentos; **no consume el código** (solo desbloquea el front). `400` genérico si falla.
-- [x] `POST /api/auth/reset-password` (nuevo, público, `authRateLimiter`): valida `{ email, code, newPassword, confirmPassword }` con `resetPasswordSchema` (misma complejidad que `loginSchema`/`tempPassword`). **Revalida** el código, hashea la nueva password, limpia el código (de un solo uso) y devuelve `{ ok: true }`.
-
-**9.3 — Email de confirmación de pedido**
-- [ ] Disparar el envío **dentro de `markOrderPaidFromWebhook`** (`src/services/payment.service.ts`), no en un lugar nuevo — es el único punto por el que un pedido pasa a `paid`, tanto desde el webhook `payment_intent.succeeded` como desde la reconciliación del `pendingOrderSweeper`, así que ya hereda la idempotencia que ese servicio necesita.
-- [ ] **Idempotencia real, no solo la del SDK:** `markOrderPaidFromWebhook` debe enviar el correo únicamente en la transición `paymentStatus !== "paid" → "paid"` (comparar el estado *antes* del update), para que un reintento del webhook de Stripe sobre un pedido que ya estaba `paid` no reenvíe el correo. Además, pasar `idempotencyKey: order-confirmation/${order.id}` a `resend.emails.send` como cinturón de seguridad.
-- [ ] Plantilla de confirmación (`src/services/email/templates/orderConfirmation.ts`): resumen de `OrderItem`s (nombre, talla, cantidad, precio — **usar los precios congelados del `OrderItem`, nunca `Product` actual**), `subtotal`/`savings`/`shipping`/`total` de la orden, y datos de envío (`street`, `city`, etc.). **No incluir `unitCost`** (el correo lo ve el cliente).
-- [ ] Como nota a futuro (ver bloque de Skydropx en Fase 8): dejar la plantilla lista para agregar, más adelante, una sección de rastreo si `Order` gana esos campos — no bloquea esta fase, solo evita tener que reescribir la plantilla dos veces.
-
-**Cómo verificar:** con `RESEND_API_KEY` de prueba y **sin** dominio verificado — `POST /api/auth/forgot-password` con tu propio correo (el de la cuenta de Resend) → llega el email con el link; con otro correo distinto no debe tronar el request (el error 403 de Resend se traga y loguea). Confirmar un pedido de prueba vía Stripe test mode → llega el correo de confirmación; reenviar el mismo evento de webhook (Stripe permite reintentar desde el dashboard) → **no** se duplica el correo.
 
 ---
 
@@ -260,7 +229,7 @@ POST /api/auth/login  →  { "token": "<jwt>", "user": { "id": "...", "name": "D
 
 **Tareas:**
 - [x] `GET /api/admin/brand` — **lectura pública** (la tienda pinta estos textos). Devuelve `BrandSettings`.
-- [x] `PUT /api/admin/brand` `[auth]` — acepta updates **parciales** (`MarcaSection` autoguarda campo por campo).
+- [x] `PUT /api/admin/brand` `[auth]` — acepta updates **parciales** (`MarcaSection` autoguarda campo por campo). El logo (`logoUrl`/`logoPublicId`) **no** se toca aquí — se gestiona con `POST`/`DELETE /api/admin/brand/logo` (Cloudinary, ver Fase 3).
 - [x] `GET /api/admin/users` `[auth]` → `AdminUser[]` **sin `passwordHash`**.
 - [x] `POST /api/admin/users` `[auth]` — hashea password temporal. **Decisión (Fase 7):** no restringido a `owner`; `owner` y `admin` tienen los mismos permisos en esta ruta (consistente con la nota de Fase 1 de que ambos roles son equivalentes hoy), a diferencia de la redacción original de esta tarea.
 - [x] `DELETE /api/admin/users/:id` `[auth]` — mismo criterio que arriba (no restringido a `owner`); en cambio bloquea con `400` la autoeliminación y la eliminación del último `owner` restante (guardas de integridad, no de rol).
@@ -272,11 +241,60 @@ POST /api/auth/login  →  { "token": "<jwt>", "user": { "id": "...", "name": "D
 
 ### Fase 8 — Después (diferido)
 
-No bloquean el lanzamiento; hacerlos cuando el volumen lo justifique.
+**Objetivo:** funcionalidad que no bloquea el lanzamiento del core; se implementa cuando el volumen de pedidos lo justifique.
 
+**Por qué ahora (o después):** Stripe ya quedó resuelto en sandbox junto con el checkout (Fase 4); Skydropx queda diferido porque hoy el front calcula el envío localmente (`computeShipping`) y no bloquea la compra.
+
+**Tareas:**
 - [ ] **Skydropx** — `POST /api/shipping/rates`: construir payload `POST {SKYDROPX_BASE_URL}/api/v1/quotations` con las dimensiones del producto; normalizar respuesta a `ShippingRate[]`. Mapeo `ShippingData → Skydropx` en [frontend/BACKEND.md](../frontend/BACKEND.md) §5.4. Hasta entonces, el front calcula envío localmente (`computeShipping`).
   > **Nota de integración con Fase 9 (emails):** cuando Skydropx quede cableado y `Order` gane columnas de guía/rastreo (p. ej. `trackingNumber`/`trackingUrl`/`carrier`), lo natural es un email adicional "tu pedido fue enviado" reusando `src/services/email.service.ts` y el layout base de la Fase 9 — **no** un servicio de correo aparte. Por eso el email de confirmación de pedido de la Fase 9 debe construirse con una plantilla que **no dé por hecho** que nunca habrá datos de envío (aunque hoy no los tenga), para no tener que rediseñarla cuando Skydropx llegue.
 - [x] **Stripe** (✅ hecho, solo test/sandbox) — `POST /api/orders` crea el pedido en `pending` y genera un PaymentIntent real (`src/services/payment.service.ts`); `POST /api/webhooks/stripe` verifica la firma sobre el cuerpo crudo (`express.raw`) y maneja `payment_intent.succeeded` → `paid`, `payment_intent.payment_failed` → `failed` y `payment_intent.canceled` → restock + `cancelled`. Un barrido (`src/services/pendingOrderSweeper.ts`) libera el stock de órdenes `pending` abandonadas reconciliándolas contra Stripe. Llaves exigidas: `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET`.
+
+**Cómo verificar:** Stripe ya cubierto en la verificación de la Fase 4 (checkout → PaymentIntent → webhook). Skydropx queda pendiente de implementación.
+
+---
+
+### Fase 9 — Emails transaccionales (Resend)
+
+**Objetivo:** que `forgot-password` deje de ser un stub (`{ ok: true }` sin enviar nada) y que el cliente reciba un correo de confirmación cuando su pedido pasa a `paid`.
+
+**Por qué ahora (y por qué no antes):** depende de Auth (Fase 2, para el flujo de reset) y de Checkout + Stripe (Fase 4/8, para saber cuándo un pedido está pagado). No bloquea nada del core — es la primera pieza de "Después" que sí tiene impacto directo en el usuario final, a diferencia de Skydropx que hoy el front ya resuelve localmente.
+
+**Por qué Resend y no Nodemailer/SendGrid:** SDK simple (`resend.emails.send(...)`), no requiere gestionar SMTP propio, y el plan gratuito alcanza para el volumen de esta tienda. **Confirmado con la documentación oficial (Context7, `/websites/resend`):**
+- **Plan gratis:** 100 emails/día y 3,000 emails/mes (transaccional; envíos + recibidos cuentan juntos; cada destinatario en `to`/`cc`/`bcc` cuenta como un email separado). Sin límite diario en planes de pago.
+- **⚠️ Restricción crítica mientras no se verifique un dominio propio:** usando el remitente de pruebas `onboarding@resend.dev`, la API **solo permite enviar al correo de la cuenta de Resend** (error `403 validation_error` a cualquier otro destinatario). Esto es suficiente para desarrollar y probar `forgot-password`/confirmación contra tu propio correo, **pero no sirve para producción** — para que un cliente real reciba su confirmación de pedido hace falta verificar un dominio propio (registros DNS SPF/DKIM en Resend) y usar un remitente de ese dominio (p. ej. `pedidos@botasdonchuy.com`). Ver tarea de dominio más abajo — es un paso manual, no de código.
+- El SDK soporta `idempotencyKey` (expira a las 24h) para evitar duplicados si el mismo evento se procesa dos veces — clave para el email de confirmación, que puede dispararse tanto desde el webhook de Stripe como desde el barrido de `pending` (Fase 8).
+
+**Tareas:**
+
+**9.1 — Cimientos**
+- [x] Instalar `resend` (`pnpm add resend`).
+- [x] `src/config/resend.ts`: mismo patrón que `src/config/stripe.ts`/`cloudinary.ts` — `dotenv.config()` propio al inicio del módulo, **hard-require** de `RESEND_API_KEY` (throw al arrancar si falta) y `EMAIL_FROM` (p. ej. `"Botas Don Chuy <pedidos@botasdonchuy.com>"`, o `onboarding@resend.dev` mientras no haya dominio verificado). Exporta el cliente `resend` ya inicializado.
+- [x] `src/services/email.service.ts`: función base `sendEmail({ to, subject, html, idempotencyKey? })` que envuelve `resend.emails.send(...)`, hace `try/catch` y **loguea pero no lanza** en caso de error de Resend (un email fallido nunca debe tumbar el request que lo dispara — ni el login/checkout ni el webhook de Stripe). Las plantillas HTML viven en `src/services/email/templates/` (funciones que devuelven un string, no un motor de plantillas nuevo — no hace falta esa dependencia extra para 2 correos).
+- [x] Documentar en `.env`/README las nuevas variables: `RESEND_API_KEY`, `EMAIL_FROM`, `FRONTEND_URL`.
+
+**9.2 — `forgot-password` real + verificación de código + `reset-password`**
+
+> **Desviación del diseño original (decidida con el usuario):** en vez de un **link con token**
+> (`/reset-password?token=...`), se usa un **código de 5 dígitos numéricos** que el usuario teclea
+> en el frontend. Esto añade un endpoint intermedio `POST /api/auth/verify-reset-code` que valida
+> el código y desbloquea la página de reset en el front. El token largo con `crypto.randomBytes` se
+> sustituye por `crypto.randomInt(0,100000)` (hash sha256 igual). Columnas: `resetPasswordCodeHash`
+> en vez de `resetPasswordTokenHash`, más `resetPasswordAttempts` (anti-fuerza-bruta: el espacio de
+> 5 dígitos es pequeño). Expiración 15 min, un solo uso, invalidado tras 5 intentos fallidos.
+
+- [x] Migrar `AdminUser`: agregar `resetPasswordCodeHash` (nullable), `resetPasswordExpiresAt` (nullable) y `resetPasswordAttempts` (default 0). El código **nunca se guarda en claro** — se genera con `crypto.randomInt`, se manda por correo, y solo su hash (sha256) se persiste. Excluir las 3 columnas de `GET /api/admin/users`.
+- [x] `POST /api/auth/forgot-password`: si el `email` existe, genera el código, lo guarda hasheado con expiración de 15 min, y llama a `email.service` para mandar el correo con el código. **Sigue devolviendo `{ ok: true }` siempre** (exista o no el correo).
+- [x] `POST /api/auth/verify-reset-code` (nuevo, público, `authRateLimiter`): valida `{ email, code }` con `verifyResetCodeSchema`. Confirma que el código coincide y no expiró ni agotó intentos; **no consume el código** (solo desbloquea el front). `400` genérico si falla.
+- [x] `POST /api/auth/reset-password` (nuevo, público, `authRateLimiter`): valida `{ email, code, newPassword, confirmPassword }` con `resetPasswordSchema` (misma complejidad que `loginSchema`/`tempPassword`). **Revalida** el código, hashea la nueva password, limpia el código (de un solo uso) y devuelve `{ ok: true }`.
+
+**9.3 — Email de confirmación de pedido**
+- [ ] Disparar el envío **dentro de `markOrderPaidFromWebhook`** (`src/services/payment.service.ts`), no en un lugar nuevo — es el único punto por el que un pedido pasa a `paid`, tanto desde el webhook `payment_intent.succeeded` como desde la reconciliación del `pendingOrderSweeper`, así que ya hereda la idempotencia que ese servicio necesita.
+- [ ] **Idempotencia real, no solo la del SDK:** `markOrderPaidFromWebhook` debe enviar el correo únicamente en la transición `paymentStatus !== "paid" → "paid"` (comparar el estado *antes* del update), para que un reintento del webhook de Stripe sobre un pedido que ya estaba `paid` no reenvíe el correo. Además, pasar `idempotencyKey: order-confirmation/${order.id}` a `resend.emails.send` como cinturón de seguridad.
+- [ ] Plantilla de confirmación (`src/services/email/templates/orderConfirmation.ts`): resumen de `OrderItem`s (nombre, talla, cantidad, precio — **usar los precios congelados del `OrderItem`, nunca `Product` actual**), `subtotal`/`savings`/`shipping`/`total` de la orden, y datos de envío (`street`, `city`, etc.). **No incluir `unitCost`** (el correo lo ve el cliente).
+- [ ] Como nota a futuro (ver bloque de Skydropx en Fase 8): dejar la plantilla lista para agregar, más adelante, una sección de rastreo si `Order` gana esos campos — no bloquea esta fase, solo evita tener que reescribir la plantilla dos veces.
+
+**Cómo verificar:** con `RESEND_API_KEY` de prueba y **sin** dominio verificado — `POST /api/auth/forgot-password` con tu propio correo (el de la cuenta de Resend) → llega el email con el link; con otro correo distinto no debe tronar el request (el error 403 de Resend se traga y loguea). Confirmar un pedido de prueba vía Stripe test mode → llega el correo de confirmación; reenviar el mismo evento de webhook (Stripe permite reintentar desde el dashboard) → **no** se duplica el correo.
 
 ---
 
@@ -296,26 +314,32 @@ Resumen rápido. El tipo de cada respuesta vive en el frontend (columna "Tipo").
 | POST | `/api/orders` | — | snapshot → `{order}` | `CartTotals` + `ShippingData` |
 | GET | `/api/admin/products` | ✅ | → `Product[]` (con costo) | `MockProduct` |
 | POST/PUT/DELETE | `/api/admin/products/:id?` | ✅ | `productSchema` → `Product` | — |
+| POST/DELETE | `/api/admin/products/:id/images` | ✅ | multipart `images` / `{publicId}` → `Product` | — |
 | GET | `/api/admin/dashboard` | ✅ | → `DashboardData` | `types.ts` |
 | GET | `/api/admin/orders` | ✅ | → `Order[]` | — |
 | GET | `/api/admin/reports/monthly` | ✅ | → `MonthlyReport[]` | `types.ts` |
 | GET | `/api/admin/reports/replenishment` | ✅ | → `ReplenishmentRow[]` | `types.ts` |
 | GET | `/api/admin/brand` | — | → `BrandSettings` | `MarcaData` |
 | PUT | `/api/admin/brand` | ✅ | parcial → `BrandSettings` | — |
+| POST/DELETE | `/api/admin/brand/logo` | ✅ | multipart `logo` → `BrandSettings` | — |
 | GET/POST/DELETE | `/api/admin/users/:id?` | ✅ | → `AdminUser[]` (sin hash) | — |
 | PUT | `/api/admin/account` | ✅ | `{currentPassword,newPassword,confirmPassword}` → `{ok}` | — |
+| POST | `/api/webhooks/stripe` | 🔑 | evento firmado de Stripe → `{received}` | — |
 
 ---
 
-## 4. Modelos Sequelize pendientes (referencia breve)
+## 4. Modelos Sequelize (referencia breve)
 
-Detalle completo de campos en [frontend/BACKEND.md](../frontend/BACKEND.md) §3 (ignorar el bloque Prisma; traducir a `Model.init` de Sequelize como ya se hizo con `Product`).
+Todos implementados. Detalle completo de campos en [frontend/BACKEND.md](../frontend/BACKEND.md) §3
+(ignorar el bloque Prisma — los tipos de dato son orientativos; la traducción real a `Model.init` de
+Sequelize, incluidos los `id` como `INTEGER autoIncrement` en vez de `uuid`, ya se hizo con `Product`).
 
-- **`AdminUser`** — `id` (uuid), `name`, `email` (unique), `passwordHash`, `role` (ENUM `owner|admin`, default `admin`), `createdAt`. **Fase 9** agrega `resetPasswordCodeHash` (nullable), `resetPasswordExpiresAt` (nullable) y `resetPasswordAttempts` (default 0) para el flujo real de `forgot-password`/`reset-password` con código de 5 dígitos — el código nunca se guarda en claro, solo su hash sha256.
-- **`Order`** — `id` (uuid), `status` (ENUM `pending|paid|shipped|delivered|cancelled`), `subtotal`/`savings`/`shipping`/`total` (int), datos de cliente (`customerName`, `customerEmail`, `customerPhone`, `street`, `neighborhood`, `city`, `state`, `postalCode`, `references?`), `shippingCarrier?`, `createdAt`. `hasMany(OrderItem)`.
-- **`OrderItem`** — `id` (uuid), `orderId` (FK), `productId` (FK), `nameSnapshot`, `size` (int), `quantity` (int), y precios **congelados**: `unitOriginalPrice`, `unitSalePrice`, `unitCosto`.
-- **`BrandSettings`** — singleton (`id=1`): `brandName`, `heroText`, `tagline`, `cartNotice`, `footerNote`, `logoUrl?`, `updatedAt`.
+- **`AdminUser`** — `id` (integer autoincrement), `name`, `email` (unique), `passwordHash`, `role` (ENUM `owner|admin`, default `admin`), `createdAt`. **Fase 9** agrega `resetPasswordCodeHash` (nullable), `resetPasswordExpiresAt` (nullable) y `resetPasswordAttempts` (default 0) para el flujo real de `forgot-password`/`reset-password` con código de 5 dígitos — el código nunca se guarda en claro, solo su hash sha256.
+- **`Order`** — `id` (integer autoincrement), `status` (ENUM `pending|paid|shipped|delivered|cancelled`), `subtotal`/`savings`/`shipping`/`total` (decimal), datos de cliente (`customerName`, `customerEmail`, `customerPhone`, `street`, `neighborhood`, `city`, `state`, `postalCode`, `references?`), `shippingCarrier?`, `createdAt`. `hasMany(OrderItem)`. **Fase 8** agrega `paymentIntentId` (nullable) y `paymentStatus` (ENUM `unpaid|processing|paid|failed`) para el ciclo real de Stripe.
+- **`OrderItem`** — `id` (integer autoincrement), `orderId` (FK), `productId` (FK), `nameSnapshot`, `size` (int), `quantity` (int), y precios **congelados**: `unitOriginalPrice`, `unitSalePrice`, `unitCost`.
+- **`BrandSettings`** — singleton (`id=1`): `brandName`, `heroText`, `tagline`, `cartNotice`, `footerNote`, `logoUrl?`, `updatedAt`. **Fase 3** agrega `logoPublicId` (nullable) junto a `logoUrl` para poder destruir el asset anterior en Cloudinary.
 - **`ProductSize`** (✅ implementado en Fase 1) — `productId`, `size`, `stock`. Único por `(productId, size)`. Fuente de verdad real del stock por talla.
+- **`Product.images`** (✅ implementado en Fase 3) — columna `JSONB` (`[{ url, publicId }]`, hasta 3), la galería de Cloudinary. `imageSrc` sigue siendo un `VIRTUAL` de solo lectura (`images[0]?.url`).
 
 > **Stock por talla:** el front sigue contando `product.sizes.filter(s => s === size).length` en `ProductInfo`, `Cart` y `cartStore` — **sin tocar esos archivos**, porque `Product.sizes` (repetido) y `Product.stock` (total) son ahora campos `VIRTUAL` derivados de `productSizes` en el backend. El descuento real al confirmar un pedido (Fase 4) debe operar sobre `ProductSize.stock` con un `UPDATE` atómico (`stock = stock - 1 WHERE stock > 0`), no sobre el array derivado.
 
@@ -342,7 +366,7 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 - **Rate limiting** en `/api/auth/login` y `/forgot-password`.
 - **JWT** con expiración; validar rol (crear/eliminar admins = solo `owner`).
 - **Keys de Skydropx/Stripe/Cloudinary** solo en el servidor.
-- **`RESEND_API_KEY` solo en el servidor** (Fase 9), igual que las demás. El token de `reset-password` se genera con `crypto.randomBytes`, se manda por correo y **solo su hash** se persiste en `AdminUser` (nunca en claro), con expiración corta (~1h) y de un solo uso. Un fallo al enviar un email (Resend caído, 403 por dominio no verificado, etc.) **nunca** debe tumbar el request que lo dispara (login stub, checkout, webhook) — se loguea y se continúa.
+- **`RESEND_API_KEY` solo en el servidor** (Fase 9), igual que las demás. El código de `reset-password` (5 dígitos, `crypto.randomInt(0,100000)` — ver la desviación de diseño en Fase 9.2) se manda por correo y **solo su hash sha256** se persiste en `AdminUser` (nunca en claro), con expiración de 15 min, un solo uso y bloqueo tras 5 intentos fallidos (`resetPasswordAttempts`). Un fallo al enviar un email (Resend caído, 403 por dominio no verificado, etc.) **nunca** debe tumbar el request que lo dispara (`forgot-password`, checkout, webhook) — se loguea y se continúa.
 
 ---
 
@@ -373,6 +397,8 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 - [x] `POST /api/admin/products`
 - [x] `PUT /api/admin/products/:id`
 - [x] `DELETE /api/admin/products/:id`
+- [x] Imágenes de producto (Cloudinary): `POST`/`DELETE /api/admin/products/:id/images`
+- [x] Logo de marca (Cloudinary): `POST`/`DELETE /api/admin/brand/logo`
 
 **Fase 4 — Checkout**
 - [x] `POST /api/orders` (recalcular totales, stock por talla, congelar precios)

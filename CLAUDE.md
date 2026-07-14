@@ -399,7 +399,7 @@ without it they default to `0`/`[]`. Product images live in the `images` column 
 `VIRTUAL` that returns `images[0]?.url ?? null` (kept for frontend compat — the source of truth is
 `images`, so there's no physical column to keep in sync). See the **Imágenes / Cloudinary** section.
 `Order` holds a frozen snapshot of totals and shipping
-data; `OrderItem` freezes per-unit prices (`unitOriginalPrice`, `unitSalePrice`, `unitCosto`) so
+data; `OrderItem` freezes per-unit prices (`unitOriginalPrice`, `unitSalePrice`, `unitCost`) so
 historical orders aren't affected by later `Product` price changes. `AdminUser` and
 `BrandSettings` (singleton) round out the Fase 1 data model; `AdminUser` also gained three
 nullable password-reset columns in Fase 9 (`resetPasswordCodeHash`, `resetPasswordExpiresAt`,
