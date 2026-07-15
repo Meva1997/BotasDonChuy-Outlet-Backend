@@ -4,6 +4,7 @@ import { OrderItem } from "../models/OrderItem";
 import { Product } from "../models/Product";
 import { productSizesInclude } from "../utils/productSizesInclude";
 import { addDays, formatShortDate, isoDay, utcDayStart } from "../utils/date";
+import { formatMoney } from "../utils/formatMoney";
 
 export interface KpiData {
   label: string;
@@ -54,10 +55,6 @@ const GASTOS_FIJOS = 2000;
 const RECENT_SALES_LIMIT = 20;
 const REVENUE_WINDOW_DAYS = 90;
 const PERIODS: Period[] = ["7", "30", "90"];
-
-function formatMoney(n: number): string {
-  return `$${n.toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
 
 function computeTrend(current: number, previous: number): { label: string; positive: boolean } | undefined {
   if (previous === 0) return undefined;

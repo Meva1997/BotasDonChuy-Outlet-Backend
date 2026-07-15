@@ -67,7 +67,9 @@ schemas via `$ref: '#/components/schemas/...'` (add new schemas to `src/config/s
 
 **Auth** (`src/routes/auth.routes.ts`, `src/controllers/auth.controller.ts`): mounted at
 `/api/auth`. `POST /api/auth/login` validates the body with `loginSchema` (zod), looks up
-`AdminUser` by email, compares bcrypt hash, and returns `{ token, user }`. `GET /api/auth/me` is
+`AdminUser` by email, compares bcrypt hash, and returns `{ token, user }`; an unknown email and a
+wrong password return the **same** `401` message (see **Error handling** — anti-enumeration).
+`GET /api/auth/me` is
 protected by `requireAuth` and returns the decoded `{ user }`. `/login`, `/forgot-password`,
 `/verify-reset-code` and `/reset-password` are all gated behind `authRateLimiter`
 (10 req / 15 min). `requireAuth` (`src/middlewares/requireAuth.ts`) extracts the Bearer token,
@@ -89,7 +91,8 @@ it only unlocks the frontend's reset page; the real security is at reset. `POST
 /api/auth/reset-password` (`{ email, code, newPassword, confirmPassword }`, `resetPasswordSchema`
 enforces the same password complexity as `loginSchema`) **re-validates** the code, updates the
 `passwordHash`, and clears the three reset columns (single-use). A shared `assertValidResetCode`
-helper backs both endpoints: it rejects (generic `400 "Código inválido o expirado"`) when the
+helper backs both endpoints: it rejects (generic `400 "El código no es válido o ya expiró (dura N
+minutos). Solicita uno nuevo para continuar."`) when the
 user/code is missing, expired, or over `RESET_CODE_MAX_ATTEMPTS` (5), and on a wrong code it
 increments `resetPasswordAttempts` (burning the code once the max is hit) — the error message is
 identical for missing-email/wrong-code/expired so none of them is distinguishable. This flow is
@@ -115,8 +118,9 @@ discounted), the `subtotal`/`savings`/`shipping`/`total`, the shipping address, 
 shipping block**: today (no Skydropx) a "Estamos preparando tu envío" placeholder, but the signature
 already accepts an optional `tracking: { number, url?, carrier? }` so a future "tu pedido fue enviado"
 email can reuse it without a redesign (ROADMAP Fase 8↔9 note). It **never** receives or renders
-`unitCost`, formats money with a local `formatMoney` (es-MX `$1,920.50`, duplicated from
-`dashboard.service.ts` since that one isn't exported), and formats the order date pinned to
+`unitCost`, formats money with the shared `formatMoney` (`src/utils/formatMoney.ts`, es-MX
+`$1,920.50` — also used by `dashboard.service.ts` and `product.controller.ts`'s price-conflict
+error, so the same amount reads the same everywhere), and formats the order date pinned to
 `America/Mexico_City` (a **deliberate** deviation from the repo's UTC-pinning, which exists for
 aggregation stability — this is a customer receipt for a store in Celaya, GTO, so local time is
 correct). Every customer/product-controlled string it interpolates (`customerName`, `nameSnapshot`,
@@ -405,10 +409,38 @@ generic 500.
 thrown/rejected errors are forwarded to Express's error pipeline instead of needing try/catch
 in each controller. Controllers throw `AppError(message, statusCode)` for expected failures
 (e.g. 404s). `errorHandler` is registered last in `src/app.ts` and maps `ZodError`,
-Sequelize's `UniqueConstraintError`/`ValidationError`, and `AppError` to JSON responses with a
-Spanish `message`; anything else falls back to a logged 500.
+Sequelize's `UniqueConstraintError`/`ValidationError`, body-parser's malformed-body errors, and
+`AppError` to JSON responses with a Spanish `message`; anything else falls back to a logged 500.
 **When adding a new resource, use `asyncHandler` for its controller handlers and throw
 `AppError` for expected error cases instead of returning ad-hoc status codes.**
+
+**Error messages are the frontend's UI copy.** Every consumer (`usePlaceOrder.ts`,
+`ProductForm.tsx`, `AccountCard.tsx`, `AdminsCard.tsx`, …) reads **only** `data.message` and
+paints it verbatim — **nothing reads `details`**. So `message` must be a complete, actionable
+Spanish sentence: name the offending entity and say what to do about it ("Solo queda 1 pieza de
+"X" en talla 24. Ajusta la cantidad para continuar."), not a bare code or id. Consequences:
+- `errorHandler` **composes `message` from a `ZodError`'s per-field messages** (one per field
+  — a weak password fires 4 issues on the same path — capped at 3, then "(y N campos más por
+  corregir)"), because a flat `"Datos inválidos"` left the user with no idea what to fix while
+  the real messages sat unread in `details` (which is still returned, for programmatic use).
+  This is safe only because **zod messages are our own Spanish copy**. Sequelize's
+  `ValidationError` is deliberately **not** treated this way: its texts are English and name
+  columns ("Product.name cannot be null"), so it keeps a fixed Spanish `message` and its detail
+  stays in `details`.
+- Since field messages now reach the user, a schema field **without** a custom message would
+  leak zod's English default. `src/config/zod.ts` (side-effect imported from `app.ts`) sets
+  `z.config(z.locales.es())` as the safety net, but **give every user-facing field an explicit
+  message anyway** — the localized default ("se esperaba número, recibido indefinido") is
+  Spanish but still describes a type, not a fix. In zod 4 the type error is the **first**
+  argument: `z.number("El peso (kg) es requerido").nonnegative("El peso no puede ser negativo")`.
+- **`:id` params must go through `parseId(req.params.id, "producto")`** (`src/utils/parseId.ts`).
+  A non-numeric id otherwise reaches Sequelize as `NaN`, Postgres rejects the query and the
+  client's mistake surfaces as a **500** "Error interno del servidor" instead of a 400.
+- `POST /api/auth/login` returns **one identical message** for unknown-email and wrong-password
+  ("Correo o contraseña incorrectos…"). Distinguishing them let anyone enumerate registered
+  emails — exactly what `forgot-password` avoids by design. Same rule for `assertValidResetCode`:
+  its message must stay **byte-identical** across missing-user / wrong-code / expired /
+  attempts-exhausted, so adding actionable text ("Solicita uno nuevo") must not branch per cause.
 
 **Models** (`src/models/`): models import the shared `sequelize` instance and call
 `Model.init(...)`. A model only gets its table created/synced if it is imported somewhere in

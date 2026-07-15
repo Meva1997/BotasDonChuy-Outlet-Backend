@@ -12,6 +12,8 @@ import {
   deleteProductImageSchema,
 } from "../schemas/product";
 import { sequelize } from "../config/database";
+import { parseId } from "../utils/parseId";
+import { formatMoney } from "../utils/formatMoney";
 import { CLOUDINARY_PRODUCTS_FOLDER } from "../config/cloudinary";
 import { uploadImageBuffer, destroyImage } from "../services/image.service";
 
@@ -73,7 +75,7 @@ export const getProducts: RequestHandler = asyncHandler(async (req: Request, res
 });
 
 export const getProductById: RequestHandler = asyncHandler(async (req: Request, res: Response) => {
-  const id = Number(req.params.id);
+  const id = parseId(req.params.id, "producto");
 
   const product = await Product.findOne({
     where: { id, visible: true, deletedAt: { [Op.is]: null } },
@@ -140,7 +142,7 @@ export const adminCreateProduct: RequestHandler = asyncHandler(async (req: Reque
 });
 
 export const adminUpdateProduct: RequestHandler = asyncHandler(async (req: Request, res: Response) => {
-  const id = Number(req.params.id);
+  const id = parseId(req.params.id, "producto");
   const product = await Product.findByPk(id, { include: [productSizesInclude] });
   if (!product) throw new AppError("Producto no encontrado", 404);
 
@@ -152,7 +154,13 @@ export const adminUpdateProduct: RequestHandler = asyncHandler(async (req: Reque
   const effectiveOriginalPrice = data.originalPrice ?? product.originalPrice;
   const effectiveSalePrice = data.salePrice ?? product.salePrice;
   if (effectiveSalePrice > effectiveOriginalPrice) {
-    throw new AppError("El precio de oferta no puede ser mayor al precio original", 400);
+    // Se nombran ambos precios: en un update parcial el que choca suele ser el
+    // que YA estaba guardado, así que un mensaje sin cifras deja al admin
+    // mirando un campo que ni siquiera tocó.
+    throw new AppError(
+      `El precio de oferta (${formatMoney(effectiveSalePrice)}) no puede ser mayor al precio original (${formatMoney(effectiveOriginalPrice)}).`,
+      400,
+    );
   }
 
   await sequelize.transaction(async (t) => {
@@ -176,7 +184,7 @@ export const adminUpdateProduct: RequestHandler = asyncHandler(async (req: Reque
 });
 
 export const adminDeleteProduct: RequestHandler = asyncHandler(async (req: Request, res: Response) => {
-  const id = Number(req.params.id);
+  const id = parseId(req.params.id, "producto");
   const product = await Product.findByPk(id);
   if (!product) throw new AppError("Producto no encontrado", 404);
 
@@ -202,6 +210,19 @@ export const adminDeleteProduct: RequestHandler = asyncHandler(async (req: Reque
 });
 
 // ── Imágenes de producto (Cloudinary) ──────────────────────────────────────────
+
+/**
+ * Mensaje del tope de imágenes. Dice cuántas caben todavía (o que hay que
+ * borrar alguna) en vez de solo enunciar el límite: así el admin sabe qué hacer
+ * sin ponerse a contar las imágenes de la galería.
+ */
+function tooManyImagesMessage(current: number, incoming: number): string {
+  const free = MAX_IMAGES_PER_PRODUCT - current;
+  if (free <= 0) {
+    return `Este producto ya tiene el máximo de ${MAX_IMAGES_PER_PRODUCT} imágenes. Borra alguna antes de subir otra.`;
+  }
+  return `Este producto ya tiene ${current} ${current === 1 ? "imagen" : "imágenes"} y estás subiendo ${incoming}: el máximo es ${MAX_IMAGES_PER_PRODUCT}. Puedes agregar ${free} más.`;
+}
 
 /**
  * Sube varios buffers a Cloudinary de forma "todo o nada": si alguna subida
@@ -235,10 +256,13 @@ async function uploadAllOrCleanup(
  */
 export const adminAddProductImages: RequestHandler = asyncHandler(
   async (req: Request, res: Response) => {
-    const id = Number(req.params.id);
+    const id = parseId(req.params.id, "producto");
     const files = (req.files as Express.Multer.File[] | undefined) ?? [];
     if (files.length === 0) {
-      throw new AppError("No se recibió ninguna imagen", 400);
+      throw new AppError(
+        'No se recibió ninguna imagen. Adjunta de 1 a 3 archivos PNG, JPEG o WEBP en el campo "images".',
+        400,
+      );
     }
 
     const product = await Product.findByPk(id, { include: [productSizesInclude] });
@@ -247,10 +271,7 @@ export const adminAddProductImages: RequestHandler = asyncHandler(
     // Chequeo temprano (mejor UX: evita subir a Cloudinary si obviamente excede),
     // revalidado luego bajo el lock de fila contra concurrencia.
     if ((product.images ?? []).length + files.length > MAX_IMAGES_PER_PRODUCT) {
-      throw new AppError(
-        `Máximo ${MAX_IMAGES_PER_PRODUCT} imágenes por producto (ya tiene ${(product.images ?? []).length})`,
-        400,
-      );
+      throw new AppError(tooManyImagesMessage((product.images ?? []).length, files.length), 400);
     }
 
     // Sube todas o ninguna: si una falla, destruye las que sí subieron para no
@@ -267,10 +288,7 @@ export const adminAddProductImages: RequestHandler = asyncHandler(
 
         const current = locked.images ?? [];
         if (current.length + uploaded.length > MAX_IMAGES_PER_PRODUCT) {
-          throw new AppError(
-            `Máximo ${MAX_IMAGES_PER_PRODUCT} imágenes por producto (ya tiene ${current.length})`,
-            400,
-          );
+          throw new AppError(tooManyImagesMessage(current.length, uploaded.length), 400);
         }
 
         const images = [...current, ...uploaded];
@@ -296,7 +314,7 @@ export const adminAddProductImages: RequestHandler = asyncHandler(
  */
 export const adminDeleteProductImage: RequestHandler = asyncHandler(
   async (req: Request, res: Response) => {
-    const id = Number(req.params.id);
+    const id = parseId(req.params.id, "producto");
     const { publicId } = deleteProductImageSchema.parse(req.body);
 
     const product = await Product.findByPk(id, { include: [productSizesInclude] });
@@ -312,7 +330,12 @@ export const adminDeleteProductImage: RequestHandler = asyncHandler(
 
       const current = locked.images ?? [];
       if (!current.some((img) => img.publicId === publicId)) {
-        throw new AppError("Imagen no encontrada en el producto", 404);
+        // Suele pasar cuando otra pestaña ya la borró: sin la pista de recargar,
+        // el admin reintenta sobre una galería obsoleta y vuelve a fallar.
+        throw new AppError(
+          "Esa imagen ya no está en el producto. Recarga la página para ver la galería actualizada.",
+          404,
+        );
       }
 
       const images = current.filter((img) => img.publicId !== publicId);

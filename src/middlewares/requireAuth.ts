@@ -21,7 +21,7 @@ export const requireAuth = (
   const authHeader = req.headers.authorization;
 
   if (!authHeader?.startsWith("Bearer ")) {
-    throw new AppError("No autenticado", 401);
+    throw new AppError("Necesitas iniciar sesión para acceder a esta sección.", 401);
   }
 
   const token = authHeader.slice("Bearer ".length);
@@ -31,7 +31,7 @@ export const requireAuth = (
     req.user = decoded;
     next();
   } catch {
-    throw new AppError("Token inválido o expirado", 401);
+    throw new AppError("Tu sesión expiró. Vuelve a iniciar sesión para continuar.", 401);
   }
 };
 
@@ -39,7 +39,7 @@ export const requireRole =
   (...roles: AuthUser["role"][]) =>
   (req: AuthRequest, _res: Response, next: NextFunction): void => {
     if (!req.user || !roles.includes(req.user.role)) {
-      throw new AppError("No autorizado", 403);
+      throw new AppError("Tu cuenta no tiene permisos para realizar esta acción.", 403);
     }
 
     next();

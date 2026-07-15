@@ -365,15 +365,25 @@ const options: Options = {
         Error: {
           type: "object",
           properties: {
-            message: { type: "string", example: "Recurso no encontrado" },
+            message: {
+              type: "string",
+              description:
+                "Mensaje accionable en español, listo para mostrarse al usuario final. En " +
+                "errores de validación resume los mensajes por campo (máximo 3, luego " +
+                '"(y N campos más por corregir)").',
+              example:
+                'Solo queda 1 pieza de "Bota Bordada Tejana" en talla 24. Ajusta la cantidad para continuar.',
+            },
             details: {
               type: "array",
-              description: "Presente en errores de validación (ZodError).",
+              description:
+                "Presente en errores de validación (ZodError): el desglose completo por campo. " +
+                "`message` ya resume estos mismos mensajes, así que consumirlo es opcional.",
               items: {
                 type: "object",
                 properties: {
-                  path: { type: "string", example: "email" },
-                  message: { type: "string", example: "Datos inválidos" },
+                  path: { type: "string", example: "customer.phone" },
+                  message: { type: "string", example: "El teléfono debe tener 10 dígitos" },
                 },
               },
             },
