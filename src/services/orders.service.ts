@@ -60,7 +60,9 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
       const product = await Product.findByPk(line.productId, { transaction: t });
       if (!product || product.visible === false || product.deletedAt != null) {
         throw new AppError(
-          `Producto no disponible (id ${line.productId}, talla ${line.size})`,
+          product
+            ? `"${product.name}" ya no está disponible. Quítalo del carrito para continuar.`
+            : "Uno de los productos de tu carrito ya no está disponible. Revísalo para continuar.",
           409,
         );
       }
@@ -78,8 +80,17 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
         },
       );
       if (affected === 0) {
+        // Solo en el error path (raro): releer la fila cuesta un SELECT extra
+        // pero permite decir cuántas piezas quedan en vez de un "sin stock" seco.
+        const remaining = await ProductSize.findOne({
+          where: { productId: line.productId, size: line.size },
+          transaction: t,
+        });
+        const available = remaining?.stock ?? 0;
         throw new AppError(
-          `Sin stock suficiente para el producto ${line.productId} talla ${line.size}`,
+          available > 0
+            ? `Solo quedan ${available} ${available === 1 ? "pieza" : "piezas"} de "${product.name}" en talla ${line.size}. Ajusta la cantidad para continuar.`
+            : `"${product.name}" se agotó en talla ${line.size}. Quítalo del carrito para continuar.`,
           409,
         );
       }
