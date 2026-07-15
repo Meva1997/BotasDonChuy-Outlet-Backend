@@ -33,14 +33,23 @@ export const login: RequestHandler = asyncHandler(
   async (req, res: Response) => {
     const { email, password } = loginSchema.parse(req.body);
 
+    // Mensaje idéntico para correo inexistente y contraseña errada: distinguirlos
+    // dejaba enumerar qué correos están registrados, justo lo que forgotPassword
+    // evita a propósito. En un panel de 2-3 admins que saben su correo, el
+    // feedback que se pierde es mínimo frente a la fuga.
+    const invalidCredentials = new AppError(
+      "Correo o contraseña incorrectos. Verifica tus datos e inténtalo de nuevo.",
+      401,
+    );
+
     const user = await AdminUser.findOne({ where: { email } });
     if (!user) {
-      throw new AppError("Email incorrecto", 401);
+      throw invalidCredentials;
     }
 
     const passwordMatches = await comparePassword(password, user.passwordHash);
     if (!passwordMatches) {
-      throw new AppError("Contraseña incorrecta", 401);
+      throw invalidCredentials;
     }
 
     const payload: AuthUser = {
@@ -107,7 +116,14 @@ async function assertValidResetCode(
   email: string,
   code: string,
 ): Promise<AdminUser> {
-  const invalid = new AppError("Código inválido o expirado", 400);
+  // El texto debe seguir siendo UNO SOLO para todas las causas (correo
+  // inexistente / código errado / expirado / intentos agotados) o volvería a
+  // distinguirse el caso. Se le agrega la salida ("solicita uno nuevo") sin
+  // decir cuál de las causas ocurrió.
+  const invalid = new AppError(
+    `El código no es válido o ya expiró (dura ${RESET_CODE_TTL_MINUTES} minutos). Solicita uno nuevo para continuar.`,
+    400,
+  );
 
   // El check + incremento de intentos corre bajo un lock de fila (SELECT ...
   // FOR UPDATE): sin él, dos peticiones concurrentes con códigos errados leen

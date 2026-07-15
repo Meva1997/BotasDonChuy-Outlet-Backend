@@ -89,7 +89,7 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
         const available = remaining?.stock ?? 0;
         throw new AppError(
           available > 0
-            ? `Solo quedan ${available} ${available === 1 ? "pieza" : "piezas"} de "${product.name}" en talla ${line.size}. Ajusta la cantidad para continuar.`
+            ? `Solo ${available === 1 ? "queda 1 pieza" : `quedan ${available} piezas`} de "${product.name}" en talla ${line.size}. Ajusta la cantidad para continuar.`
             : `"${product.name}" se agotó en talla ${line.size}. Quítalo del carrito para continuar.`,
           409,
         );

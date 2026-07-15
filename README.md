@@ -162,6 +162,10 @@ de Stripe** y se guarda su `paymentIntentId` (`paymentStatus: "processing"`). Re
 `{ order, clientSecret }` — el `clientSecret` sirve para que el cliente confirme el pago. Errores:
 `400` (body/cliente inválido), `409` (sin stock o producto no disponible, con el ítem en el mensaje).
 
+Todos los errores responden `{ message }` (los de validación agregan `details`). El `message` es la
+copia que el front pinta tal cual, así que es una frase accionable en español: nombra el producto y,
+cuando aplica, cuántas piezas quedan. Ver **Errores y mensajes** más abajo.
+
 ### `GET /api/admin/dashboard` y `GET /api/admin/orders` (panel admin)
 
 `GET /api/admin/dashboard` calcula todo en memoria a partir de `Order`/`OrderItem`/`Product`
@@ -321,6 +325,48 @@ PNG/JPEG/WEBP) y se suben con `upload_stream` (`src/services/image.service.ts`) 
   el asset (un fallo del `destroy` deja un huérfano en Cloudinary, nunca una referencia colgante que
   rompería la imagen en la tienda). Los errores de multer (tamaño/formato/campo inesperado) se mapean
   a `400` en el `errorHandler`.
+
+## Errores y mensajes
+
+Todos los errores salen del `errorHandler` (`src/middlewares/errorHandler.ts`) como
+`{ message }`, y los de validación agregan `details: [{ path, message }]`.
+
+**El `message` es la copia de UI del front.** Todos los consumidores (`usePlaceOrder.ts`,
+`ProductForm.tsx`, `AccountCard.tsx`, `AdminsCard.tsx`…) leen **solo** `data.message` y lo pintan
+tal cual; **nadie lee `details`**. Por eso cada mensaje es una frase completa en español que
+nombra la entidad y dice qué hacer:
+
+```jsonc
+// 409 — POST /api/orders
+{ "message": "Solo queda 1 pieza de \"Bota Bordada Tejana\" en talla 24. Ajusta la cantidad para continuar." }
+
+// 400 — POST /api/orders (validación: el message resume los campos, details los trae todos)
+{
+  "message": "El teléfono debe tener 10 dígitos · El código postal debe tener 5 dígitos",
+  "details": [
+    { "path": "customer.phone", "message": "El teléfono debe tener 10 dígitos" },
+    { "path": "customer.postalCode", "message": "El código postal debe tener 5 dígitos" }
+  ]
+}
+```
+
+Reglas al agregar o tocar un endpoint:
+
+- **Escribe el `message` para el usuario final**, no para el log: nombra el producto/usuario y la
+  acción a tomar. Nada de ids sueltos ni códigos.
+- **Validación:** el `message` se arma con los mensajes por campo (uno por campo, máximo 3, luego
+  "(y N campos más por corregir)"). Dale un mensaje propio a **cada campo** del schema; los
+  defaults de zod salen en español (`src/config/zod.ts` fija `z.locales.es()`) pero describen un
+  tipo ("se esperaba número, recibido indefinido"), no una solución. En zod 4 el mensaje de tipo
+  es el **primer** argumento: `z.number("El peso (kg) es requerido").nonnegative("…")`.
+- **Params `:id`:** pásalos por `parseId(req.params.id, "producto")` (`src/utils/parseId.ts`) o un
+  id no numérico llega como `NaN` a Sequelize y el error del cliente termina como **500**.
+- **Nunca reveles si un correo existe:** `POST /api/auth/login` devuelve el **mismo** `401` para
+  correo desconocido y contraseña errada, y `assertValidResetCode` el **mismo** `400` para código
+  inexistente/errado/expirado/sin intentos. Es deliberado: `forgot-password` ya responde
+  `{ ok: true }` siempre por la misma razón.
+- **Body ilegible:** un JSON mal formado devuelve `400` ("El cuerpo de la petición no es un JSON
+  válido"), no `500`.
 
 ## Documentación API (Swagger)
 

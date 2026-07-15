@@ -1,3 +1,5 @@
+import { formatMoney } from "../../../utils/formatMoney";
+
 interface OrderConfirmationItem {
   nameSnapshot: string;
   size: number;
@@ -53,13 +55,6 @@ function escapeHtml(value: string): string {
  * `dashboard.service.ts` (no está exportado) para que este módulo de plantilla se
  * mantenga autónomo, igual que `passwordResetCode.ts`.
  */
-function formatMoney(n: number): string {
-  return `$${n.toLocaleString("es-MX", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
-}
-
 /**
  * Fecha legible del pedido, p. ej. "14 de julio de 2026". Se fija a
  * `America/Mexico_City` (no UTC): a diferencia de `src/utils/date.ts` —que usa UTC para

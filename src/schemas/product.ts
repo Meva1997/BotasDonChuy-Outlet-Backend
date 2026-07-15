@@ -19,28 +19,60 @@ const sizesFromString = z
   )
   .pipe(z.array(z.number().int().positive()).min(1, "Agrega al menos una talla"));
 
+// Los defaults de zod ("se esperaba número, recibido indefinido") llegan tal cual
+// al usuario, porque errorHandler promueve el mensaje del campo a la respuesta y
+// el front lo pinta. Cada campo del ProductForm lleva su propio texto para que un
+// campo vacío diga qué falta en vez de describir el tipo que se esperaba.
 const productBaseSchema = z.object({
-  name: z.string().trim().min(2, "El nombre es muy corto").max(120),
-  description: z.string().trim().max(2000).optional().or(z.literal("")),
-  originalPrice: z.number().positive("El precio original debe ser mayor a 0"),
-  salePrice: z.number().positive("El precio de oferta debe ser mayor a 0"),
-  unitCost: z.number().nonnegative("El costo unitario no puede ser negativo"),
-  stock: z.number().int().nonnegative().default(0),
+  name: z
+    .string("El nombre es requerido")
+    .trim()
+    .min(2, "El nombre es muy corto")
+    .max(120, "El nombre no puede pasar de 120 caracteres"),
+  description: z
+    .string()
+    .trim()
+    .max(2000, "La descripción no puede pasar de 2000 caracteres")
+    .optional()
+    .or(z.literal("")),
+  originalPrice: z
+    .number("El precio original es requerido")
+    .positive("El precio original debe ser mayor a 0"),
+  salePrice: z
+    .number("El precio de oferta es requerido")
+    .positive("El precio de oferta debe ser mayor a 0"),
+  unitCost: z
+    .number("El costo unitario es requerido")
+    .nonnegative("El costo unitario no puede ser negativo"),
+  stock: z
+    .number()
+    .int("El stock debe ser un número entero")
+    .nonnegative("El stock no puede ser negativo")
+    .default(0),
   type: z.enum(["bota", "sombrero", "ropa"], {
     message: "Selecciona una categoría válida",
   }),
-  sizes: z.union([
-    sizesFromString,
-    z.array(z.number().int().positive()).min(1, "Agrega al menos una talla"),
-  ]),
+  sizes: z.union(
+    [
+      sizesFromString,
+      z.array(z.number().int().positive()).min(1, "Agrega al menos una talla"),
+    ],
+    { error: "Agrega al menos una talla (p. ej. \"25, 26, 26\")" },
+  ),
   // Las imágenes NO se setean por POST/PUT: se gestionan solo por los endpoints
   // dedicados (POST/DELETE /api/admin/products/:id/images), que mantienen la BD
   // sincronizada con Cloudinary. `imageSrc` ya no se acepta aquí.
-  code: z.string().trim().max(40).optional().or(z.literal("")),
-  weightKg: z.number().nonnegative(),
-  lengthCm: z.number().nonnegative(),
-  widthCm: z.number().nonnegative(),
-  heightCm: z.number().nonnegative(),
+  code: z
+    .string()
+    .trim()
+    .max(40, "El código no puede pasar de 40 caracteres")
+    .optional()
+    .or(z.literal("")),
+  // Medidas de envío: van a la paquetería, así que se piden siempre.
+  weightKg: z.number("El peso (kg) es requerido").nonnegative("El peso no puede ser negativo"),
+  lengthCm: z.number("El largo (cm) es requerido").nonnegative("El largo no puede ser negativo"),
+  widthCm: z.number("El ancho (cm) es requerido").nonnegative("El ancho no puede ser negativo"),
+  heightCm: z.number("El alto (cm) es requerido").nonnegative("El alto no puede ser negativo"),
   visible: z.boolean().default(true),
 });
 
@@ -73,7 +105,10 @@ export type ProductUpdateInput = z.infer<typeof productUpdateSchema>;
 
 /** Body de DELETE /api/admin/products/:id/images — identifica la imagen a borrar. */
 export const deleteProductImageSchema = z.object({
-  publicId: z.string().trim().min(1, "Se requiere el publicId de la imagen"),
+  publicId: z
+    .string("Se requiere el publicId de la imagen")
+    .trim()
+    .min(1, "Se requiere el publicId de la imagen"),
 });
 
 export type DeleteProductImageInput = z.infer<typeof deleteProductImageSchema>;

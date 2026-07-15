@@ -51,7 +51,12 @@ export const updateBrandSettings: RequestHandler = asyncHandler(
  */
 export const uploadBrandLogo: RequestHandler = asyncHandler(
   async (req: Request, res: Response) => {
-    if (!req.file) throw new AppError("No se recibió ningún archivo de logo", 400);
+    if (!req.file) {
+      throw new AppError(
+        'No se recibió ningún archivo. Adjunta el logo en el campo "logo" (PNG, JPEG o WEBP, máximo 5 MB).',
+        400,
+      );
+    }
 
     const settings = await getOrCreateBrandSettings();
     const previousPublicId = settings.logoPublicId;
