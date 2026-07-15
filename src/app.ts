@@ -38,7 +38,8 @@ startPendingOrderSweeper(); // libera stock de órdenes pending abandonadas (Str
 
 //Global Middleware
 app.use(helmet());
-app.use(cors({ origin: process.env.CORS_ORIGIN }));
+const corsOrigins = process.env.CORS_ORIGIN?.split(",").map((o) => o.trim());
+app.use(cors({ origin: corsOrigins }));
 
 // Webhook de Stripe: la verificación de firma exige el cuerpo CRUDO, así que se
 // monta con express.raw ANTES del express.json() global (que solo parsea el resto).

@@ -34,7 +34,7 @@ Crea un archivo `.env` en la raíz del proyecto (no se versiona):
 PORT=4000
 NODE_ENV=development
 DATABASE_URL=postgres://usuario:password@host:5432/basededatos
-CORS_ORIGIN=http://localhost:3000
+CORS_ORIGIN=http://localhost:3000,https://tu-dominio.com
 
 # Auth
 JWT_SECRET=un_secreto_largo_y_seguro

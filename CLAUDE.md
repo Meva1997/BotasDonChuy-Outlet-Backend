@@ -19,8 +19,10 @@ Express 5 + TypeScript REST API backed by PostgreSQL through Sequelize 6. It is 
 for the "Botas Don Chuy Outlet" store (products of type `bota`, `sombrero`, or `ropa`).
 
 **Startup flow** (`src/app.ts`): loads env via `dotenv` → creates the Express app → calls
-`connectDB()` → registers global middleware (`helmet`, `cors` with `CORS_ORIGIN`, JSON and
-urlencoded body parsers) → mounts Swagger UI at `/api/docs` (+ raw spec at `/api/docs.json`) →
+`connectDB()` → registers global middleware (`helmet`, `cors` with `CORS_ORIGIN` — a
+comma-separated list of allowed origins, split/trimmed into an array before being passed to
+`cors()` — JSON and urlencoded body parsers) → mounts Swagger UI at `/api/docs` (+ raw spec
+at `/api/docs.json`) →
 mounts the routers → exposes `GET /health` → listens on `PORT` (default `4000`).
 The app `export default`s for testability.
 
