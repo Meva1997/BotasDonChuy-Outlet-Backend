@@ -56,6 +56,19 @@ PENDING_ORDER_SWEEP_INTERVAL_MINUTES=10 # opcional: cada cuánto corre el barrid
 RESEND_API_KEY=re_...                    # del dashboard de Resend
 EMAIL_FROM=Botas Don Chuy <onboarding@resend.dev>  # sin dominio verificado, usar onboarding@resend.dev
 FRONTEND_URL=http://localhost:3000       # opcional: base para links dentro de los correos
+
+# Skydropx (cotización de envío en vivo) — client id/secret y los 4 SHIP_FROM_* son OBLIGATORIOS
+SKYDROPX_CLIENT_ID=...
+SKYDROPX_CLIENT_SECRET=...
+SKYDROPX_BASE_URL=https://sandbox-api.skydropx.com  # opcional (default: sandbox)
+SHIP_FROM_POSTAL_CODE=38000
+SHIP_FROM_STATE=Guanajuato
+SHIP_FROM_CITY=Celaya
+SHIP_FROM_NEIGHBORHOOD=Centro
+SHIP_FROM_STREET=...          # opcional hoy (reservado para Fase 8.5, generar guía)
+SHIP_FROM_EXTERNAL_NUMBER=... # opcional hoy (reservado para Fase 8.5)
+SHIP_FROM_NAME=...            # opcional hoy (reservado para Fase 8.5)
+SHIP_FROM_PHONE=...           # opcional hoy (reservado para Fase 8.5)
 ```
 
 > En `NODE_ENV=development` los modelos se sincronizan automáticamente con
@@ -209,9 +222,23 @@ calcula el frontend.
   `costoEstimadoPedido` y `priority` (`urgente` <15 días · `pronto` <45 · `ok`). Las filas se ordenan
   por urgencia de cobertura y, dentro de cada nivel, por `margenMensual` desc.
 
+### Envío en vivo con Skydropx (Fase 8.1–8.3)
+
+`POST /api/shipping/rates` (público, `src/routes/shipping.routes.ts` →
+`shipping.controller.ts`) cotiza el envío en vivo contra Skydropx Pro para el checkout, con la
+tarifa plana existente (`computeShipping`) como **fallback** si Skydropx falla, tarda o algún
+producto del carrito no tiene dimensiones válidas. `src/services/skydropx.service.ts` maneja el
+OAuth2 (`client_credentials`, token cacheado ~2h), limita las llamadas salientes a 2 req/s (límite
+de la cuenta) y hace poll de la cotización hasta que las tarifas dejan de estar `pending` o se agota
+un timeout de 8s. `src/services/packing.ts` arma una sola caja apilada por pedido a partir de las
+dimensiones/peso de cada producto. La ruta está limitada por `shippingRateLimiter` (20 req/min por
+IP) para no acaparar el presupuesto de 2 req/s compartido por toda la cuenta. Solo cotización en
+vivo por ahora — crear la orden con tarifa real, guía automática y webhook de estado siguen
+pendientes (ver `roadmap-skydropx.md`).
+
 ### Pagos con Stripe (Fase 8 — solo test/sandbox)
 
-El cobro con Stripe está **activo** (solo Stripe; Skydropx sigue diferido). `src/config/stripe.ts`
+El cobro con Stripe está **activo** (llaves de test/sandbox). `src/config/stripe.ts`
 exige `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET` (el server no arranca sin ellas).
 
 - **PaymentIntent real:** `createPaymentIntentForOrder` (`src/services/payment.service.ts`) crea el

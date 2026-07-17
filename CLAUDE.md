@@ -149,7 +149,7 @@ atomic decrement → `409`). `unitCost` is frozen in the row but **excluded from
 that cost fields only appear on authenticated admin routes. Orders are created with
 `status: "pending"` / `paymentStatus: "unpaid"`; the response is `{ order, clientSecret }`.
 
-**Payments / Stripe** (Fase 8, activo — solo Stripe; Skydropx sigue diferido): the `stripe`
+**Payments / Stripe** (Fase 8, activo): the `stripe`
 package is installed and configured in `src/config/stripe.ts` (its own `dotenv.config()` at module
 top, like `database.ts`, since imports run before `app.ts`'s `dotenv.config()`). That module
 **hard-requires** `STRIPE_SECRET_KEY` **and** `STRIPE_WEBHOOK_SECRET` (throws at startup if either
@@ -204,6 +204,66 @@ double-restock. `src/services/pendingOrderSweeper.ts` (`startPendingOrderSweeper
 `PENDING_ORDER_TTL_MINUTES` with a `paymentIntentId`, and **reconciles each against Stripe**
 (`retrieve`): if the PaymentIntent is `succeeded` it marks the order `paid` (recovers a missed
 webhook), otherwise it cancels the PaymentIntent and calls `releaseOrderStock`.
+
+**Envío en vivo / Skydropx** (Fase 8.1–8.3, activo — cotización en vivo; Fase 8.4+ — órdenes con
+tarifa real, guía automática, webhook de estado — sigue pendiente, ver `roadmap-skydropx.md`):
+`POST /api/shipping/rates` `[público]` (`src/routes/shipping.routes.ts` →
+`shipping.controller.ts`'s `getShippingRates`) cotiza el envío en vivo contra Skydropx Pro para el
+checkout, con la tarifa plana existente (`cart.ts`'s `computeShipping`) como **fallback** — la
+tienda nunca debe dejar de cotizar porque la paquetería esté caída o responda mal. `src/config/
+skydropx.ts` sigue el mismo patrón que `stripe.ts`/`resend.ts`/`cloudinary.ts` (`dotenv.config()`
+propio, **hard-require** al arrancar) para `SKYDROPX_CLIENT_ID`/`SKYDROPX_CLIENT_SECRET` y para los
+campos de `SHIP_FROM_*` que la cotización sí usa hoy (`SHIP_FROM_POSTAL_CODE`/`STATE`/`CITY`/
+`NEIGHBORHOOD`); `SHIP_FROM_STREET`/`EXTERNAL_NUMBER`/`NAME`/`PHONE` están reservados para crear la
+guía (Fase 8.5, no implementada) y **deliberadamente no son hard-require todavía** — exigirlos hoy
+tumbaría el arranque del server por config que ninguna ruta activa lee.
+
+`src/services/skydropx.service.ts` es el cliente HTTP compartido: autentica con OAuth2
+`client_credentials` (`POST /api/v1/oauth/token`), cachea el `access_token` en memoria y lo renueva
+~5 min antes de que expire (`expires_in: 7200`, 2h), y limita **todas** las llamadas salientes
+(incluida la de token) a 2 req/s con un `throttle()` de cola compartida a nivel de módulo — el
+límite documentado de la cuenta Skydropx. Cada `fetch` individual lleva su propio
+`AbortSignal.timeout` (`REQUEST_TIMEOUT_MS`, 5s) para que una conexión colgada no bloquee
+indefinidamente — el presupuesto de 8s de `pollQuotation` (`POLL_TIMEOUT_MS`) solo se revisa
+*entre* intentos, no protege contra un solo `fetch` que nunca resuelve. Los fallos HTTP se
+lanzan como `SkydropxRequestError` (conserva el `status`) en vez de un `Error` genérico, para que
+el llamador pueda distinguir un 4xx (bug de integración de nuestro lado — dirección/parcel mal
+armados) de una falla transitoria de red/5xx.
+
+`getShippingRates(addressFrom, addressTo, parcel)` crea la cotización (`POST /api/v1/quotations`,
+shape `{ quotation: { address_from, address_to, parcels } }` — confirmado contra sandbox real, ver
+`roadmap-skydropx.md` §Fase 8.3) y hace poll (`GET /api/v1/quotations/{id}`) cada segundo hasta que
+ninguna tarifa quede `pending` o se agote el timeout — `is_completed` puede no llegar nunca a
+`true` (timeouts internos de Skydropx ajenos a nosotros), así que el poll no lo espera.
+**Cuidado:** un `rates: []` en la primera lectura (cotización recién creada, ninguna paquetería
+respondió aún) no es "ya resuelto" — `.some()` sobre un array vacío da `false`, así que el chequeo
+de "sigue pendiente" trata explícitamente un array vacío como pendiente, o el poll cortaría en el
+primer intento con cero tarifas. Solo se devuelven tarifas `success: true` con `amount`/`total` no
+nulos (llegan como **strings**, requieren `parseFloat`).
+
+`src/services/packing.ts`'s `buildParcel` arma **una sola caja apilada** por pedido: peso y alto se
+suman por unidad, largo y ancho toman el máximo del carrito — nunca subcotiza el peso/alto, aunque
+puede sobrestimar. `shipping.controller.ts` valida, antes de cotizar, que cada producto en el
+carrito tenga `weightKg`/`lengthCm`/`widthCm`/`heightCm` > 0 (mismo invariante que `productSchema`
+exige desde Fase 8.2, ver más abajo) — un producto con alguna dimensión en `0` (fila anterior a esa
+validación) haría que `buildParcel` arme una caja subdimensionada pero válida en vez de fallar, así
+que en ese caso se **salta la cotización en vivo directo al fallback de tarifa plana** en vez de
+cotizar con datos malos. `POST /api/shipping/rates` está gateado por `shippingRateLimiter`
+(`src/middlewares/rateLimit.ts`, 20 req/min por IP) — es público y sin este límite un solo cliente
+podría acaparar el presupuesto de 2 req/s compartido por toda la cuenta y degradar la cotización de
+compradores reales.
+
+`src/services/productAvailability.ts`'s `assertProductAvailable(product)` es la guardia compartida
+de "producto disponible" (existe, `visible`, no soft-deleted) entre `orders.service.createOrder` y
+`shipping.controller.getShippingRates` — ambos flujos deben mostrar el mismo mensaje accionable
+(ver **Error handling** más abajo), así que viven en un solo lugar en vez de duplicarse.
+
+`productSchema`/`productUpdateSchema` (`src/schemas/product.ts`) exigen `weightKg`/`lengthCm`/
+`widthCm`/`heightCm` **> 0** (`.positive()`, antes `.nonnegative()`) desde Fase 8.2: con cotización
+en vivo, un producto en `0` no solo generaría una guía mala, tumbaría la cotización del carrito
+completo. El frontend (`ProductForm.tsx`) valida estos cuatro campos con la misma regla para que un
+producto legado en `0` se marque como inválido en el propio formulario en vez de fallar recién al
+enviar con un 400 desde un campo no relacionado.
 
 **Dashboard** (`src/routes/adminDashboard.routes.ts`, `src/routes/adminOrder.routes.ts`,
 `src/controllers/dashboard.controller.ts`, `src/controllers/order.controller.ts`,
@@ -479,14 +539,23 @@ nullable password-reset columns in Fase 9 (`resetPasswordCodeHash`, `resetPasswo
   `STRIPE_WEBHOOK_SECRET` (both required — the server throws at startup without them),
   optional `STRIPE_CURRENCY`/`PENDING_ORDER_TTL_MINUTES`/`PENDING_ORDER_SWEEP_INTERVAL_MINUTES`,
   plus Cloudinary keys, `RESEND_API_KEY` + `EMAIL_FROM` (both required — the server throws at
-  startup without them) and optional `FRONTEND_URL`). `.env` is gitignored — never commit it
-  (the Stripe/Resend keys are test/sandbox).
+  startup without them), `SKYDROPX_CLIENT_ID` + `SKYDROPX_CLIENT_SECRET` (both required) and
+  `SHIP_FROM_POSTAL_CODE`/`SHIP_FROM_STATE`/`SHIP_FROM_CITY`/`SHIP_FROM_NEIGHBORHOOD` (all
+  required — see the **Envío en vivo / Skydropx** section), optional `SKYDROPX_BASE_URL`
+  (defaults to the sandbox host) and optional `SHIP_FROM_STREET`/`SHIP_FROM_EXTERNAL_NUMBER`/
+  `SHIP_FROM_NAME`/`SHIP_FROM_PHONE` (reserved for Fase 8.5, not yet enforced), and optional
+  `FRONTEND_URL`). `.env` is gitignored — never commit it (the Stripe/Resend keys are
+  test/sandbox; Skydropx currently points at its own separate sandbox account too — see
+  `roadmap-skydropx.md` §1).
 - Dependencies wired in: `jsonwebtoken` + `bcrypt` (auth), `zod` (validation),
-  `express-rate-limit` (auth routes), `swagger-jsdoc` + `swagger-ui-express` (API docs),
+  `express-rate-limit` (auth routes, and now `POST /api/shipping/rates`),
+  `swagger-jsdoc` + `swagger-ui-express` (API docs),
   `stripe` (payments — real PaymentIntent + signed webhook),
   `cloudinary` + `multer` (image uploads — Fase 3: multer memory storage → Cloudinary
   `upload_stream`; `multer-storage-cloudinary` is installed but **unused**, see the image section),
   `resend` (transactional emails — Fase 9: password-reset code, see the Emails section).
+  Skydropx has no SDK dependency — `src/services/skydropx.service.ts` calls its REST API
+  directly with the native `fetch`.
   Prefer these existing libraries when implementing those features.
 - `pnpm-workspace.yaml` holds the pnpm `allowBuilds` map (decides which dependency lifecycle
   scripts may run, e.g. `bcrypt: true`, `@scarf/scarf: false`). pnpm v11 errors on undecided

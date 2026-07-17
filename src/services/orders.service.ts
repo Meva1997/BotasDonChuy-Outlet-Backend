@@ -6,6 +6,7 @@ import { Order } from "../models/Order";
 import { OrderItem } from "../models/OrderItem";
 import { AppError } from "../middlewares/AppError";
 import { computeTotals, type CartLineItem } from "./cart";
+import { assertProductAvailable } from "./productAvailability";
 import type { CreateOrderInput } from "../schemas/checkout";
 
 /**
@@ -58,14 +59,7 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
 
     for (const line of lines) {
       const product = await Product.findByPk(line.productId, { transaction: t });
-      if (!product || product.visible === false || product.deletedAt != null) {
-        throw new AppError(
-          product
-            ? `"${product.name}" ya no está disponible. Quítalo del carrito para continuar.`
-            : "Uno de los productos de tu carrito ya no está disponible. Revísalo para continuar.",
-          409,
-        );
-      }
+      assertProductAvailable(product);
 
       // 3. Descuento atómico de stock por talla (pieza anti–race-condition).
       const [affected] = await ProductSize.update(
