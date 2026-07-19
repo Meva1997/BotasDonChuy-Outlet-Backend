@@ -134,15 +134,28 @@ Resend only delivers to the account owner's address (`403` to anyone else — sw
 
 **Checkout** (`src/routes/order.routes.ts`, `src/controllers/order.controller.ts`,
 `src/services/orders.service.ts`): `POST /api/orders` is **public** (mounted at `/api/orders`).
-The body `{ items: [{ productId, size, quantity }], customer, shippingCarrier? }` is validated with
-`createOrderSchema` (zod, `src/schemas/checkout.ts`). `orders.service.createOrder` does everything
+The body `{ items: [{ productId, size, quantity }], customer, shippingCarrier?, quotationId?,
+rateId? }` is validated with `createOrderSchema` (zod, `src/schemas/checkout.ts`). `quotationId`/
+`rateId` (Fase 8.4 — cotización en vivo) are optional but **both-or-neither** (a `.refine()` rejects
+one without the other): when the checkout quoted live via `POST /api/shipping/rates`, they carry the
+chosen Skydropx quotation/rate; when it fell back to the flat rate (Skydropx down at quote time),
+they're omitted. `orders.service.createOrder` does everything
 inside a single `sequelize.transaction`: it **aggregates** duplicate `(productId, size)` lines,
 processes them in deterministic `(productId, size)` order (deadlock avoidance), and for each line
 runs an **atomic** `ProductSize.update({ stock: literal('stock - N') }, { where: { …, stock: { [Op.gte]: N } } })`
 — if `affectedCount === 0` it throws `AppError(409)`, so concurrent buyers of the last unit get
 exactly one `201` and one `409` (the size drops to stock 0). Totals are **recomputed server-side**
 with the `cart` service (the client never sends amounts), and prices are **frozen** into each
-`OrderItem` (`unitOriginalPrice`/`unitSalePrice`/`unitCost`/`nameSnapshot`). `createOrderSchema`
+`OrderItem` (`unitOriginalPrice`/`unitSalePrice`/`unitCost`/`nameSnapshot`). **Shipping is
+authoritative too** (Fase 8.4): when `quotationId`/`rateId` come in, `createOrder` **re-consults the
+Skydropx quotation** (`getQuotationRate`, a single `GET`) and uses that rate's `total` as `shipping`
+(recomputing `total = subtotal − savings + shipping`) — never a client-sent amount, same rule as the
+price recompute; it also persists `skydropxQuotationId`/`skydropxRateId` and fills `shippingCarrier`
+from the rate's carrier. Without them it uses `computeShipping` (flat rate) as before. The re-consult
+runs **before** the transaction opens (deliberately deviating from the roadmap's "inside the
+transaction" wording): it's a network `GET` that touches no DB row, so keeping it out avoids holding
+`ProductSize` locks open across a up-to-5s call. A rate that's no longer available (expired/gone) →
+`409`; a network failure re-consulting → `503` — both actionable. `createOrderSchema`
 caps `quantity` at 99/item and `items` at 50/order (the real per-size limit is enforced by the
 atomic decrement → `409`). `unitCost` is frozen in the row but **excluded from the public response**
 (the order is reloaded with `attributes: { exclude: ['unitCost'] }` on `items`), matching the rule
@@ -205,8 +218,8 @@ double-restock. `src/services/pendingOrderSweeper.ts` (`startPendingOrderSweeper
 (`retrieve`): if the PaymentIntent is `succeeded` it marks the order `paid` (recovers a missed
 webhook), otherwise it cancels the PaymentIntent and calls `releaseOrderStock`.
 
-**Envío en vivo / Skydropx** (Fase 8.1–8.3, activo — cotización en vivo; Fase 8.4+ — órdenes con
-tarifa real, guía automática, webhook de estado — sigue pendiente, ver `roadmap-skydropx.md`):
+**Envío en vivo / Skydropx** (Fase 8.1–8.4, activo — cotización en vivo + órdenes con tarifa real;
+Fase 8.5+ — guía automática al pagar, webhook de estado — sigue pendiente, ver `roadmap-skydropx.md`):
 `POST /api/shipping/rates` `[público]` (`src/routes/shipping.routes.ts` →
 `shipping.controller.ts`'s `getShippingRates`) cotiza el envío en vivo contra Skydropx Pro para el
 checkout, con la tarifa plana existente (`cart.ts`'s `computeShipping`) como **fallback** — la
@@ -239,7 +252,10 @@ ninguna tarifa quede `pending` o se agote el timeout — `is_completed` puede no
 respondió aún) no es "ya resuelto" — `.some()` sobre un array vacío da `false`, así que el chequeo
 de "sigue pendiente" trata explícitamente un array vacío como pendiente, o el poll cortaría en el
 primer intento con cero tarifas. Solo se devuelven tarifas `success: true` con `amount`/`total` no
-nulos (llegan como **strings**, requieren `parseFloat`).
+nulos (llegan como **strings**, requieren `parseFloat`). `getQuotationRate(quotationId, rateId)`
+(Fase 8.4) re-consulta una cotización ya creada con un solo `GET` (sin poll — el cliente solo pudo
+elegir un rate ya resuelto) y devuelve ese rate normalizado, o `null` si ya no está disponible; es la
+fuente autoritativa del costo de envío que usa `orders.service.createOrder` (ver **Checkout**).
 
 `src/services/packing.ts`'s `buildParcel` arma **una sola caja apilada** por pedido: peso y alto se
 suman por unidad, largo y ancho toman el máximo del carrito — nunca subcotiza el peso/alto, aunque
@@ -523,7 +539,10 @@ without it they default to `0`/`[]`. Product images live in the `images` column 
 `VIRTUAL` that returns `images[0]?.url ?? null` (kept for frontend compat — the source of truth is
 `images`, so there's no physical column to keep in sync). See the **Imágenes / Cloudinary** section.
 `Order` holds a frozen snapshot of totals and shipping
-data; `OrderItem` freezes per-unit prices (`unitOriginalPrice`, `unitSalePrice`, `unitCost`) so
+data (plus nullable `paymentIntentId`/`paymentStatus` from Fase 8, and nullable
+`skydropxQuotationId`/`skydropxRateId` from Fase 8.4 — the live-shipping quotation/rate used for the
+order, `null` when it fell back to the flat rate);
+`OrderItem` freezes per-unit prices (`unitOriginalPrice`, `unitSalePrice`, `unitCost`) so
 historical orders aren't affected by later `Product` price changes. `AdminUser` and
 `BrandSettings` (singleton) round out the Fase 1 data model; `AdminUser` also gained three
 nullable password-reset columns in Fase 9 (`resetPasswordCodeHash`, `resetPasswordExpiresAt`,

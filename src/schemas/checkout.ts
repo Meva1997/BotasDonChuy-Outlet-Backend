@@ -85,13 +85,28 @@ export const orderItemSchema = z.object({
     .max(99, "Máximo 99 unidades por artículo"),
 });
 
-export const createOrderSchema = z.object({
-  items: z
-    .array(orderItemSchema)
-    .min(1, "El pedido debe tener al menos un artículo")
-    .max(50, "Demasiados artículos en el pedido"),
-  customer: shippingSchema,
-  shippingCarrier: z.string().trim().optional(),
-});
+export const createOrderSchema = z
+  .object({
+    items: z
+      .array(orderItemSchema)
+      .min(1, "El pedido debe tener al menos un artículo")
+      .max(50, "Demasiados artículos en el pedido"),
+    customer: shippingSchema,
+    shippingCarrier: z.string().trim().optional(),
+    // Cotización de envío en vivo (Fase 8.4). Opcionales: el checkout puede haber
+    // caído al fallback de tarifa plana (Skydropx no disponible → sin cotización),
+    // en cuyo caso NO se envían y el servidor cobra `computeShipping`. Cuando sí
+    // vienen, el servidor RE-CONSULTA la cotización en Skydropx y toma el `total`
+    // autoritativo de ese rate (jamás confía en un monto del cliente).
+    quotationId: z.string().trim().min(1).optional(),
+    rateId: z.string().trim().min(1).optional(),
+  })
+  // Deben ir juntos o ninguno: un `quotationId` sin `rateId` (o al revés) no
+  // identifica una tarifa que el servidor pueda re-consultar.
+  .refine((data) => (data.quotationId == null) === (data.rateId == null), {
+    message:
+      "Envía la cotización y la tarifa de envío juntas, o ninguna de las dos.",
+    path: ["rateId"],
+  });
 
 export type CreateOrderInput = z.infer<typeof createOrderSchema>;

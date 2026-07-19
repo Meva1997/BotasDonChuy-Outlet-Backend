@@ -237,6 +237,48 @@ export function toSkydropxAddress(customer: {
   };
 }
 
+/**
+ * `GET /api/v1/quotations/{id}` NO devuelve la dirección de destino cotizada
+ * (verificado contra sandbox real: el objeto solo trae `address_template_to_id`,
+ * `null` salvo que se usen templates de dirección) — así que no hay forma de
+ * re-validar contra Skydropx que el `quotationId`/`rateId` que llega en
+ * `POST /api/orders` corresponde a la MISMA dirección que el cliente puso en la
+ * orden. Sin este chequeo, alguien podría cotizar barato a una dirección y pagar
+ * ese envío mientras la orden se manda a otra distinta (más cara).
+ *
+ * Por eso `getShippingRates` recuerda aquí, en memoria, a qué dirección
+ * correspondió cada `quotationId` que devolvimos al cliente, y `getQuotationRate`
+ * exige que la dirección de la orden coincida exactamente. TTL de 24h (la
+ * vigencia documentada de una cotización, ver roadmap-skydropx.md §8) con barrido
+ * oportunista en cada inserción — no amerita un cron aparte, el volumen es uno
+ * por cotización pedida. Si el proceso se reinicia entre cotizar y pagar, el
+ * registro se pierde y `getQuotationRate` falla cerrado (null → 409 "vuelve a
+ * cotizar") en vez de confiar ciegamente en un `quotationId` que ya no puede
+ * verificar.
+ */
+const QUOTATION_ADDRESS_TTL_MS = 24 * 60 * 60 * 1000;
+const quotationDestinations = new Map<
+  string,
+  { address: SkydropxAddress; recordedAt: number }
+>();
+
+function rememberQuotationDestination(quotationId: string, address: SkydropxAddress): void {
+  const now = Date.now();
+  for (const [id, entry] of quotationDestinations) {
+    if (now - entry.recordedAt > QUOTATION_ADDRESS_TTL_MS) quotationDestinations.delete(id);
+  }
+  quotationDestinations.set(quotationId, { address, recordedAt: now });
+}
+
+function sameAddress(a: SkydropxAddress, b: SkydropxAddress): boolean {
+  return (
+    a.postal_code === b.postal_code &&
+    a.area_level1 === b.area_level1 &&
+    a.area_level2 === b.area_level2 &&
+    a.area_level3 === b.area_level3
+  );
+}
+
 async function createQuotation(
   addressFrom: SkydropxAddress,
   addressTo: SkydropxAddress,
@@ -299,18 +341,59 @@ export async function getShippingRates(
   parcel: Parcel,
 ): Promise<{ quotationId: string; rates: NormalizedShippingRate[] }> {
   const created = await createQuotation(addressFrom, addressTo, parcel);
+  rememberQuotationDestination(created.id, addressTo);
   const resolved = await pollQuotation(created.id);
 
   const rates = resolved.rates
     .filter((r) => r.success && r.amount != null && r.total != null)
-    .map((r) => ({
-      rateId: r.id,
-      carrier: r.provider_display_name,
-      service: r.provider_service_name,
-      amount: parseFloat(r.amount!),
-      total: parseFloat(r.total!),
-      days: r.days,
-    }));
+    .map(normalizeRate);
 
   return { quotationId: resolved.id, rates };
+}
+
+function normalizeRate(r: SkydropxRate): NormalizedShippingRate {
+  return {
+    rateId: r.id,
+    carrier: r.provider_display_name,
+    service: r.provider_service_name,
+    amount: parseFloat(r.amount!),
+    total: parseFloat(r.total!),
+    days: r.days,
+  };
+}
+
+/**
+ * Re-consulta una cotización ya existente y devuelve la tarifa `rateId` elegida,
+ * normalizada — o `null` si esa tarifa ya no está disponible (cotización expirada,
+ * rate inexistente, dejó de resolver con éxito, o `destinationAddress` no coincide
+ * con la dirección para la que se cotizó, ver `rememberQuotationDestination`). Es
+ * la fuente autoritativa del costo de envío en `createOrder` (Fase 8.4): el
+ * cliente manda `quotationId`/`rateId`, pero el monto cobrado sale SIEMPRE de
+ * aquí, nunca de un total que envíe el cliente — misma regla que `computeTotals`
+ * aplica a `subtotal`/`savings`. El chequeo de dirección extiende esa misma regla
+ * al destino: sin él, alguien podría cotizar barato a una dirección y pagar ese
+ * envío mientras la orden se manda a otra.
+ *
+ * Un solo `GET` basta (sin poll): el cliente solo pudo elegir una tarifa que ya se
+ * había resuelto (`success: true`), así que re-leerla no requiere esperar a que
+ * ninguna paquetería siga `pending`.
+ */
+export async function getQuotationRate(
+  quotationId: string,
+  rateId: string,
+  destinationAddress: SkydropxAddress,
+): Promise<NormalizedShippingRate | null> {
+  const remembered = quotationDestinations.get(quotationId);
+  if (!remembered || !sameAddress(remembered.address, destinationAddress)) {
+    return null;
+  }
+
+  const quotation = await skydropxRequest<SkydropxQuotationResponse>(
+    `/api/v1/quotations/${quotationId}`,
+  );
+  const rate = quotation.rates.find((r) => r.id === rateId);
+  if (!rate || !rate.success || rate.amount == null || rate.total == null) {
+    return null;
+  }
+  return normalizeRate(rate);
 }

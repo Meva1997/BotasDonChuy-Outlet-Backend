@@ -279,6 +279,20 @@ const options: Options = {
             },
             customer: { $ref: "#/components/schemas/ShippingInput" },
             shippingCarrier: { type: "string", nullable: true, example: "Estafeta" },
+            quotationId: {
+              type: "string",
+              nullable: true,
+              description:
+                "id de cotización de Skydropx (de POST /api/shipping/rates). Debe ir junto con rateId, o ninguno. El servidor re-consulta la cotización y cobra el total autoritativo de ese rate; si se omiten, cobra la tarifa plana.",
+              example: "quot_5b2e1f",
+            },
+            rateId: {
+              type: "string",
+              nullable: true,
+              description:
+                "id del rate elegido dentro de la cotización. Debe ir junto con quotationId, o ninguno.",
+              example: "rate_9f8a3c",
+            },
           },
         },
         ShippingInput: {
@@ -342,6 +356,19 @@ const options: Options = {
             postalCode: { type: "string", example: "38000" },
             references: { type: "string", nullable: true },
             shippingCarrier: { type: "string", nullable: true, example: "Estafeta" },
+            skydropxQuotationId: {
+              type: "string",
+              nullable: true,
+              description:
+                "Cotización de Skydropx usada para el envío. null cuando la orden usó la tarifa plana de respaldo.",
+              example: "quot_5b2e1f",
+            },
+            skydropxRateId: {
+              type: "string",
+              nullable: true,
+              description: "Rate elegido dentro de la cotización. null en tarifa plana.",
+              example: "rate_9f8a3c",
+            },
             items: {
               type: "array",
               items: { $ref: "#/components/schemas/OrderItem" },

@@ -7,7 +7,11 @@ import { OrderItem } from "../models/OrderItem";
 import { AppError } from "../middlewares/AppError";
 import { computeTotals, type CartLineItem } from "./cart";
 import { assertProductAvailable } from "./productAvailability";
+import { getQuotationRate, toSkydropxAddress, SkydropxRequestError } from "./skydropx.service";
 import type { CreateOrderInput } from "../schemas/checkout";
+
+const RATE_UNAVAILABLE_MESSAGE =
+  "La tarifa de envío que elegiste ya no está disponible (las cotizaciones expiran a las 24 h). Vuelve a calcular el envío para continuar.";
 
 /**
  * Convierte un carrito de cliente en una orden persistida.
@@ -29,6 +33,49 @@ import type { CreateOrderInput } from "../schemas/checkout";
  * real (Stripe) y la liberación de reservas vencidas llegan en Fase 8.
  */
 export async function createOrder(input: CreateOrderInput): Promise<Order> {
+  // 0. Envío autoritativo (Fase 8.4). Si el checkout cotizó en vivo, re-consultamos
+  //    la cotización en Skydropx y tomamos el `total` de ESE rate como costo de envío
+  //    — jamás confiamos en un monto que mande el cliente (misma regla que
+  //    `computeTotals` aplica a subtotal/savings). Si no vienen `quotationId`/`rateId`
+  //    (el checkout cayó al fallback de tarifa plana), `shippingOverride` queda null y
+  //    más abajo se usa `computeShipping` como hasta ahora.
+  //    Se resuelve ANTES de abrir la transacción a propósito: es un `GET` de red (hasta
+  //    5s) que no toca la BD, y meterlo dentro mantendría abiertos los locks de
+  //    `ProductSize` durante la llamada, invitando contención/deadlocks entre checkouts.
+  let shippingOverride:
+    | { total: number; quotationId: string; rateId: string; carrier: string }
+    | null = null;
+  if (input.quotationId && input.rateId) {
+    const destinationAddress = toSkydropxAddress(input.customer);
+    let rate;
+    try {
+      rate = await getQuotationRate(input.quotationId, input.rateId, destinationAddress);
+    } catch (err) {
+      // Un 4xx de Skydropx al re-consultar (p. ej. quotationId ya purgado/inválido)
+      // significa que la cotización ya no existe, no una falla transitoria — mismo
+      // caso que un rate no encontrado, así que se trata igual (409, "vuelve a
+      // cotizar"). Solo una falla de red/5xx/timeout amerita el 503 "reintenta".
+      const status = err instanceof SkydropxRequestError ? err.status : undefined;
+      const isClientError = status !== undefined && status >= 400 && status < 500;
+      if (isClientError) {
+        throw new AppError(RATE_UNAVAILABLE_MESSAGE, 409);
+      }
+      throw new AppError(
+        "No pudimos confirmar el costo de envío en este momento. Intenta de nuevo en unos segundos.",
+        503,
+      );
+    }
+    if (!rate) {
+      throw new AppError(RATE_UNAVAILABLE_MESSAGE, 409);
+    }
+    shippingOverride = {
+      total: rate.total,
+      quotationId: input.quotationId,
+      rateId: input.rateId,
+      carrier: rate.carrier,
+    };
+  }
+
   // 1. Agregar renglones duplicados del mismo (productId, size) sumando cantidad.
   //    Evita descontar mal el stock y deja un único OrderItem por par.
   const aggregated = new Map<string, { productId: number; size: number; quantity: number }>();
@@ -108,10 +155,16 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
       });
     }
 
-    // 4. Totales recalculados en el servidor (autoritativo).
+    // 4. Totales recalculados en el servidor (autoritativo). Si hay cotización en
+    //    vivo, su `total` reemplaza el envío de tarifa plana y el total se recompone
+    //    en consecuencia; si no, se usan los de `computeTotals` tal cual.
     const totals = computeTotals(cartItems);
+    const shipping = shippingOverride ? shippingOverride.total : totals.shipping;
+    const total = totals.subtotal - totals.savings + shipping;
 
-    // 5. Crear la orden (mapeo del cliente a las columnas de la tabla).
+    // 5. Crear la orden (mapeo del cliente a las columnas de la tabla). El
+    //    `shippingCarrier` viene del rate elegido cuando hubo cotización en vivo; si
+    //    no, del que haya mandado el cliente (o queda vacío).
     const { customer } = input;
     const created = await Order.create(
       {
@@ -119,8 +172,8 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
         paymentStatus: "unpaid",
         subtotal: totals.subtotal,
         savings: totals.savings,
-        shipping: totals.shipping,
-        total: totals.total,
+        shipping,
+        total,
         customerName: customer.fullName,
         customerEmail: customer.email,
         customerPhone: customer.phone,
@@ -130,7 +183,10 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
         state: customer.state,
         postalCode: customer.postalCode,
         references: customer.references ? customer.references : undefined,
-        shippingCarrier: input.shippingCarrier ?? undefined,
+        shippingCarrier:
+          shippingOverride?.carrier ?? input.shippingCarrier ?? undefined,
+        skydropxQuotationId: shippingOverride?.quotationId ?? undefined,
+        skydropxRateId: shippingOverride?.rateId ?? undefined,
       },
       { transaction: t },
     );

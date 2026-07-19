@@ -178,10 +178,10 @@ simular una falla de Skydropx, p. ej. credenciales inválidas temporalmente).
 **Objetivo:** que `POST /api/orders` cobre el monto real cotizado, no solo la tarifa plana.
 
 **Tareas:**
-- [ ] `createOrderSchema` ([src/schemas/checkout.ts](src/schemas/checkout.ts)): agregar `quotationId`/`rateId` opcionales (opcionales porque el fallback de 8.3 puede no tener cotización real).
-- [ ] `orders.service.createOrder`: si vienen `quotationId`/`rateId`, **re-consultar la cotización en Skydropx** dentro de la transacción y tomar el `total` de ese `rateId` como `shipping` — nunca confiar en un monto que mande el cliente (misma regla que ya aplica `computeTotals` a `subtotal`/`savings`). Si no vienen (fallback), usar `computeShipping` como hoy.
-- [ ] Persistir `skydropxQuotationId`/`skydropxRateId` en la orden (columnas nuevas, ver §5) y `shippingCarrier` desde el `carrier` del rate elegido.
-- [ ] Nota para cuando se implemente: `frontend/lib/cart.ts` deja de ser la fuente de verdad del costo de envío mostrado — el checkout del front debe llamar a `/api/shipping/rates` en vez de calcular localmente, o el monto mostrado en el formulario y el cobrado en la confirmación divergirán (mismo riesgo que ya advierte el comentario en `src/services/cart.ts` sobre la duplicación con el front).
+- [x] `createOrderSchema` ([src/schemas/checkout.ts](src/schemas/checkout.ts)): agregar `quotationId`/`rateId` opcionales (opcionales porque el fallback de 8.3 puede no tener cotización real). Un `.refine()` exige que vayan **juntos o ninguno** (un `quotationId` suelto no identifica un rate re-consultable).
+- [x] `orders.service.createOrder`: si vienen `quotationId`/`rateId`, **re-consultar la cotización en Skydropx** (`getQuotationRate` en `skydropx.service.ts`, un solo `GET`) y tomar el `total` de ese `rateId` como `shipping` — nunca confiar en un monto que mande el cliente (misma regla que ya aplica `computeTotals` a `subtotal`/`savings`). Si no vienen (fallback), usar `computeShipping` como hoy. **Nota de implementación:** la re-consulta se hace **antes** de abrir la transacción (no dentro, como decía el borrador de este roadmap): es un `GET` de red que no toca la BD, y meterlo dentro mantendría abiertos los locks de `ProductSize` durante la llamada. Un rate ya no disponible → `409` accionable; un fallo de red al re-consultar → `503`.
+- [x] Persistir `skydropxQuotationId`/`skydropxRateId` en la orden (columnas nuevas, ver §5) y `shippingCarrier` desde el `carrier` del rate elegido.
+- [ ] Nota para cuando se implemente: `frontend/lib/cart.ts` deja de ser la fuente de verdad del costo de envío mostrado — el checkout del front debe llamar a `/api/shipping/rates` en vez de calcular localmente, o el monto mostrado en el formulario y el cobrado en la confirmación divergirán (mismo riesgo que ya advierte el comentario en `src/services/cart.ts` sobre la duplicación con el front). *(Backend listo; el cambio en el front queda pendiente.)*
 
 **Cómo verificar:** `POST /api/orders` con un `rateId` de una cotización real → el `shipping`/`total` de la orden creada coincide con el `total` de ese rate, no con `computeShipping`.
 
@@ -310,9 +310,9 @@ Response: 200 { received: true } | 400 (firma inválida)
 - [x] `POST /api/shipping/rates` + fallback a tarifa plana
 
 **Fase 8.4 — Órdenes con tarifa real**
-- [ ] `createOrderSchema` acepta `quotationId`/`rateId`
-- [ ] `createOrder` re-consulta el monto autoritativo
-- [ ] Columnas `skydropxQuotationId`/`skydropxRateId` persistidas
+- [x] `createOrderSchema` acepta `quotationId`/`rateId`
+- [x] `createOrder` re-consulta el monto autoritativo
+- [x] Columnas `skydropxQuotationId`/`skydropxRateId` persistidas
 
 **Fase 8.5 — Guía automática al pagar**
 - [ ] `createShipmentForOrder` enganchado en `markOrderPaidFromWebhook`

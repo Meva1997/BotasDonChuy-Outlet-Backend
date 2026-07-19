@@ -23,11 +23,24 @@ export interface OrderAttributes {
   // status "pending" / paymentStatus "unpaid" y el PaymentIntent aún no existe.
   paymentIntentId: string | null;
   paymentStatus: "unpaid" | "processing" | "paid" | "failed";
+  // Envío en vivo con Skydropx (Fase 8.4). Nullable: una orden creada por el
+  // fallback de tarifa plana (Skydropx no disponible al cotizar) no tiene
+  // cotización asociada. Cuando existen, `skydropxQuotationId` permite re-consultar
+  // el `total` autoritativo y `skydropxRateId` identifica el rate elegido — la base
+  // para generar la guía al pagar (Fase 8.5).
+  skydropxQuotationId: string | null;
+  skydropxRateId: string | null;
 }
 
 interface OrderCreationAttributes extends Optional<
   OrderAttributes,
-  "id" | "references" | "shippingCarrier" | "paymentIntentId" | "paymentStatus"
+  | "id"
+  | "references"
+  | "shippingCarrier"
+  | "paymentIntentId"
+  | "paymentStatus"
+  | "skydropxQuotationId"
+  | "skydropxRateId"
 > {}
 
 export class Order
@@ -52,6 +65,8 @@ export class Order
   declare shippingCarrier: string;
   declare paymentIntentId: string | null;
   declare paymentStatus: "unpaid" | "processing" | "paid" | "failed";
+  declare skydropxQuotationId: string | null;
+  declare skydropxRateId: string | null;
   declare readonly createdAt: Date;
   declare readonly updatedAt: Date;
   declare items?: OrderItem[];
@@ -156,6 +171,16 @@ Order.init(
       type: DataTypes.ENUM("unpaid", "processing", "paid", "failed"),
       allowNull: false,
       defaultValue: "unpaid",
+    },
+    skydropxQuotationId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      defaultValue: null,
+    },
+    skydropxRateId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      defaultValue: null,
     },
   },
   {
