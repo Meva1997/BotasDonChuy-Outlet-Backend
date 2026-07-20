@@ -450,3 +450,92 @@ export async function getQuotationRate(
   }
   return normalizeRate(rate);
 }
+
+/**
+ * Guía de envío (Fase 8.5).
+ *
+ * `POST /api/v1/shipments` documentado de forma inconsistente en Context7 (mezcla un shape
+ * plano `{ quotation_id, rate_id, carrier_name, ... }`, uno envuelto en `shipment` con
+ * `address_from`/`address_to`/`packages`, un v2 con `parcels`, y un cuarto estilo JSON:API con
+ * `data.attributes`). Verificado contra la cuenta sandbox real (2026-07-20, mismo método que la
+ * Fase 8.3 usó para confirmar el shape de `quotations`): el correcto es el segundo —
+ * `{ shipment: { rate_id, address_from, address_to, packages } }` — devuelve `202` con
+ * `{ data: { id, type: "shipment", attributes: { carrier_name, workflow_status, ... } } }`.
+ *
+ * Dos hallazgos NO documentados, descubiertos por prueba y error contra el sandbox real:
+ *  - `packages[].consignment_note` no es texto libre ("Waybill ID" según la doc) sino una clave
+ *    del catálogo SAT de productos/servicios (México exige Carta Porte para transporte terrestre
+ *    de mercancías desde 2022) — un valor arbitrario da `422 "no está incluido en la lista"`.
+ *    Se usa `53102400` ("Calzado"), confirmado válido en sandbox y acorde al giro de la tienda.
+ *  - `packages[].package_type` también es obligatorio (la doc lo marca opcional); se usa `"4G"`,
+ *    el valor de ejemplo de la doc oficial, confirmado válido en sandbox.
+ *
+ * **La creación es asíncrona**: la respuesta llega con `workflow_status: "in_progress"` y SIN
+ * `tracking_number`/`label_url` (confirmado con 6 pollings de `GET /shipments/{id}` a lo largo de
+ * ~12s sin que se resolvieran) — la paquetería procesa la guía en su propio tiempo. Por eso esta
+ * función solo devuelve el `id` de la guía (disponible de inmediato) y el `carrier_name`; el
+ * tracking/label llegan después por el webhook de Skydropx (Fase 8.6), que es precisamente el
+ * mecanismo diseñado para esto — no por polling aquí.
+ */
+export interface SkydropxContact {
+  name: string;
+  street1: string;
+  company: string;
+  phone: string;
+  email: string;
+  reference: string;
+}
+
+interface SkydropxShipmentPackage {
+  package_number: string;
+  package_type: string;
+  consignment_note: string;
+}
+
+interface SkydropxCreateShipmentResponse {
+  data: {
+    id: string;
+    attributes: {
+      carrier_name: string;
+      workflow_status: string;
+    };
+  };
+}
+
+// Clave del catálogo SAT "c_ClaveProdServ" para Carta Porte — "Calzado". Ver nota arriba: no es
+// texto libre, Skydropx valida contra ese catálogo. Fijo para todos los envíos (la tienda vende
+// sobre todo calzado; no vale la pena mapear por categoría de producto para un solo paquete
+// combinado por pedido).
+const CONSIGNMENT_NOTE_SAT_CODE = "53102400";
+// Valor de ejemplo de la documentación oficial, confirmado válido en sandbox real.
+const DEFAULT_PACKAGE_TYPE = "4G";
+
+export async function createShipment(
+  rateId: string,
+  addressFrom: SkydropxContact,
+  addressTo: SkydropxContact,
+): Promise<{ shipmentId: string; carrierName: string }> {
+  const pkg: SkydropxShipmentPackage = {
+    package_number: "1",
+    package_type: DEFAULT_PACKAGE_TYPE,
+    consignment_note: CONSIGNMENT_NOTE_SAT_CODE,
+  };
+  const response = await skydropxRequest<SkydropxCreateShipmentResponse>(
+    "/api/v1/shipments",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        shipment: {
+          rate_id: rateId,
+          address_from: addressFrom,
+          address_to: addressTo,
+          packages: [pkg],
+        },
+      }),
+    },
+  );
+  return {
+    shipmentId: response.data.id,
+    carrierName: response.data.attributes.carrier_name,
+  };
+}

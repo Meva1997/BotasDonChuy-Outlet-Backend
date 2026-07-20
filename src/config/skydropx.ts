@@ -61,6 +61,13 @@ const shipFromFields = {
   SHIP_FROM_CITY: process.env.SHIP_FROM_CITY,
   SHIP_FROM_STATE: process.env.SHIP_FROM_STATE,
   SHIP_FROM_POSTAL_CODE: process.env.SHIP_FROM_POSTAL_CODE,
+  // Antes reservados/opcionales para cuando se implementara Fase 8.5 (crear la guía);
+  // ahora que `createShipmentForOrder` (payment.service.ts) los usa para armar el
+  // `address_from` de `POST /shipments`, pasan a ser hard-require igual que los de arriba.
+  SHIP_FROM_STREET: process.env.SHIP_FROM_STREET,
+  SHIP_FROM_EXTERNAL_NUMBER: process.env.SHIP_FROM_EXTERNAL_NUMBER,
+  SHIP_FROM_NAME: process.env.SHIP_FROM_NAME,
+  SHIP_FROM_PHONE: process.env.SHIP_FROM_PHONE,
 } as const;
 
 for (const [key, value] of Object.entries(shipFromFields)) {
@@ -75,16 +82,7 @@ export const SHIP_FROM_NEIGHBORHOOD: string = shipFromFields.SHIP_FROM_NEIGHBORH
 export const SHIP_FROM_CITY: string = shipFromFields.SHIP_FROM_CITY!;
 export const SHIP_FROM_STATE: string = shipFromFields.SHIP_FROM_STATE!;
 export const SHIP_FROM_POSTAL_CODE: string = shipFromFields.SHIP_FROM_POSTAL_CODE!;
-
-/**
- * Reservados para crear la guía (Fase 8.5, todavía no implementada) —
- * `POST /shipments` sí los necesita, cotizar no. Deliberadamente NO son
- * hard-require: exigirlos hoy tumbaría el arranque del server por config que
- * ninguna ruta activa lee. Quedan `string | undefined`; cuando Fase 8.5 los
- * consuma, hacerlos hard-require ahí (mismo patrón de arriba).
- */
-export const SHIP_FROM_STREET: string | undefined = process.env.SHIP_FROM_STREET;
-export const SHIP_FROM_EXTERNAL_NUMBER: string | undefined =
-  process.env.SHIP_FROM_EXTERNAL_NUMBER;
-export const SHIP_FROM_NAME: string | undefined = process.env.SHIP_FROM_NAME;
-export const SHIP_FROM_PHONE: string | undefined = process.env.SHIP_FROM_PHONE;
+export const SHIP_FROM_STREET: string = shipFromFields.SHIP_FROM_STREET!;
+export const SHIP_FROM_EXTERNAL_NUMBER: string = shipFromFields.SHIP_FROM_EXTERNAL_NUMBER!;
+export const SHIP_FROM_NAME: string = shipFromFields.SHIP_FROM_NAME!;
+export const SHIP_FROM_PHONE: string = shipFromFields.SHIP_FROM_PHONE!;

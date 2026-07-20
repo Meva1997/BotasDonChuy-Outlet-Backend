@@ -36,6 +36,18 @@ export interface OrderAttributes {
   // cotización Skydropx) u órdenes previas a esta columna. Se excluye de la
   // respuesta pública de checkout — el cliente no la ve (ver orders.service.ts).
   shippingRequiresDropoff: boolean | null;
+  // Guía automática al pagar (Fase 8.5). `skydropxShipmentId` es el guard anti-doble-guía:
+  // se reclama con un valor centinela ANTES de llamar a Skydropx (crear una guía cuesta dinero
+  // real) y se reemplaza por el id real de la guía al terminar — ver createShipmentForOrder en
+  // payment.service.ts. `trackingNumber`/`trackingUrl`/`labelUrl` quedan `null` hasta que el
+  // webhook de Skydropx (Fase 8.6) los reporte: la creación de la guía es asíncrona, la respuesta
+  // de `POST /shipments` no los incluye (confirmado contra sandbox real). `shipmentStatus` es el
+  // último estado que reporte ese mismo webhook (`in_transit`, `delivered`, etc.).
+  skydropxShipmentId: string | null;
+  trackingNumber: string | null;
+  trackingUrl: string | null;
+  labelUrl: string | null;
+  shipmentStatus: string | null;
 }
 
 interface OrderCreationAttributes extends Optional<
@@ -48,6 +60,11 @@ interface OrderCreationAttributes extends Optional<
   | "skydropxQuotationId"
   | "skydropxRateId"
   | "shippingRequiresDropoff"
+  | "skydropxShipmentId"
+  | "trackingNumber"
+  | "trackingUrl"
+  | "labelUrl"
+  | "shipmentStatus"
 > {}
 
 export class Order
@@ -75,6 +92,11 @@ export class Order
   declare skydropxQuotationId: string | null;
   declare skydropxRateId: string | null;
   declare shippingRequiresDropoff: boolean | null;
+  declare skydropxShipmentId: string | null;
+  declare trackingNumber: string | null;
+  declare trackingUrl: string | null;
+  declare labelUrl: string | null;
+  declare shipmentStatus: string | null;
   declare readonly createdAt: Date;
   declare readonly updatedAt: Date;
   declare items?: OrderItem[];
@@ -192,6 +214,31 @@ Order.init(
     },
     shippingRequiresDropoff: {
       type: DataTypes.BOOLEAN,
+      allowNull: true,
+      defaultValue: null,
+    },
+    skydropxShipmentId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      defaultValue: null,
+    },
+    trackingNumber: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      defaultValue: null,
+    },
+    trackingUrl: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      defaultValue: null,
+    },
+    labelUrl: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      defaultValue: null,
+    },
+    shipmentStatus: {
+      type: DataTypes.STRING,
       allowNull: true,
       defaultValue: null,
     },

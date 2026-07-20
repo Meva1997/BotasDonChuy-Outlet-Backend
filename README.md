@@ -57,7 +57,7 @@ RESEND_API_KEY=re_...                    # del dashboard de Resend
 EMAIL_FROM=Botas Don Chuy <onboarding@resend.dev>  # sin dominio verificado, usar onboarding@resend.dev
 FRONTEND_URL=http://localhost:3000       # opcional: base para links dentro de los correos
 
-# Skydropx (cotización de envío en vivo) — client id/secret y los 4 SHIP_FROM_* son OBLIGATORIOS
+# Skydropx (cotización en vivo + guía automática) — client id/secret y los 8 SHIP_FROM_* son OBLIGATORIOS
 SKYDROPX_CLIENT_ID=...
 SKYDROPX_CLIENT_SECRET=...
 SKYDROPX_BASE_URL=https://sandbox-api.skydropx.com  # opcional (default: sandbox)
@@ -66,10 +66,10 @@ SHIP_FROM_POSTAL_CODE=38000
 SHIP_FROM_STATE=Guanajuato
 SHIP_FROM_CITY=Celaya
 SHIP_FROM_NEIGHBORHOOD=Centro
-SHIP_FROM_STREET=...          # opcional hoy (reservado para Fase 8.5, generar guía)
-SHIP_FROM_EXTERNAL_NUMBER=... # opcional hoy (reservado para Fase 8.5)
-SHIP_FROM_NAME=...            # opcional hoy (reservado para Fase 8.5)
-SHIP_FROM_PHONE=...           # opcional hoy (reservado para Fase 8.5)
+SHIP_FROM_STREET=...          # dirección de origen de la guía (Fase 8.5)
+SHIP_FROM_EXTERNAL_NUMBER=...
+SHIP_FROM_NAME=...
+SHIP_FROM_PHONE=...
 ```
 
 > En `NODE_ENV=development` los modelos se sincronizan automáticamente con
@@ -234,7 +234,7 @@ calcula el frontend.
   `costoEstimadoPedido` y `priority` (`urgente` <15 días · `pronto` <45 · `ok`). Las filas se ordenan
   por urgencia de cobertura y, dentro de cada nivel, por `margenMensual` desc.
 
-### Envío en vivo con Skydropx (Fase 8.1–8.4)
+### Envío en vivo con Skydropx (Fase 8.1–8.5)
 
 `POST /api/shipping/rates` (público, `src/routes/shipping.routes.ts` →
 `shipping.controller.ts`) cotiza el envío en vivo contra Skydropx Pro para el checkout, con la
@@ -252,7 +252,17 @@ mostrarlo). `src/services/packing.ts` arma una sola caja apilada por pedido a pa
 dimensiones/peso de cada producto. La ruta está limitada por `shippingRateLimiter` (20 req/min por
 IP) para no acaparar el presupuesto de 2 req/s compartido por toda la cuenta. `POST /api/orders`
 usa la cotización elegida como fuente autoritativa del costo de envío (ver la sección de checkout
-arriba) — guía automática y webhook de estado siguen pendientes (ver `roadmap-skydropx.md`).
+arriba).
+
+**Guía automática al pagar (Fase 8.5):** en cuanto el webhook de Stripe confirma el pago,
+`createShipmentForOrder` (`src/services/payment.service.ts`) crea la guía real contra Skydropx
+(`POST /api/v1/shipments`) usando el `rateId` guardado en la orden, y persiste
+`Order.skydropxShipmentId` — protegido por un guard de idempotencia con centinela para no generar
+dos guías (dinero real) ni con reintentos concurrentes. Si la cotización guardada ya venció, se
+re-cotiza sola antes de crear el envío (sin tocar el monto ya cobrado). La creación es **asíncrona**
+en Skydropx: `tracking_number`/`label_url` no llegan en la respuesta, así que
+`trackingNumber`/`trackingUrl`/`labelUrl` quedan en `null` hasta que el webhook de Skydropx
+(Fase 8.6, pendiente) los reporte — ver `roadmap-skydropx.md` para el detalle completo.
 
 ### Pagos con Stripe (Fase 8 — solo test/sandbox)
 

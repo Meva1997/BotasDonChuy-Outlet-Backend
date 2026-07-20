@@ -1,9 +1,27 @@
 import { Op } from "sequelize";
 import { Order } from "../models/Order";
 import { OrderItem } from "../models/OrderItem";
+import { Product } from "../models/Product";
 import { stripe, STRIPE_CURRENCY } from "../config/stripe";
+import {
+  SHIP_FROM_EXTERNAL_NUMBER,
+  SHIP_FROM_NAME,
+  SHIP_FROM_NEIGHBORHOOD,
+  SHIP_FROM_PHONE,
+  SHIP_FROM_STREET,
+} from "../config/skydropx";
+import { EMAIL_FROM } from "../config/resend";
 import { sendEmail } from "./email.service";
 import { orderConfirmationTemplate } from "./email/templates/orderConfirmation";
+import { buildParcel, type ParcelLineItem } from "./packing";
+import {
+  createShipment,
+  getOriginAddress,
+  getQuotationRate,
+  getShippingRates,
+  toSkydropxAddress,
+  type SkydropxContact,
+} from "./skydropx.service";
 
 /**
  * Integración de pagos con Stripe (Fase 8, activa).
@@ -70,6 +88,185 @@ export async function markOrderPaidFromWebhook(
   // en bucle. La orden ya está `paid`; el envío ocurre en segundo plano y su propio
   // try/catch garantiza que un fallo (correo o recarga) nunca propague.
   void sendOrderConfirmationEmail(order);
+
+  // Guía automática (Fase 8.5), mismo disparo fire-and-forget y misma razón: crear la guía
+  // contra Skydropx puede tardar y no debe bloquear el 200 del webhook. Solo llega aquí UNA
+  // vez por orden gracias al guard atómico de arriba (`affected === 1`), que ya sirve de
+  // primera línea de defensa contra doble guía (dinero real, ver roadmap-skydropx.md §8);
+  // `createShipmentForOrder` añade su propio guard (ver abajo) como segunda línea, por si en
+  // el futuro se agrega otro punto de entrada (p. ej. un reintento manual/automático).
+  void createShipmentForOrder(order);
+}
+
+/**
+ * Valor centinela para reclamar el derecho a crear la guía de una orden ANTES de llamar a
+ * Skydropx: a diferencia del correo (donde el guard es la propia transición atómica de
+ * `paymentStatus`), aquí el id real de la guía solo se conoce DESPUÉS del `POST /shipments` —
+ * que ya cuesta dinero real (roadmap-skydropx.md §8) — así que no se puede escribir el id real
+ * como guard de antemano. Se reclama con este centinela primero; si el `UPDATE` no afecta
+ * ninguna fila, otra llamada ya está creando (o ya creó) la guía y esta se retira sin llamar a
+ * Skydropx.
+ */
+const SHIPMENT_CREATION_SENTINEL = "creating";
+
+const STORE_COMPANY_NAME = "Botas Don Chuy Outlet";
+
+/**
+ * Genera la guía de envío de una orden ya pagada contra Skydropx (Fase 8.5). Idempotente
+ * (guard con centinela, ver `SHIPMENT_CREATION_SENTINEL`), tolerante a fallos (nunca lanza —
+ * llamada fire-and-forget desde `markOrderPaidFromWebhook`) y tolerante a que la orden no
+ * tenga cotización de Skydropx (cayó al fallback de tarifa plana en el checkout): en ese caso
+ * no hay `rate_id` que convertir en guía, así que se omite y el dueño la genera manualmente.
+ *
+ * Si el `rateId` guardado ya no está disponible (cotización vencida — vigentes 24h — o el
+ * proceso se reinició y perdió la memoria de direcciones de `getQuotationRate`), se re-cotiza
+ * desde cero para poder generar la guía de todos modos. El monto ya cobrado al cliente
+ * (`order.shipping`/`order.total`) NUNCA cambia por esto — la re-cotización solo sirve para
+ * obtener un `rate_id` vigente con el que crear el envío físico.
+ */
+export async function createShipmentForOrder(order: Order): Promise<void> {
+  if (!order.skydropxQuotationId || !order.skydropxRateId) {
+    console.warn(
+      `[skydropx] La orden #${order.id} no tiene cotización de Skydropx (tarifa plana de respaldo); no se genera guía automática.`,
+    );
+    return;
+  }
+
+  // El claim va en su propio try/catch (en vez de vivir fuera de cualquier try, como antes):
+  // esta función se dispara fire-and-forget (`void createShipmentForOrder(order)`) y no hay
+  // ningún handler global de `unhandledRejection` en el proceso, así que un fallo de DB acá
+  // (pool agotado, conexión caída) no debe convertirse en una promesa rechazada sin capturar
+  // que tumbe todo el servidor por una orden.
+  let claimed = 0;
+  try {
+    [claimed] = await Order.update(
+      { skydropxShipmentId: SHIPMENT_CREATION_SENTINEL },
+      { where: { id: order.id, skydropxShipmentId: null } },
+    );
+  } catch (err) {
+    console.error(
+      `[skydropx] No se pudo reclamar la creación de guía de la orden #${order.id}:`,
+      err,
+    );
+    return; // no se llamó a Skydropx todavía; nada que reconciliar
+  }
+  if (claimed === 0) return; // otra llamada ya está creando (o ya creó) la guía de esta orden
+
+  // Si `createShipment` llega a completarse, esto guarda su id ANTES de intentar persistirlo:
+  // el `catch` de abajo lo usa para distinguir "no se llegó a crear nada en Skydropx" (seguro
+  // liberar el centinela) de "sí se creó y cobró, solo falló guardarlo" (NUNCA liberarlo, o un
+  // reintento futuro pagaría una segunda guía para la misma orden).
+  let createdShipmentId: string | null = null;
+
+  try {
+    const destinationAddress = toSkydropxAddress({
+      postalCode: order.postalCode,
+      state: order.state,
+      city: order.city,
+      neighborhood: order.neighborhood,
+    });
+
+    let rateId = order.skydropxRateId;
+    const currentRate = await getQuotationRate(
+      order.skydropxQuotationId,
+      order.skydropxRateId,
+      destinationAddress,
+    );
+    if (!currentRate) {
+      console.warn(
+        `[skydropx] La cotización de la orden #${order.id} ya no está disponible; re-cotizando para poder generar la guía.`,
+      );
+      const items = await OrderItem.findAll({ where: { orderId: order.id } });
+      const products = await Product.findAll({
+        where: { id: { [Op.in]: items.map((item) => item.productId) } },
+      });
+      const productsById = new Map(products.map((p) => [p.id, p]));
+      const parcelItems: ParcelLineItem[] = items.map((item) => {
+        const product = productsById.get(item.productId);
+        if (!product) {
+          throw new Error(
+            `El producto ${item.productId} de la orden #${order.id} ya no existe; no se puede re-cotizar el envío.`,
+          );
+        }
+        return {
+          product: {
+            weightKg: product.weightKg,
+            lengthCm: product.lengthCm,
+            widthCm: product.widthCm,
+            heightCm: product.heightCm,
+          },
+          quantity: item.quantity,
+        };
+      });
+      const parcel = buildParcel(parcelItems);
+      const requoted = await getShippingRates(getOriginAddress(), destinationAddress, parcel);
+      const matched =
+        requoted.rates.find((r) => r.carrier === order.shippingCarrier) ?? requoted.rates[0];
+      if (!matched) {
+        throw new Error(
+          `No se pudo re-cotizar el envío de la orden #${order.id}: Skydropx no devolvió tarifas utilizables.`,
+        );
+      }
+      rateId = matched.rateId;
+      await Order.update(
+        { skydropxQuotationId: requoted.quotationId, skydropxRateId: matched.rateId },
+        { where: { id: order.id } },
+      );
+    }
+
+    const addressFrom: SkydropxContact = {
+      name: SHIP_FROM_NAME,
+      street1: `${SHIP_FROM_STREET} ${SHIP_FROM_EXTERNAL_NUMBER}`,
+      company: STORE_COMPANY_NAME,
+      phone: SHIP_FROM_PHONE,
+      email: EMAIL_FROM,
+      reference: SHIP_FROM_NEIGHBORHOOD,
+    };
+    const addressTo: SkydropxContact = {
+      name: order.customerName,
+      street1: order.street,
+      company: "N/A",
+      phone: order.customerPhone,
+      email: order.customerEmail,
+      reference: order.neighborhood,
+    };
+
+    const { shipmentId } = await createShipment(rateId, addressFrom, addressTo);
+    createdShipmentId = shipmentId; // a partir de aquí, Skydropx ya cobró la guía
+    await Order.update({ skydropxShipmentId: shipmentId }, { where: { id: order.id } });
+  } catch (err) {
+    console.error(`[skydropx] No se pudo generar la guía de envío de la orden #${order.id}:`, err);
+
+    if (createdShipmentId) {
+      // Skydropx ya creó (y cobró) la guía, pero no se pudo persistir su id — NO liberar el
+      // centinela: hacerlo dejaría la orden como si nunca se hubiera intentado, y un reintento
+      // futuro (manual o automático, ver roadmap-skydropx.md §8) generaría una SEGUNDA guía
+      // pagada para la misma orden. Se deja "creating" y se loguea con máxima severidad para
+      // reconciliación manual (el dueño puede confirmar el id real en el panel de Skydropx).
+      console.error(
+        `[skydropx] CRÍTICO: la guía ${createdShipmentId} de la orden #${order.id} se creó en Skydropx (dinero real cobrado) pero no se pudo guardar en la base de datos. Requiere reconciliación MANUAL — no reintentar automáticamente, generaría una guía duplicada.`,
+      );
+      return;
+    }
+
+    // Ningún cargo real ocurrió todavía (el fallo fue antes de o durante `createShipment`):
+    // es seguro liberar el centinela para que un reintento posterior (manual o automático, ver
+    // roadmap-skydropx.md §8) pueda volver a intentarlo — nunca debe quedar "creating" para
+    // siempre por un fallo transitorio (Skydropx caído, saldo insuficiente, etc.). Esta
+    // liberación también va en su propio try/catch: si fallara, no debe escapar como una
+    // rechazo sin capturar de una función fire-and-forget.
+    try {
+      await Order.update(
+        { skydropxShipmentId: null },
+        { where: { id: order.id, skydropxShipmentId: SHIPMENT_CREATION_SENTINEL } },
+      );
+    } catch (releaseErr) {
+      console.error(
+        `[skydropx] No se pudo liberar el centinela de la orden #${order.id} tras el fallo anterior:`,
+        releaseErr,
+      );
+    }
+  }
 }
 
 /**

@@ -198,7 +198,10 @@ helper that `order.reload({ include: items excluding unitCost })` then templates
 in its own `try/catch` that only logs. It is dispatched **fire-and-forget** (`void`, **not** awaited):
 the email must never block the webhook's `200` — if Resend were slow, Stripe could exceed its response
 timeout and retry the event in a loop. The order is already `paid`, so the send runs in the background
-and a failed email/reload can never propagate.
+and a failed email/reload can never propagate. Right after that `affectedCount === 1` guard,
+`markOrderPaidFromWebhook` also fires `void createShipmentForOrder(order)` (Fase 8.5 — see the
+**Envío en vivo / Skydropx** section for its own idempotency guard, since the shipment id isn't
+known until after the Skydropx call and can't reuse this same `paymentStatus` guard directly).
 
 `POST /api/webhooks/stripe` (`src/routes/webhook.routes.ts` → `stripeWebhook`): mounted in
 `src/app.ts` with `express.raw({ type: "application/json" })` **before** the global
@@ -223,18 +226,18 @@ double-restock. `src/services/pendingOrderSweeper.ts` (`startPendingOrderSweeper
 (`retrieve`): if the PaymentIntent is `succeeded` it marks the order `paid` (recovers a missed
 webhook), otherwise it cancels the PaymentIntent and calls `releaseOrderStock`.
 
-**Envío en vivo / Skydropx** (Fase 8.1–8.4, activo — cotización en vivo + órdenes con tarifa real;
-Fase 8.5+ — guía automática al pagar, webhook de estado — sigue pendiente, ver `roadmap-skydropx.md`):
+**Envío en vivo / Skydropx** (Fase 8.1–8.5, activo — cotización en vivo, órdenes con tarifa real y
+guía automática al pagar; Fase 8.6+ — webhook de estado de Skydropx — sigue pendiente, ver
+`roadmap-skydropx.md`):
 `POST /api/shipping/rates` `[público]` (`src/routes/shipping.routes.ts` →
 `shipping.controller.ts`'s `getShippingRates`) cotiza el envío en vivo contra Skydropx Pro para el
 checkout, con la tarifa plana existente (`cart.ts`'s `computeShipping`) como **fallback** — la
 tienda nunca debe dejar de cotizar porque la paquetería esté caída o responda mal. `src/config/
 skydropx.ts` sigue el mismo patrón que `stripe.ts`/`resend.ts`/`cloudinary.ts` (`dotenv.config()`
-propio, **hard-require** al arrancar) para `SKYDROPX_CLIENT_ID`/`SKYDROPX_CLIENT_SECRET` y para los
-campos de `SHIP_FROM_*` que la cotización sí usa hoy (`SHIP_FROM_POSTAL_CODE`/`STATE`/`CITY`/
-`NEIGHBORHOOD`); `SHIP_FROM_STREET`/`EXTERNAL_NUMBER`/`NAME`/`PHONE` están reservados para crear la
-guía (Fase 8.5, no implementada) y **deliberadamente no son hard-require todavía** — exigirlos hoy
-tumbaría el arranque del server por config que ninguna ruta activa lee.
+propio, **hard-require** al arrancar) para `SKYDROPX_CLIENT_ID`/`SKYDROPX_CLIENT_SECRET` y para
+**todos** los campos `SHIP_FROM_*` (`POSTAL_CODE`/`STATE`/`CITY`/`NEIGHBORHOOD` desde Fase 8.3 para
+cotizar; `STREET`/`EXTERNAL_NUMBER`/`NAME`/`PHONE` desde Fase 8.5, antes reservados/opcionales,
+ahora hard-require porque `createShipmentForOrder` los usa para el `address_from` de la guía).
 
 `src/services/skydropx.service.ts` es el cliente HTTP compartido: autentica con OAuth2
 `client_credentials` (`POST /api/v1/oauth/token`), cachea el `access_token` en memoria y lo renueva
@@ -306,6 +309,52 @@ en vivo, un producto en `0` no solo generaría una guía mala, tumbaría la coti
 completo. El frontend (`ProductForm.tsx`) valida estos cuatro campos con la misma regla para que un
 producto legado en `0` se marque como inválido en el propio formulario en vez de fallar recién al
 enviar con un 400 desde un campo no relacionado.
+
+**Guía automática al pagar** (Fase 8.5, activo — `createShipmentForOrder` en
+`src/services/payment.service.ts`, disparada fire-and-forget desde `markOrderPaidFromWebhook` justo
+después del guard `affected === 1` que también dispara `sendOrderConfirmationEmail`, ver
+**Payments / Stripe**): crea la guía real contra Skydropx (`POST /api/v1/shipments`, shape
+`{ shipment: { rate_id, address_from, address_to, packages } }` — confirmado contra sandbox real
+igual que `quotations`, ver `roadmap-skydropx.md` §Fase 8.5) a partir del `skydropxRateId` guardado
+en la orden. Si la orden no tiene cotización de Skydropx (cayó al fallback de tarifa plana en el
+checkout), no hay `rate_id` que convertir en guía: se loguea y se omite, el dueño la genera
+manualmente. Dos hallazgos no documentados por Skydropx, confirmados por prueba y error contra
+sandbox: `packages[].consignment_note` no es texto libre pese a describirse como "Waybill ID" —
+Skydropx lo valida contra el catálogo SAT `c_ClaveProdServ` (Carta Porte, obligatoria para
+transporte terrestre de mercancías en México desde 2022) y un valor inventado da `422`; se usa un
+código fijo de "Calzado" (`53102400`, acorde al giro de la tienda — no vale la pena mapear por
+categoría de producto para un solo paquete combinado por pedido). `packages[].package_type` también
+es obligatorio pese a documentarse opcional; se usa `"4G"`, el valor de ejemplo de la doc oficial.
+
+**La creación de la guía es asíncrona**: `POST /shipments` responde `202` con
+`workflow_status: "in_progress"` y `tracking_number`/`label_url` en `null` (confirmado con 6
+pollings de `GET /shipments/{id}` a lo largo de ~12s sin resolver) — la paquetería procesa la guía
+en su propio tiempo. Por eso `createShipmentForOrder` **solo** persiste `Order.skydropxShipmentId`
+(disponible de inmediato); `trackingNumber`/`trackingUrl`/`labelUrl`/`shipmentStatus` nacen `null` y
+quedan así hasta que el webhook de Skydropx (Fase 8.6, no implementado) los reporte — es
+precisamente el mecanismo diseñado para esto, así que no se hace polling bloqueante aquí. El correo
+"tu pedido fue enviado" (reusa `orderConfirmationTemplate` con `tracking`) tampoco se dispara desde
+Fase 8.5 por la misma razón: no hay `tracking_number` que mostrar todavía; ese disparo también queda
+para la Fase 8.6.
+
+**Guard de idempotencia con centinela**: a diferencia del correo de confirmación (donde el guard es
+la propia transición atómica de `paymentStatus`), aquí el id real de la guía solo se conoce
+**después** del `POST` — que ya cuesta dinero real (doble guía = saldo gastado dos veces) — así que
+no puede usarse como guard de antemano. `createShipmentForOrder` reclama el derecho a crear la guía
+con un valor centinela (`Order.update({ skydropxShipmentId: "creating" }, { where: { id,
+skydropxShipmentId: null } })`) **antes** de llamar a Skydropx; si el `UPDATE` no afecta ninguna
+fila, otra llamada ya está creando (o ya creó) la guía de esa orden y esta se retira sin tocar
+Skydropx. Si la creación falla, el centinela se libera (`skydropxShipmentId` vuelve a `null`) para
+permitir un reintento posterior (manual o automático — ese reintento en sí no existe todavía).
+
+Si el `skydropxQuotationId`/`skydropxRateId` guardado ya no está disponible (cotización vencida —
+vigentes 24h — o la memoria en proceso de `getQuotationRate` se perdió en un reinicio del server
+entre el checkout y el pago), `createShipmentForOrder` re-cotiza desde cero: reconstruye el parcel
+con las dimensiones **actuales** de `Product` para cada `OrderItem` de la orden (no hay dimensiones
+congeladas, a diferencia de los precios) y llama a `getShippingRates` de nuevo, prefiriendo un rate
+del mismo `carrier` que ya se le mostró al cliente. El `quotationId`/`rateId` frescos se persisten,
+pero `order.shipping`/`order.total` **nunca** cambian — ya se cobraron; la re-cotización solo sirve
+para obtener un `rate_id` vigente con el que generar el envío físico.
 
 **Dashboard** (`src/routes/adminDashboard.routes.ts`, `src/routes/adminOrder.routes.ts`,
 `src/controllers/dashboard.controller.ts`, `src/controllers/order.controller.ts`,
@@ -568,8 +617,10 @@ without it they default to `0`/`[]`. Product images live in the `images` column 
 data (plus nullable `paymentIntentId`/`paymentStatus` from Fase 8, and nullable
 `skydropxQuotationId`/`skydropxRateId` from Fase 8.4 — the live-shipping quotation/rate used for the
 order, `null` when it fell back to the flat rate — plus nullable `shippingRequiresDropoff`, the
-admin-only "no home pickup" flag from that same rate, see the **Envío en vivo / Skydropx** and
-**Checkout** sections);
+admin-only "no home pickup" flag from that same rate; plus nullable `skydropxShipmentId`/
+`trackingNumber`/`trackingUrl`/`labelUrl`/`shipmentStatus` from Fase 8.5 — the last four stay `null`
+until the Skydropx webhook (Fase 8.6) reports them, since shipment creation is asynchronous — see
+the **Envío en vivo / Skydropx** and **Checkout** sections);
 `OrderItem` freezes per-unit prices (`unitOriginalPrice`, `unitSalePrice`, `unitCost`) so
 historical orders aren't affected by later `Product` price changes. `AdminUser` and
 `BrandSettings` (singleton) round out the Fase 1 data model; `AdminUser` also gained three
@@ -587,12 +638,11 @@ nullable password-reset columns in Fase 9 (`resetPasswordCodeHash`, `resetPasswo
   optional `STRIPE_CURRENCY`/`PENDING_ORDER_TTL_MINUTES`/`PENDING_ORDER_SWEEP_INTERVAL_MINUTES`,
   plus Cloudinary keys, `RESEND_API_KEY` + `EMAIL_FROM` (both required — the server throws at
   startup without them), `SKYDROPX_CLIENT_ID` + `SKYDROPX_CLIENT_SECRET` (both required) and
-  `SHIP_FROM_POSTAL_CODE`/`SHIP_FROM_STATE`/`SHIP_FROM_CITY`/`SHIP_FROM_NEIGHBORHOOD` (all
+  `SHIP_FROM_POSTAL_CODE`/`SHIP_FROM_STATE`/`SHIP_FROM_CITY`/`SHIP_FROM_NEIGHBORHOOD`/
+  `SHIP_FROM_STREET`/`SHIP_FROM_EXTERNAL_NUMBER`/`SHIP_FROM_NAME`/`SHIP_FROM_PHONE` (all
   required — see the **Envío en vivo / Skydropx** section), optional `SKYDROPX_BASE_URL`
   (defaults to the sandbox host), optional `SKYDROPX_CARRIERS` (comma-separated `provider_name`
-  slugs to restrict the quotation's `requested_carriers` — see the Skydropx section) and optional
-  `SHIP_FROM_STREET`/`SHIP_FROM_EXTERNAL_NUMBER`/
-  `SHIP_FROM_NAME`/`SHIP_FROM_PHONE` (reserved for Fase 8.5, not yet enforced), and optional
+  slugs to restrict the quotation's `requested_carriers` — see the Skydropx section), and optional
   `FRONTEND_URL`). `.env` is gitignored — never commit it (the Stripe/Resend keys are
   test/sandbox; Skydropx currently points at its own separate sandbox account too — see
   `roadmap-skydropx.md` §1).

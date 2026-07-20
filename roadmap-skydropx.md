@@ -4,7 +4,7 @@ Hoja de ruta de implementación para conectar Skydropx Pro a la tienda: cotizaci
 
 > **Cómo usarlo:** igual que `ROADMAP.md` — marca `[x]` cada tarea al completarla, en orden de fases (8.1 → 8.7). Cada fase incluye un bloque "Cómo verificar".
 
-> **Este documento es solo planeación.** No se ha escrito código de la integración todavía. Es la referencia para cuando se implemente.
+> **Estado:** Fases 8.1–8.5 implementadas y probadas contra sandbox real; 8.6–8.7 pendientes.
 
 ---
 
@@ -18,10 +18,11 @@ Hoja de ruta de implementación para conectar Skydropx Pro a la tienda: cotizaci
 | `orderConfirmationTemplate({ tracking?: {...} })` | ✅ El bloque de rastreo ya está implementado, solo falta poblarlo | [src/services/email/templates/orderConfirmation.ts](src/services/email/templates/orderConfirmation.ts) |
 | `markOrderPaidFromWebhook` (guard atómico `WHERE paymentStatus != 'paid'`) | ✅ Es el punto de enganche natural para crear la guía | [src/services/payment.service.ts](src/services/payment.service.ts) |
 | Mount `/api/webhooks` con `express.raw` | ✅ Ya sirve cuerpo crudo — reutilizable para el webhook de Skydropx | [src/app.ts](src/app.ts), [src/routes/webhook.routes.ts](src/routes/webhook.routes.ts) |
-| `src/config/skydropx.ts` | ❌ No existe | — |
-| `POST /api/shipping/rates` | ❌ No existe | — |
-| Columnas de guía/rastreo en `Order` | ❌ No existen | — |
-| `SKYDROPX_CLIENT_ID`/`SKYDROPX_CLIENT_SECRET`/`SHIP_FROM_*` en `.env` | ❌ No existen (`.env` solo tiene `SKYDROPX_API_KEY`, obsoleto — ver §1) | — |
+| `src/config/skydropx.ts` | ✅ Hecho — todos los `SHIP_FROM_*` son hard-require desde Fase 8.5 | [src/config/skydropx.ts](src/config/skydropx.ts) |
+| `POST /api/shipping/rates` | ✅ Hecho (Fase 8.3) | [src/routes/shipping.routes.ts](src/routes/shipping.routes.ts) |
+| Columnas de guía/rastreo en `Order` | ✅ Hechas (Fase 8.5): `skydropxShipmentId`/`trackingNumber`/`trackingUrl`/`labelUrl`/`shipmentStatus` | [src/models/Order.ts](src/models/Order.ts) |
+| `createShipmentForOrder` (guía automática al pagar) | ✅ Hecho (Fase 8.5), solo persiste `skydropxShipmentId` — tracking/label llegan por el webhook (Fase 8.6, pendiente) | [src/services/payment.service.ts](src/services/payment.service.ts) |
+| `SKYDROPX_CLIENT_ID`/`SKYDROPX_CLIENT_SECRET`/`SHIP_FROM_*` en `.env` | ✅ Existen (sandbox por defecto, `_PROD` guardadas para el lanzamiento — ver §1) | — |
 
 ---
 
@@ -191,26 +192,91 @@ simular una falla de Skydropx, p. ej. credenciales inválidas temporalmente).
 
 **Objetivo:** que la guía se genere sola en cuanto el pago se confirma, sin intervención manual.
 
-**Tareas:**
-- [ ] `createShipmentForOrder(order)` en `src/services/payment.service.ts` (o `skydropx.service.ts`): llama `POST /api/v1/shipments` con la dirección del cliente y el `rate_id` guardado en la orden; guarda `skydropxShipmentId`/`trackingNumber`/`trackingUrl`/`labelUrl`.
-- [ ] Enganchar la llamada dentro de `markOrderPaidFromWebhook`, **justo después** del guard `affected === 1` que ya dispara `sendOrderConfirmationEmail` — es el único punto por el que una orden pasa a `paid`.
-- [ ] **Guard de idempotencia propio**, mismo patrón que el email: `Order.update({ skydropxShipmentId }, { where: { id, skydropxShipmentId: null } })` — un guard en memoria no basta porque el webhook de Stripe y el `pendingOrderSweeper` pueden correr concurrentemente (ver razonamiento ya documentado en `CLAUDE.md` para el email de confirmación).
-- [ ] Disparo **fire-and-forget** (`void createShipmentForOrder(order)`, sin `await`) — igual que el email: si Skydropx responde lento, no debe bloquear el `200` del webhook de Stripe (Stripe reintentaría el evento en bucle).
-- [ ] Si el `rate_id` guardado ya expiró (cotizaciones válidas 24h — ver riesgo en §8), re-cotizar antes de crear el envío.
-- [ ] Email "tu pedido fue enviado": reutilizar `orderConfirmationTemplate` pasándole `tracking: { number, url, carrier }` — el bloque de renderizado ya existe, solo falta poblarlo.
+**⚠️ Dos correcciones de spec confirmadas contra sandbox real (2026-07-20, mismo método que la
+Fase 8.3 usó para `quotations`):**
 
-**Cómo verificar:** confirmar un pedido de prueba vía Stripe test mode con una orden que tenga `rateId` válido → la orden queda con `trackingNumber`/`labelUrl` poblados y llega el email de envío. Reenviar el mismo evento de webhook (retry desde el dashboard de Stripe) → no se genera una segunda guía ni se duplica el email.
+1. **Shape de `POST /api/v1/shipments`.** Context7 mezcla cuatro shapes inconsistentes para este
+   endpoint (uno plano `{ quotation_id, rate_id, carrier_name, ... }`, uno v1 envuelto en
+   `shipment`, uno v2 envuelto en `shipment` con `parcels`, y uno estilo JSON:API con
+   `data.attributes`). El correcto, verificado con una guía real creada en sandbox, es:
+   ```json
+   POST /api/v1/shipments
+   {
+     "shipment": {
+       "rate_id": "<id de un rate ya cotizado>",
+       "address_from": { "street1": "...", "name": "...", "company": "...", "phone": "...", "email": "...", "reference": "..." },
+       "address_to":   { "street1": "...", "name": "...", "company": "...", "phone": "...", "email": "...", "reference": "..." },
+       "packages": [ { "package_number": "1", "package_type": "4G", "consignment_note": "53102400" } ]
+     }
+   }
+   ```
+   Responde `202` con `{ data: { id, attributes: { carrier_name, workflow_status } } }`. Dos campos
+   de `packages[]` que la doc marca como opcionales/de texto libre en realidad son **obligatorios y
+   validados contra catálogos**: `consignment_note` no es un "Waybill ID" arbitrario sino una clave
+   del catálogo SAT `c_ClaveProdServ` (México exige Carta Porte para transporte terrestre de
+   mercancías desde 2022) — un valor inventado da `422 "no está incluido en la lista"`; se usa
+   `53102400` ("Calzado", acorde al giro de la tienda). `package_type` también es obligatorio; se
+   usa `"4G"`, el valor de ejemplo de la doc oficial (confirmado válido).
+2. **La creación de la guía es asíncrona.** La respuesta del `POST` (y de `GET /shipments/{id}`
+   pollado 6 veces a lo largo de ~12s) llega con `workflow_status: "in_progress"` y
+   `tracking_number`/`label_url` en `null` — la paquetería procesa la guía en su propio tiempo, que
+   puede ser de minutos a horas. Esto **mueve el alcance**: `createShipmentForOrder` (Fase 8.5) solo
+   puede persistir el `skydropxShipmentId` (disponible de inmediato); poblar
+   `trackingNumber`/`trackingUrl`/`labelUrl` y enviar el correo "tu pedido fue enviado" con
+   `tracking` **se recorren a la Fase 8.6**, que es precisamente el webhook diseñado para recibir
+   ese dato cuando esté listo — no tiene sentido hacer polling bloqueante aquí.
+
+**Tareas:**
+- [x] `createShipmentForOrder(order)` en `src/services/payment.service.ts`: llama
+      `POST /api/v1/shipments` con la dirección del cliente (`order.street`/`customerName`/
+      `customerPhone`/`customerEmail`/`neighborhood`) y la dirección de origen (`SHIP_FROM_*`,
+      ahora **hard-require** en `config/skydropx.ts` — antes reservadas/opcionales) y el `rate_id`
+      guardado en la orden; guarda `skydropxShipmentId`. Tolerante a que la orden no tenga
+      cotización de Skydropx (fallback de tarifa plana): en ese caso no hay `rate_id` que convertir
+      en guía, se omite con un log y el dueño la genera manualmente.
+- [x] Enganchada dentro de `markOrderPaidFromWebhook`, justo después del guard `affected === 1`
+      que ya dispara `sendOrderConfirmationEmail` — es el único punto por el que una orden pasa a
+      `paid`.
+- [x] **Guard de idempotencia propio.** Como el `id` real de la guía solo se conoce DESPUÉS del
+      `POST` (que ya cuesta dinero real — no se puede usar como guard de antemano como el patrón
+      literal del email), se reclama el derecho a crearla con un valor centinela
+      (`Order.update({ skydropxShipmentId: "creating" }, { where: { id, skydropxShipmentId: null } })`)
+      ANTES de llamar a Skydropx; si el `UPDATE` no afecta ninguna fila, otra llamada ya está
+      creando (o ya creó) la guía y esta se retira sin llamar a Skydropx. Si la creación falla, el
+      centinela se libera (`skydropxShipmentId` vuelve a `null`) para permitir un reintento
+      posterior. Verificado: una segunda llamada sobre una orden que ya tiene `skydropxShipmentId`
+      no dispara ninguna llamada HTTP a Skydropx.
+- [x] Disparo **fire-and-forget** (`void createShipmentForOrder(order)`, sin `await`) — igual que
+      el email: si Skydropx responde lento, no debe bloquear el `200` del webhook de Stripe.
+- [x] Si el `rate_id`/`quotationId` guardado ya no está disponible (cotización vencida —vigentes
+      24h— o la memoria en proceso de `getQuotationRate` se perdió en un reinicio), se re-cotiza
+      desde cero (reconstruyendo el parcel con `Product.weightKg/lengthCm/widthCm/heightCm`
+      actuales de los `OrderItem` de la orden) y se persiste el `quotationId`/`rateId` frescos —
+      **sin tocar** `order.shipping`/`order.total` (ya cobrados). Verificado end-to-end contra una
+      orden real con cotización vencida: re-cotizó y generó la guía correctamente.
+- [ ] Email "tu pedido fue enviado" con `tracking` poblado — **movido a la Fase 8.6** (ver
+      corrección de spec arriba): no hay `tracking_number` que enviar hasta que el webhook lo
+      reporte.
+
+**Cómo verificar:** ✅ Probado contra sandbox real con una orden `paid` existente:
+`createShipmentForOrder` detectó la cotización vencida, re-cotizó, creó la guía
+(`skydropxShipmentId` poblado, `202` de Skydropx) y una segunda llamada sobre la misma orden no
+generó una guía duplicada (guard funcionando). Pendiente confirmar el flujo completo disparado por
+un webhook real de Stripe en lugar de una llamada directa (mecánicamente idéntico: mismo guard,
+mismo `void`).
 
 ---
 
 ### Fase 8.6 — Webhook de Skydropx
 
-**Objetivo:** que los cambios de estado del paquete (`in_transit`, `delivered`, etc.) actualicen la orden sin polling manual.
+**Objetivo:** que los cambios de estado del paquete (`in_transit`, `delivered`, etc.) actualicen la orden sin polling manual — y, ya que es el primer punto que recibe ese dato, que también pueble `trackingNumber`/`trackingUrl`/`labelUrl` y dispare el correo de envío (ver la corrección de spec de la Fase 8.5: la creación de la guía es asíncrona, así que ese trabajo no podía hacerse ahí).
 
 **Tareas:**
 - [ ] `POST /api/webhooks/skydropx` en `src/routes/webhook.routes.ts` (mismo archivo que el de Stripe) — el mount `/api/webhooks` en `app.ts` **ya** usa `express.raw({ type: "application/json" })`, así que el cuerpo crudo que necesita la verificación HMAC ya está disponible sin cambios adicionales al middleware.
 - [ ] Verificación de firma: **HMAC-SHA512** sobre el cuerpo crudo con `SKYDROPX_WEBHOOK_SECRET`, comparación con `crypto.timingSafeEqual` (no `===`, para evitar timing attacks) contra el header `Authorization: HMAC <firma>`.
-- [ ] Manejar evento tipo `packages`: extraer `tracking_number` para localizar la orden (`Order.findOne({ where: { trackingNumber } })`) y mapear `attributes.status` → `Order.status` (`shipped`/`delivered`).
+- [ ] Manejar evento tipo `packages`: extraer el `shipment_id`/`tracking_number` para localizar la orden (`Order.findOne({ where: { skydropxShipmentId } })` — más directo que buscar por `trackingNumber`, que nace `null` y solo este webhook lo llena) y mapear `attributes.status` → `Order.status` (`shipped`/`delivered`) + `Order.shipmentStatus`.
+- [ ] **Heredado de la Fase 8.5** (ver su corrección de spec — la creación de la guía es asíncrona, `POST /shipments` no devuelve tracking): este webhook es el que primero recibe `tracking_number`/`label_url` (y la URL de rastreo del carrier, si el payload la trae), así que aquí se pueblan `Order.trackingNumber`/`trackingUrl`/`labelUrl` por primera vez.
+- [ ] **Heredado de la Fase 8.5**: en cuanto `trackingNumber` pasa de `null` a un valor (primera vez que este webhook lo reporta para la orden — guard idempotente igual que el correo de confirmación, para no reenviar en eventos de actualización posteriores como `delivered`), disparar el correo "tu pedido fue enviado" (`orderConfirmationTemplate` con `tracking: { number, url, carrier }`, fire-and-forget igual que `sendOrderConfirmationEmail`).
 - [ ] Firma inválida o ausente → `400`. Evento verificado (aunque el tipo no se maneje) → siempre `200 { received: true }`, mismo patrón que el webhook de Stripe, para que Skydropx no reintente en bucle.
 
 **Cómo verificar:** enviar un payload de prueba con firma HMAC válida (generado con el mismo algoritmo) → `200` y la orden correspondiente cambia de estado. Con firma inválida → `400`, la orden no cambia.
@@ -239,11 +305,13 @@ Columnas nuevas en `Order` (todas nullable — `sequelize.sync({ alter: true })`
 |---|---|---|
 | `skydropxQuotationId` | STRING, nullable | Cotización usada para re-consultar el `total` autoritativo en `createOrder` |
 | `skydropxRateId` | STRING, nullable | Rate elegido por el cliente |
-| `skydropxShipmentId` | STRING, nullable | Envío creado en Skydropx — su presencia es el guard anti-doble-guía |
-| `trackingNumber` | STRING, nullable | Número de rastreo, poblado tras crear el envío |
-| `trackingUrl` | STRING, nullable | URL de rastreo del carrier |
-| `labelUrl` | STRING, nullable | PDF de la guía |
+| `skydropxShipmentId` | STRING, nullable | Envío creado en Skydropx — su presencia (más allá del centinela `"creating"` transitorio) es el guard anti-doble-guía |
+| `trackingNumber` | STRING, nullable | Número de rastreo — `null` hasta el webhook de Skydropx (Fase 8.6): la creación del envío es asíncrona y no lo devuelve |
+| `trackingUrl` | STRING, nullable | URL de rastreo del carrier — igual que arriba, poblada por el webhook |
+| `labelUrl` | STRING, nullable | PDF de la guía — igual que arriba, poblada por el webhook |
 | `shipmentStatus` | STRING, nullable | Último estado reportado por el webhook de Skydropx (`in_transit`, `delivered`, etc.) |
+
+**Ya implementadas (Fase 8.5)**, todas nullable, creadas por `sequelize.sync({ alter: true })` sin migración manual.
 
 `shippingCarrier` (ya existente, string libre) se sigue llenando, ahora desde el `carrier` del rate elegido en vez de quedar vacío.
 
@@ -275,7 +343,8 @@ Response: 200 { received: true } | 400 (firma inválida)
 - `SKYDROPX_CLIENT_SECRET` — ✅ ya en `.env` (requerida, hard-fail al arrancar si falta; **credencial sandbox** por defecto, ver §1).
 - `SKYDROPX_BASE_URL` — ✅ ya en `.env` (`https://sb-pro.skydropx.com` por defecto; `https://pro.skydropx.com` guardado como `SKYDROPX_BASE_URL_PROD` para el lanzamiento).
 - `SKYDROPX_WEBHOOK_SECRET` — ❌ falta, agregar para verificar HMAC en Fase 8.6.
-- `SHIP_FROM_POSTAL_CODE`, `SHIP_FROM_STATE`, `SHIP_FROM_CITY`, `SHIP_FROM_NEIGHBORHOOD`, `SHIP_FROM_STREET` — ❌ faltan, dirección de origen (Celaya, GTO, CP 38000, Centro) para `address_from` en cada cotización.
+- `SHIP_FROM_POSTAL_CODE`, `SHIP_FROM_STATE`, `SHIP_FROM_CITY`, `SHIP_FROM_NEIGHBORHOOD` — ✅ ya en `.env` (requeridas desde Fase 8.3, `address_from` de cada cotización).
+- `SHIP_FROM_STREET`, `SHIP_FROM_EXTERNAL_NUMBER`, `SHIP_FROM_NAME`, `SHIP_FROM_PHONE` — ✅ ya en `.env` (requeridas desde Fase 8.5 — antes reservadas/opcionales, ahora hard-require: `createShipmentForOrder` las usa para el `address_from` de `POST /shipments`).
 
 **Ya retirada:** `SKYDROPX_API_KEY` — obsoleta (llave estática), reemplazada por `SKYDROPX_CLIENT_ID`/`SKYDROPX_CLIENT_SECRET` (ver §1).
 
@@ -283,10 +352,11 @@ Response: 200 { received: true } | 400 (firma inválida)
 
 ## 8. Riesgos y decisiones abiertas
 
-- **Doble guía = dinero real.** Cada `POST /api/v1/shipments` consume saldo de la cuenta. Por eso el guard `WHERE skydropxShipmentId IS NULL` en Fase 8.5 — mismo razonamiento que el guard `WHERE paymentStatus != 'paid'` del email de confirmación (documentado en `CLAUDE.md`): un guard en memoria no serializa dos llamadas concurrentes (webhook de Stripe vs. `pendingOrderSweeper`).
+- ~~**Doble guía = dinero real.**~~ **Resuelto (Fase 8.5):** cada `POST /api/v1/shipments` consume saldo de la cuenta, así que `createShipmentForOrder` reclama el derecho a crear la guía con un valor centinela (`skydropxShipmentId: "creating"`) vía `UPDATE ... WHERE skydropxShipmentId IS NULL` **antes** de llamar a Skydropx — mismo razonamiento que el guard `WHERE paymentStatus != 'paid'` del email de confirmación (documentado en `CLAUDE.md`): un guard en memoria no serializa dos llamadas concurrentes. Verificado: una segunda llamada sobre una orden que ya tiene guía no dispara ninguna llamada HTTP a Skydropx. **Endurecido (revisión post-8.5):** el `catch` distingue si `createShipment` ya llegó a responder antes de fallar — si el `POST /shipments` tuvo éxito pero el `UPDATE` que persiste el `shipmentId` real falla después, el centinela **no** se libera (se registra como `CRÍTICO` para reconciliación manual) en vez de resetear a `null`, que habría dejado la orden lista para que un reintento futuro pagara una segunda guía. También se cerró el hueco de que el `UPDATE` de reclamo del centinela vivía fuera de cualquier `try/catch`: al dispararse fire-and-forget y no existir un handler global de `unhandledRejection`, un fallo de DB justo ahí podía tumbar el proceso completo.
 - **Caja apilada sobrestima.** Un pedido de 5 sombreros da 100cm de alto en una sola caja; algunas paqueterías cobran por peso volumétrico o rechazan medidas fuera de rango. Revisar con pedidos reales tras el lanzamiento y ajustar `buildParcel` si hace falta.
-- **Rate expirado.** Las cotizaciones son válidas 24h; `PENDING_ORDER_TTL_MINUTES` es 30 minutos, así que normalmente el rate sigue fresco al pagar. **Pero** la ruta de recuperación del `pendingOrderSweeper` puede marcar una orden `paid` mucho después de creada (reconciliación contra Stripe). `createShipmentForOrder` debe detectar un rate expirado y re-cotizar antes de crear el envío.
-- **Saldo insuficiente en Skydropx.** La guía puede fallar aunque el pedido ya esté pagado. Nunca debe tumbar el webhook de Stripe — loguear el fallo y dejar la orden sin `skydropxShipmentId` para reintento manual o automático posterior. Monitorear saldo vía `GET /api/v1/finance/credits`.
+- ~~**Rate expirado.**~~ **Resuelto (Fase 8.5):** las cotizaciones son válidas 24h; `PENDING_ORDER_TTL_MINUTES` es 30 minutos, así que normalmente el rate sigue fresco al pagar, pero la ruta de recuperación del `pendingOrderSweeper` puede marcar una orden `paid` mucho después de creada. `createShipmentForOrder` detecta un rate/quotation ya no disponible (vía `getQuotationRate`) y re-cotiza desde cero antes de crear el envío, sin tocar el monto ya cobrado. Probado end-to-end contra una orden real con cotización vencida.
+- **Guía asíncrona sin tracking inmediato.** Confirmado contra sandbox real (2026-07-20, ver la corrección de spec en Fase 8.5): `POST /shipments` responde `202` con `workflow_status: "in_progress"` y `tracking_number`/`label_url` en `null` — no se resolvieron tras 6 pollings a lo largo de ~12s. Por diseño, esos campos (y el correo "pedido enviado") quedan pendientes hasta el webhook de Skydropx (Fase 8.6).
+- **Saldo insuficiente en Skydropx.** La guía puede fallar aunque el pedido ya esté pagado. Nunca debe tumbar el webhook de Stripe — `createShipmentForOrder` ya loguea el fallo y libera el centinela (`skydropxShipmentId` vuelve a `null`) para reintento manual o automático posterior (ese reintento en sí no existe todavía). Monitorear saldo vía `GET /api/v1/finance/credits`.
 - ~~**No hay sandbox para esta cuenta.**~~ **Resuelto 2026-07-17:** se abrió una cuenta sandbox separada ($1000 MXN de saldo de prueba) que sí acepta `sb-pro.skydropx.com`. `.env` apunta a sandbox por defecto, así que las Fases 8.3–8.6 pueden probarse libremente, igual que Stripe test mode. La cuenta de **producción** sigue sin sandbox propio — antes de lanzar, cambiar `.env` a las credenciales `_PROD` y retomar la cautela original (minimizar `POST /shipments` de prueba, monitorear `GET /api/v1/finance/credits`, cancelar envíos de prueba con `POST /shipments/{id}/cancellations`).
 - **`computeShipping` duplicado en el frontend.** Al pasar a tarifas en vivo, el checkout del front debe llamar a `/api/shipping/rates` en vez de calcular localmente con `frontend/lib/cart.ts`, o el monto mostrado en el formulario y el cobrado al confirmar divergirán — el comentario en `src/services/cart.ts` ya advierte sobre esta duplicación.
 
@@ -315,14 +385,17 @@ Response: 200 { received: true } | 400 (firma inválida)
 - [x] Columnas `skydropxQuotationId`/`skydropxRateId` persistidas
 
 **Fase 8.5 — Guía automática al pagar**
-- [ ] `createShipmentForOrder` enganchado en `markOrderPaidFromWebhook`
-- [ ] Guard de idempotencia propio (`skydropxShipmentId IS NULL`)
-- [ ] Disparo fire-and-forget
-- [ ] Email "pedido enviado" con `tracking` poblado
+- [x] `createShipmentForOrder` enganchado en `markOrderPaidFromWebhook`
+- [x] Guard de idempotencia propio (centinela `skydropxShipmentId` antes del `POST`, ver corrección de spec)
+- [x] Disparo fire-and-forget
+- [x] Re-cotización automática cuando el rate/quotation guardado ya no está disponible
+- [ ] Email "pedido enviado" con `tracking` poblado — movido a la Fase 8.6 (la guía se crea async, sin tracking disponible al pagar)
 
 **Fase 8.6 — Webhook de Skydropx**
 - [ ] `POST /api/webhooks/skydropx` con verificación HMAC-SHA512
 - [ ] Actualización de `Order.status`/`shipmentStatus` desde eventos `packages`
+- [ ] Poblar `trackingNumber`/`trackingUrl`/`labelUrl` (heredado de la Fase 8.5, ver su corrección de spec)
+- [ ] Disparar el correo "pedido enviado" con `tracking` poblado (heredado de la Fase 8.5)
 
 **Fase 8.7 — Swagger**
 - [ ] Schemas `ShippingRate`/`ShippingRatesInput`/`ShippingRatesResponse`
