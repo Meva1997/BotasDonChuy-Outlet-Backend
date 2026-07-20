@@ -151,7 +151,12 @@ authoritative too** (Fase 8.4): when `quotationId`/`rateId` come in, `createOrde
 Skydropx quotation** (`getQuotationRate`, a single `GET`) and uses that rate's `total` as `shipping`
 (recomputing `total = subtotal − savings + shipping`) — never a client-sent amount, same rule as the
 price recompute; it also persists `skydropxQuotationId`/`skydropxRateId` and fills `shippingCarrier`
-from the rate's carrier. Without them it uses `computeShipping` (flat rate) as before. The re-consult
+from the rate's carrier, plus `shippingRequiresDropoff` (from the rate's `requiresDropoff` — see the
+**Envío en vivo / Skydropx** section) — an operational flag for the store owner (no home pickup,
+must drop the package at the carrier's branch), **excluded from the public response** the same way
+`unitCost` is (the reload adds `attributes: { exclude: ['shippingRequiresDropoff'] }` alongside the
+`items` exclusion), and `null` on the flat-rate fallback since it never came from Skydropx. Without
+`quotationId`/`rateId` it uses `computeShipping` (flat rate) as before. The re-consult
 runs **before** the transaction opens (deliberately deviating from the roadmap's "inside the
 transaction" wording): it's a network `GET` that touches no DB row, so keeping it out avoids holding
 `ProductSize` locks open across a up-to-5s call. A rate that's no longer available (expired/gone) →
@@ -245,17 +250,38 @@ armados) de una falla transitoria de red/5xx.
 
 `getShippingRates(addressFrom, addressTo, parcel)` crea la cotización (`POST /api/v1/quotations`,
 shape `{ quotation: { address_from, address_to, parcels } }` — confirmado contra sandbox real, ver
-`roadmap-skydropx.md` §Fase 8.3) y hace poll (`GET /api/v1/quotations/{id}`) cada segundo hasta que
-ninguna tarifa quede `pending` o se agote el timeout — `is_completed` puede no llegar nunca a
-`true` (timeouts internos de Skydropx ajenos a nosotros), así que el poll no lo espera.
+`roadmap-skydropx.md` §Fase 8.3; incluye `requested_carriers` solo si `SKYDROPX_CARRIERS` está
+definido, ver más abajo) y hace poll (`GET /api/v1/quotations/{id}`) cada segundo hasta que
+ninguna tarifa quede `pending`, se junten **`MIN_READY_RATES` (3)** tarifas utilizables, o se agote
+el timeout (`POLL_TIMEOUT_MS`, **8s**) — `is_completed` puede no llegar nunca a
+`true` (timeouts internos de Skydropx ajenos a nosotros), así que el poll no lo espera. El **corte
+temprano por 3 tarifas listas** es la mayor ganancia de latencia: en sandbox (y a veces en prod)
+alguna paquetería se queda `pending` indefinidamente y sin este corte mantendría el poll ocupado
+hasta agotar los 8s completos por una sola tarifa colgada.
 **Cuidado:** un `rates: []` en la primera lectura (cotización recién creada, ninguna paquetería
 respondió aún) no es "ya resuelto" — `.some()` sobre un array vacío da `false`, así que el chequeo
 de "sigue pendiente" trata explícitamente un array vacío como pendiente, o el poll cortaría en el
-primer intento con cero tarifas. Solo se devuelven tarifas `success: true` con `amount`/`total` no
-nulos (llegan como **strings**, requieren `parseFloat`). `getQuotationRate(quotationId, rateId)`
+primer intento con cero tarifas. Solo se devuelven tarifas **utilizables** (`isUsableRate`: `success:
+true`, no `pending`, con `amount`/`total` no nulos — llegan como **strings**, requieren `parseFloat`),
+**ordenadas de más barata a más cara y recortadas a `MAX_RATES_RETURNED` (5)** para que el checkout
+muestre una lista corta (3-5 opciones) aun cuando `SKYDROPX_CARRIERS` no esté configurado y Skydropx
+cotice muchas paqueterías. `SKYDROPX_CARRIERS` (env opcional, lista separada por comas de slugs
+`provider_name` en minúsculas, p.ej. `"dhl,paquetexpress,fedex,estafeta,redpack"`) restringe el
+`requested_carriers` de la cotización — menos proveedores upstream = respuesta aún más rápida; sin él
+se cotizan todas y solo se recorta al devolver. `getQuotationRate(quotationId, rateId)`
 (Fase 8.4) re-consulta una cotización ya creada con un solo `GET` (sin poll — el cliente solo pudo
 elegir un rate ya resuelto) y devuelve ese rate normalizado, o `null` si ya no está disponible; es la
 fuente autoritativa del costo de envío que usa `orders.service.createOrder` (ver **Checkout**).
+
+Cada `NormalizedShippingRate` incluye `requiresDropoff` (`rateRequiresDropoff`): `true` cuando la
+paquetería **no** recoge el paquete a domicilio y el dueño debe llevarlo a su sucursal. La señal es
+**combinada a propósito** — el campo estructurado del rate crudo de Skydropx (`pickup === false`) más
+un regex sobre `provider_service_name` (`/sin\s+recolecci[oó]n/i`), porque en sandbox algunos
+servicios literalmente llamados "Sin recolección" venían con `pickup: true`; ante la duda se prefiere
+sobre-avisar (el costo de un falso negativo es que el paquete nunca sale). Es un dato **operativo
+para el dueño**, no para el comprador: `POST /api/shipping/rates` lo expone en cada tarifa (el
+checkout no necesita mostrarlo), y `createOrder` lo persiste en `Order.shippingRequiresDropoff` desde
+el rate re-consultado (nunca de un valor que mande el cliente) — ver **Checkout**.
 
 `src/services/packing.ts`'s `buildParcel` arma **una sola caja apilada** por pedido: peso y alto se
 suman por unidad, largo y ancho toman el máximo del carrito — nunca subcotiza el peso/alto, aunque
@@ -541,7 +567,9 @@ without it they default to `0`/`[]`. Product images live in the `images` column 
 `Order` holds a frozen snapshot of totals and shipping
 data (plus nullable `paymentIntentId`/`paymentStatus` from Fase 8, and nullable
 `skydropxQuotationId`/`skydropxRateId` from Fase 8.4 — the live-shipping quotation/rate used for the
-order, `null` when it fell back to the flat rate);
+order, `null` when it fell back to the flat rate — plus nullable `shippingRequiresDropoff`, the
+admin-only "no home pickup" flag from that same rate, see the **Envío en vivo / Skydropx** and
+**Checkout** sections);
 `OrderItem` freezes per-unit prices (`unitOriginalPrice`, `unitSalePrice`, `unitCost`) so
 historical orders aren't affected by later `Product` price changes. `AdminUser` and
 `BrandSettings` (singleton) round out the Fase 1 data model; `AdminUser` also gained three
@@ -561,7 +589,9 @@ nullable password-reset columns in Fase 9 (`resetPasswordCodeHash`, `resetPasswo
   startup without them), `SKYDROPX_CLIENT_ID` + `SKYDROPX_CLIENT_SECRET` (both required) and
   `SHIP_FROM_POSTAL_CODE`/`SHIP_FROM_STATE`/`SHIP_FROM_CITY`/`SHIP_FROM_NEIGHBORHOOD` (all
   required — see the **Envío en vivo / Skydropx** section), optional `SKYDROPX_BASE_URL`
-  (defaults to the sandbox host) and optional `SHIP_FROM_STREET`/`SHIP_FROM_EXTERNAL_NUMBER`/
+  (defaults to the sandbox host), optional `SKYDROPX_CARRIERS` (comma-separated `provider_name`
+  slugs to restrict the quotation's `requested_carriers` — see the Skydropx section) and optional
+  `SHIP_FROM_STREET`/`SHIP_FROM_EXTERNAL_NUMBER`/
   `SHIP_FROM_NAME`/`SHIP_FROM_PHONE` (reserved for Fase 8.5, not yet enforced), and optional
   `FRONTEND_URL`). `.env` is gitignored — never commit it (the Stripe/Resend keys are
   test/sandbox; Skydropx currently points at its own separate sandbox account too — see

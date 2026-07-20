@@ -1,5 +1,6 @@
 import {
   SKYDROPX_BASE_URL,
+  SKYDROPX_CARRIERS,
   SKYDROPX_CLIENT_ID,
   SKYDROPX_CLIENT_SECRET,
   SHIP_FROM_CITY,
@@ -41,8 +42,8 @@ const TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000; // renovar 5 min antes de expirar
 const MIN_REQUEST_INTERVAL_MS = 500; // 2 req/s
 // Acota cada fetch individual: sin esto, una conexión colgada (TCP/TLS sin
 // respuesta ni error) bloquearía el request indefinidamente, sin importar el
-// presupuesto de 8s de pollQuotation — ese presupuesto solo se revisa ENTRE
-// intentos, no dentro de uno.
+// presupuesto de pollQuotation (POLL_TIMEOUT_MS) — ese presupuesto solo se
+// revisa ENTRE intentos, no dentro de uno.
 const REQUEST_TIMEOUT_MS = 5000;
 
 /** Error tipado de Skydropx: conserva el status HTTP para que el llamador pueda
@@ -193,6 +194,12 @@ interface SkydropxRate {
   amount: string | null;
   total: string | null;
   days: number | null;
+  // Bandera de recolección de Skydropx (confirmada en el rate crudo del sandbox,
+  // 2026-07-20): `true` = la paquetería pasa a recoger el paquete al domicilio de
+  // origen; `false` = NO hay recolección, el dueño debe llevar el paquete a la
+  // sucursal. Es información operativa que solo le sirve al dueño (ver
+  // `requiresDropoff` en `NormalizedShippingRate`), nunca al comprador.
+  pickup: boolean | null;
 }
 
 interface SkydropxQuotationResponse {
@@ -208,6 +215,12 @@ export interface NormalizedShippingRate {
   amount: number;
   total: number;
   days: number | null;
+  // `true` cuando el servicio NO incluye recolección a domicilio: el dueño tiene
+  // que llevar el paquete a la sucursal de la paquetería. Dato operativo para el
+  // panel de admin, no para el checkout del cliente. Se persiste en la orden
+  // (`Order.shippingRequiresDropoff`) desde la re-consulta autoritativa de
+  // `getQuotationRate` en `createOrder` — nunca desde un valor que mande el cliente.
+  requiresDropoff: boolean;
 }
 
 /** Dirección de origen (tienda), tomada de `SHIP_FROM_*` (ver config/skydropx.ts). */
@@ -291,6 +304,10 @@ async function createQuotation(
         address_from: addressFrom,
         address_to: addressTo,
         parcels: [parcel],
+        // Restringe las paqueterías a cotizar cuando SKYDROPX_CARRIERS está
+        // definido (menos proveedores = respuesta más rápida). Sin él, Skydropx
+        // cotiza todas y el controlador recorta a las más baratas.
+        ...(SKYDROPX_CARRIERS ? { requested_carriers: SKYDROPX_CARRIERS } : {}),
       },
     }),
   });
@@ -302,9 +319,23 @@ const POLL_INTERVAL_MS = 1000;
 // `is_completed` llegue a ser `true`. Por eso el poll no espera la resolución
 // total: agota el presupuesto de tiempo y devuelve lo que ya se resolvió.
 const POLL_TIMEOUT_MS = 8000;
+// Corte temprano: en cuanto haya esta cantidad de tarifas utilizables no hace
+// falta seguir esperando a las paqueterías que sigan `pending` — le mostramos
+// al cliente las que ya se resolvieron en vez de agotar el timeout completo por
+// una sola que quedó colgada. Es la mayor ganancia de latencia del endpoint.
+const MIN_READY_RATES = 3;
+// Tope de opciones que se le devuelven al checkout (las más baratas). Garantiza
+// una lista corta aun cuando SKYDROPX_CARRIERS no esté configurado y Skydropx
+// cotice muchas paqueterías.
+const MAX_RATES_RETURNED = 5;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Tarifa lista para mostrar: resuelta (no `pending`), exitosa y con montos. */
+function isUsableRate(r: SkydropxRate): boolean {
+  return r.status !== "pending" && r.success && r.amount != null && r.total != null;
 }
 
 async function pollQuotation(quotationId: string): Promise<SkydropxQuotationResponse> {
@@ -321,7 +352,10 @@ async function pollQuotation(quotationId: string): Promise<SkydropxQuotationResp
     // antes de que cualquier tarifa llegara.
     const stillPending =
       last.rates.length === 0 || last.rates.some((r) => r.status === "pending");
+    // Devolvemos si ya se resolvieron todas (is_completed / nada pending) o si
+    // ya juntamos suficientes tarifas utilizables — no esperamos a las colgadas.
     if (last.is_completed || !stillPending) return last;
+    if (last.rates.filter(isUsableRate).length >= MIN_READY_RATES) return last;
     await sleep(POLL_INTERVAL_MS);
   } while (Date.now() < deadline);
   return last;
@@ -344,11 +378,29 @@ export async function getShippingRates(
   rememberQuotationDestination(created.id, addressTo);
   const resolved = await pollQuotation(created.id);
 
+  // Ordenadas de más barata a más cara y recortadas a MAX_RATES_RETURNED: el
+  // checkout solo debe mostrar un puñado de opciones (3-5), y las de hasta
+  // arriba son las que al cliente le interesan.
   const rates = resolved.rates
-    .filter((r) => r.success && r.amount != null && r.total != null)
-    .map(normalizeRate);
+    .filter(isUsableRate)
+    .map(normalizeRate)
+    .sort((a, b) => a.total - b.total)
+    .slice(0, MAX_RATES_RETURNED);
 
   return { quotationId: resolved.id, rates };
+}
+
+/**
+ * Detecta si un rate NO incluye recolección a domicilio (el dueño debe llevar el
+ * paquete a la sucursal). Señal combinada a propósito: `pickup === false` es el
+ * campo estructurado de Skydropx, pero en el sandbox algunos servicios llamados
+ * literalmente "Sin recolección" venían con `pickup: true` (valores de plantilla
+ * en rates `success: false`), así que se refuerza con el nombre del servicio. El
+ * costo de un falso negativo (no avisarle al dueño de un envío que él tiene que
+ * llevar) es que el paquete nunca sale, así que se prefiere sobre-avisar.
+ */
+function rateRequiresDropoff(r: SkydropxRate): boolean {
+  return r.pickup === false || /sin\s+recolecci[oó]n/i.test(r.provider_service_name ?? "");
 }
 
 function normalizeRate(r: SkydropxRate): NormalizedShippingRate {
@@ -359,6 +411,7 @@ function normalizeRate(r: SkydropxRate): NormalizedShippingRate {
     amount: parseFloat(r.amount!),
     total: parseFloat(r.total!),
     days: r.days,
+    requiresDropoff: rateRequiresDropoff(r),
   };
 }
 

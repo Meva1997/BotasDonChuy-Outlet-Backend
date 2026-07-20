@@ -43,7 +43,13 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
   //    5s) que no toca la BD, y meterlo dentro mantendría abiertos los locks de
   //    `ProductSize` durante la llamada, invitando contención/deadlocks entre checkouts.
   let shippingOverride:
-    | { total: number; quotationId: string; rateId: string; carrier: string }
+    | {
+        total: number;
+        quotationId: string;
+        rateId: string;
+        carrier: string;
+        requiresDropoff: boolean;
+      }
     | null = null;
   if (input.quotationId && input.rateId) {
     const destinationAddress = toSkydropxAddress(input.customer);
@@ -73,6 +79,9 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
       quotationId: input.quotationId,
       rateId: input.rateId,
       carrier: rate.carrier,
+      // Autoritativo: sale de la re-consulta a Skydropx, no del cliente. Le dice
+      // al dueño si tiene que llevar el paquete a la sucursal (sin recolección).
+      requiresDropoff: rate.requiresDropoff,
     };
   }
 
@@ -187,6 +196,9 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
           shippingOverride?.carrier ?? input.shippingCarrier ?? undefined,
         skydropxQuotationId: shippingOverride?.quotationId ?? undefined,
         skydropxRateId: shippingOverride?.rateId ?? undefined,
+        // Solo se sabe con cotización en vivo; en tarifa plana de respaldo queda
+        // null (no aplica: la tienda no manda por Skydropx en ese caso).
+        shippingRequiresDropoff: shippingOverride?.requiresDropoff ?? undefined,
       },
       { transaction: t },
     );
@@ -200,10 +212,13 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
     return created;
   });
 
-  // 7. Recargar con sus items para la respuesta. Se excluye `unitCost` (costo
-  //    interno / margen): la fila lo conserva congelado para reportes admin,
-  //    pero NUNCA se serializa al cliente en esta ruta pública.
+  // 7. Recargar con sus items para la respuesta. Se excluyen campos internos que
+  //    la fila conserva para el panel admin pero que NUNCA se serializan al
+  //    cliente en esta ruta pública: `unitCost` (costo/margen) en cada item, y
+  //    `shippingRequiresDropoff` (info operativa de recolección — solo le sirve
+  //    al dueño para saber si debe llevar el paquete a la sucursal).
   const full = await Order.findByPk(order.id, {
+    attributes: { exclude: ["shippingRequiresDropoff"] },
     include: [
       { model: OrderItem, as: "items", attributes: { exclude: ["unitCost"] } },
     ],

@@ -33,6 +33,23 @@ export const SKYDROPX_BASE_URL =
   process.env.SKYDROPX_BASE_URL ?? "https://sb-pro.skydropx.com";
 
 /**
+ * Paqueterías a cotizar (`requested_carriers` de `POST /api/v1/quotations`).
+ * Opcional: si se define `SKYDROPX_CARRIERS` (lista separada por comas, p.ej.
+ * `"dhl,paquetexpress,fedex,estafeta,redpack"`), la cotización se restringe a
+ * esos carriers — menos proveedores = respuesta más rápida y menos opciones que
+ * mostrar. Sin definir, se cotizan TODAS las paqueterías disponibles (y el
+ * controlador recorta a las más baratas). Usa los slugs `provider_name` de
+ * Skydropx en minúsculas; en la cuenta sandbox se confirmaron `dhl` y
+ * `paquetexpress` (ver skydropx.service.ts). Un slug inválido simplemente no
+ * devuelve tarifa para esa paquetería.
+ */
+const rawCarriers = process.env.SKYDROPX_CARRIERS?.split(",")
+  .map((c) => c.trim().toLowerCase())
+  .filter(Boolean);
+export const SKYDROPX_CARRIERS: string[] | undefined =
+  rawCarriers && rawCarriers.length > 0 ? rawCarriers : undefined;
+
+/**
  * Dirección de origen (tienda física en Celaya, GTO) para cada cotización
  * (Fase 8.3). Hard-require igual que las credenciales, pero SOLO para los
  * campos que `getOriginAddress()` (skydropx.service.ts) realmente usa hoy:

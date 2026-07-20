@@ -61,6 +61,7 @@ FRONTEND_URL=http://localhost:3000       # opcional: base para links dentro de l
 SKYDROPX_CLIENT_ID=...
 SKYDROPX_CLIENT_SECRET=...
 SKYDROPX_BASE_URL=https://sandbox-api.skydropx.com  # opcional (default: sandbox)
+SKYDROPX_CARRIERS=dhl,paquetexpress    # opcional: slugs provider_name separados por coma, restringe qué paqueterías cotizar
 SHIP_FROM_POSTAL_CODE=38000
 SHIP_FROM_STATE=Guanajuato
 SHIP_FROM_CITY=Celaya
@@ -151,11 +152,19 @@ respuesta indica `{ ok, softDeleted }`.
 ### `POST /api/orders` (checkout público)
 
 Convierte el carrito del cliente en un pedido persistido. Body:
-`{ items: [{ productId, size, quantity }], customer, shippingCarrier? }`, validado con
-`createOrderSchema` (zod). El backend es la **autoridad de precios y stock**:
+`{ items: [{ productId, size, quantity }], customer, shippingCarrier?, quotationId?, rateId? }`,
+validado con `createOrderSchema` (zod). El backend es la **autoridad de precios, stock y envío**:
 
 - **Recalcula los totales** (`subtotal`, `savings`, `shipping`, `total`) en el servidor con el
   service `cart` — el cliente nunca envía montos.
+- **Envío autoritativo (Fase 8.4):** `quotationId`/`rateId` son opcionales pero van **juntos o
+  ninguno** (si el checkout cotizó en vivo contra `POST /api/shipping/rates` los manda; si cayó al
+  fallback de tarifa plana, los omite). Cuando vienen, el servidor **re-consulta** esa cotización en
+  Skydropx (`getQuotationRate`, un solo `GET`, antes de abrir la transacción) y usa el `total` de ese
+  rate como `shipping` — nunca un monto que mande el cliente. Persiste `skydropxQuotationId`/
+  `skydropxRateId` y `shippingCarrier` desde el rate elegido. Un rate ya no disponible → `409`; un
+  fallo de red al re-consultar → `503`. Sin `quotationId`/`rateId` usa `computeShipping` (tarifa
+  plana) como antes.
 - **Verifica y descuenta el stock por talla de forma atómica** dentro de una transacción, con un
   `UPDATE ... SET stock = stock - N WHERE stock >= N`. Si dos clientes compran la última unidad
   casi al mismo tiempo, solo uno recibe `201`; el otro recibe `409` y esa talla queda en stock 0.
@@ -163,7 +172,10 @@ Convierte el carrito del cliente en un pedido persistido. Body:
 - **Congela los precios** (`unitOriginalPrice`, `unitSalePrice`, `unitCost`) y el nombre en cada
   `OrderItem`, para que el histórico no cambie si el producto se reprecia. El `unitCost` (costo
   interno) se guarda congelado pero **se excluye de la respuesta pública** — solo lo ven las rutas
-  admin autenticadas.
+  admin autenticadas. Lo mismo aplica a `shippingRequiresDropoff` (bandera operativa de "hay que
+  llevar el paquete a la sucursal, no recogen a domicilio"): se persiste en la orden desde el rate
+  re-consultado, pero se excluye de la respuesta de este endpoint — solo le sirve al dueño y se ve
+  en `GET /api/admin/orders`.
 - Renglones duplicados del mismo `(productId, size)` se agregan; el descuento se hace en orden
   determinista por `(productId, size)` para evitar deadlocks entre checkouts concurrentes.
 - **Topes anti-abuso** (zod): máximo `99` unidades por artículo y `50` artículos por pedido (`400`
@@ -222,19 +234,25 @@ calcula el frontend.
   `costoEstimadoPedido` y `priority` (`urgente` <15 días · `pronto` <45 · `ok`). Las filas se ordenan
   por urgencia de cobertura y, dentro de cada nivel, por `margenMensual` desc.
 
-### Envío en vivo con Skydropx (Fase 8.1–8.3)
+### Envío en vivo con Skydropx (Fase 8.1–8.4)
 
 `POST /api/shipping/rates` (público, `src/routes/shipping.routes.ts` →
 `shipping.controller.ts`) cotiza el envío en vivo contra Skydropx Pro para el checkout, con la
 tarifa plana existente (`computeShipping`) como **fallback** si Skydropx falla, tarda o algún
 producto del carrito no tiene dimensiones válidas. `src/services/skydropx.service.ts` maneja el
 OAuth2 (`client_credentials`, token cacheado ~2h), limita las llamadas salientes a 2 req/s (límite
-de la cuenta) y hace poll de la cotización hasta que las tarifas dejan de estar `pending` o se agota
-un timeout de 8s. `src/services/packing.ts` arma una sola caja apilada por pedido a partir de las
+de la cuenta) y hace poll de la cotización hasta que las tarifas dejan de estar `pending`, se junten
+3 tarifas utilizables (`MIN_READY_RATES`, corte temprano para no esperar una paquetería colgada) o
+se agote un timeout de 8s. Las tarifas devueltas se filtran a las **utilizables** (resueltas,
+exitosas, con montos), se ordenan de más barata a más cara y se recortan a 5 (`MAX_RATES_RETURNED`).
+`SKYDROPX_CARRIERS` (env opcional) restringe de antemano qué paqueterías se cotizan, para respuestas
+más rápidas. Cada tarifa incluye `requiresDropoff` (`true` = el dueño debe llevar el paquete a la
+sucursal de la paquetería, no hay recolección a domicilio — dato operativo, el checkout no necesita
+mostrarlo). `src/services/packing.ts` arma una sola caja apilada por pedido a partir de las
 dimensiones/peso de cada producto. La ruta está limitada por `shippingRateLimiter` (20 req/min por
-IP) para no acaparar el presupuesto de 2 req/s compartido por toda la cuenta. Solo cotización en
-vivo por ahora — crear la orden con tarifa real, guía automática y webhook de estado siguen
-pendientes (ver `roadmap-skydropx.md`).
+IP) para no acaparar el presupuesto de 2 req/s compartido por toda la cuenta. `POST /api/orders`
+usa la cotización elegida como fuente autoritativa del costo de envío (ver la sección de checkout
+arriba) — guía automática y webhook de estado siguen pendientes (ver `roadmap-skydropx.md`).
 
 ### Pagos con Stripe (Fase 8 — solo test/sandbox)
 

@@ -369,6 +369,13 @@ const options: Options = {
               description: "Rate elegido dentro de la cotización. null en tarifa plana.",
               example: "rate_9f8a3c",
             },
+            shippingRequiresDropoff: {
+              type: "boolean",
+              nullable: true,
+              description:
+                "Dato operativo SOLO para el panel admin (se excluye de la respuesta pública de POST /api/orders): true = la paquetería elegida no recoge a domicilio, el dueño debe llevar el paquete a su sucursal. null cuando la orden usó la tarifa plana de respaldo o es previa a esta columna.",
+              example: false,
+            },
             items: {
               type: "array",
               items: { $ref: "#/components/schemas/OrderItem" },
@@ -429,6 +436,12 @@ const options: Options = {
               nullable: true,
               description: "Días estimados de entrega; null en la tarifa plana de respaldo.",
               example: 3,
+            },
+            requiresDropoff: {
+              type: "boolean",
+              description:
+                "true = el servicio no incluye recolección a domicilio (el paquete se lleva a la sucursal). Dato operativo para el dueño; el checkout no necesita mostrarlo. Se persiste en la orden como shippingRequiresDropoff.",
+              example: false,
             },
           },
         },

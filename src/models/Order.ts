@@ -30,6 +30,12 @@ export interface OrderAttributes {
   // para generar la guía al pagar (Fase 8.5).
   skydropxQuotationId: string | null;
   skydropxRateId: string | null;
+  // Bandera operativa SOLO para el dueño (Fase 8.4+): `true` = la paquetería
+  // elegida NO recoge a domicilio, hay que llevar el paquete a su sucursal.
+  // Nullable/`null` cuando no aplica: órdenes con tarifa plana de respaldo (sin
+  // cotización Skydropx) u órdenes previas a esta columna. Se excluye de la
+  // respuesta pública de checkout — el cliente no la ve (ver orders.service.ts).
+  shippingRequiresDropoff: boolean | null;
 }
 
 interface OrderCreationAttributes extends Optional<
@@ -41,6 +47,7 @@ interface OrderCreationAttributes extends Optional<
   | "paymentStatus"
   | "skydropxQuotationId"
   | "skydropxRateId"
+  | "shippingRequiresDropoff"
 > {}
 
 export class Order
@@ -67,6 +74,7 @@ export class Order
   declare paymentStatus: "unpaid" | "processing" | "paid" | "failed";
   declare skydropxQuotationId: string | null;
   declare skydropxRateId: string | null;
+  declare shippingRequiresDropoff: boolean | null;
   declare readonly createdAt: Date;
   declare readonly updatedAt: Date;
   declare items?: OrderItem[];
@@ -179,6 +187,11 @@ Order.init(
     },
     skydropxRateId: {
       type: DataTypes.STRING,
+      allowNull: true,
+      defaultValue: null,
+    },
+    shippingRequiresDropoff: {
+      type: DataTypes.BOOLEAN,
       allowNull: true,
       defaultValue: null,
     },
