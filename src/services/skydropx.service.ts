@@ -1,13 +1,16 @@
+import crypto from "crypto";
 import {
   SKYDROPX_BASE_URL,
   SKYDROPX_CARRIERS,
   SKYDROPX_CLIENT_ID,
   SKYDROPX_CLIENT_SECRET,
+  SKYDROPX_WEBHOOK_SECRET,
   SHIP_FROM_CITY,
   SHIP_FROM_NEIGHBORHOOD,
   SHIP_FROM_POSTAL_CODE,
   SHIP_FROM_STATE,
 } from "../config/skydropx";
+import { constantTimeEqual } from "../utils/constantTimeEqual";
 import type { Parcel } from "./packing";
 
 /**
@@ -538,4 +541,39 @@ export async function createShipment(
     shipmentId: response.data.id,
     carrierName: response.data.attributes.carrier_name,
   };
+}
+
+/**
+ * Verificación de firma del webhook de Skydropx (Fase 8.6).
+ *
+ * Confirmado contra la documentación oficial (Context7 `/websites/pro_skydropx_es-mx_api-docs`):
+ * Skydropx firma cada evento con **HMAC-SHA512 (RFC 6234)** sobre el **cuerpo crudo** de la
+ * petición, codificado como hexadecimal en minúsculas, y lo manda en el header
+ * `Authorization: HMAC <firma>`. (Skydropx también admite un Bearer token estático, menos seguro;
+ * aquí solo se implementa HMAC, el método recomendado.)
+ *
+ * La comparación usa `crypto.timingSafeEqual` (no `===`) para no filtrar información por tiempo,
+ * previo chequeo de longitud —`timingSafeEqual` lanza si los buffers no miden igual—. Recibe el
+ * `Buffer` crudo tal cual llega por `express.raw` (mismo montaje que el webhook de Stripe): calcular
+ * el HMAC sobre un cuerpo re-serializado no coincidiría con la firma de Skydropx.
+ */
+export function verifySkydropxWebhookSignature(
+  rawBody: Buffer,
+  authHeader: string | undefined,
+): boolean {
+  if (!authHeader) return false;
+  const match = /^HMAC\s+(.+)$/i.exec(authHeader.trim());
+  if (!match) return false;
+  const provided = match[1].trim();
+
+  const expected = crypto
+    .createHmac("sha512", SKYDROPX_WEBHOOK_SECRET)
+    .update(rawBody)
+    .digest("hex");
+
+  // Se comparan las cadenas hex tal cual (no se decodifican): `provided` viene del header y podría
+  // no ser hex válido; decodificarlo con `Buffer.from(provided, "hex")` descartaría caracteres
+  // inválidos y podría hacer coincidir longitudes por accidente. Comparar los bytes de las cadenas
+  // evita eso y sigue siendo en tiempo constante.
+  return constantTimeEqual(provided, expected);
 }

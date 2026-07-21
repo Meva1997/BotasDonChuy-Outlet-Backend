@@ -57,9 +57,10 @@ RESEND_API_KEY=re_...                    # del dashboard de Resend
 EMAIL_FROM=Botas Don Chuy <onboarding@resend.dev>  # sin dominio verificado, usar onboarding@resend.dev
 FRONTEND_URL=http://localhost:3000       # opcional: base para links dentro de los correos
 
-# Skydropx (cotización en vivo + guía automática) — client id/secret y los 8 SHIP_FROM_* son OBLIGATORIOS
+# Skydropx (cotización en vivo + guía automática) — client id/secret, webhook secret y los 8 SHIP_FROM_* son OBLIGATORIOS
 SKYDROPX_CLIENT_ID=...
 SKYDROPX_CLIENT_SECRET=...
+SKYDROPX_WEBHOOK_SECRET=...             # secreto HMAC del webhook de estado de envío (Fase 8.6); el server no arranca sin él
 SKYDROPX_BASE_URL=https://sandbox-api.skydropx.com  # opcional (default: sandbox)
 SKYDROPX_CARRIERS=dhl,paquetexpress    # opcional: slugs provider_name separados por coma, restringe qué paqueterías cotizar
 SHIP_FROM_POSTAL_CODE=38000
@@ -120,6 +121,7 @@ SHIP_FROM_PHONE=...
 | `DELETE` | `/api/admin/users/:id`        | ✅   | Elimina un usuario (bloquea autoeliminación y al último `owner`) |
 | `PUT`    | `/api/admin/account`          | ✅   | Actualiza el correo y/o la contraseña de la cuenta propia |
 | `POST`   | `/api/webhooks/stripe`        | 🔑   | Webhook de Stripe (firma verificada; lo invoca Stripe, no de uso manual) |
+| `POST`   | `/api/webhooks/skydropx`      | 🔑   | Webhook de estado de envío de Skydropx (firma HMAC verificada; lo invoca Skydropx, no de uso manual) |
 
 ### `GET /api/products`
 
@@ -234,7 +236,7 @@ calcula el frontend.
   `costoEstimadoPedido` y `priority` (`urgente` <15 días · `pronto` <45 · `ok`). Las filas se ordenan
   por urgencia de cobertura y, dentro de cada nivel, por `margenMensual` desc.
 
-### Envío en vivo con Skydropx (Fase 8.1–8.5)
+### Envío en vivo con Skydropx (Fase 8.1–8.6)
 
 `POST /api/shipping/rates` (público, `src/routes/shipping.routes.ts` →
 `shipping.controller.ts`) cotiza el envío en vivo contra Skydropx Pro para el checkout, con la
@@ -262,7 +264,18 @@ dos guías (dinero real) ni con reintentos concurrentes. Si la cotización guard
 re-cotiza sola antes de crear el envío (sin tocar el monto ya cobrado). La creación es **asíncrona**
 en Skydropx: `tracking_number`/`label_url` no llegan en la respuesta, así que
 `trackingNumber`/`trackingUrl`/`labelUrl` quedan en `null` hasta que el webhook de Skydropx
-(Fase 8.6, pendiente) los reporte — ver `roadmap-skydropx.md` para el detalle completo.
+(Fase 8.6) los reporte — ver `roadmap-skydropx.md` para el detalle completo.
+
+**Webhook de estado de envío (Fase 8.6):** `POST /api/webhooks/skydropx`
+(`src/routes/webhook.routes.ts` → `order.controller.ts`'s `skydropxWebhook`) se monta con el mismo
+`express.raw` que el de Stripe y verifica la firma **HMAC-SHA512** del header
+`Authorization: HMAC <firma>` contra `SKYDROPX_WEBHOOK_SECRET` (comparación en tiempo constante);
+firma ausente/inválida → `400`, evento verificado → `200` aunque no se maneje (sin reintentos en
+bucle). Del evento `packages` puebla por primera vez `trackingNumber`/`trackingUrl`/`labelUrl`,
+guarda el `shipmentStatus` crudo, avanza `Order.status` a `shipped`/`delivered` **solo hacia
+adelante** y dispara el correo "tu pedido va en camino" **exactamente una vez** (guard atómico
+`WHERE trackingNumber IS NULL`, reusando el template de confirmación con datos de rastreo) — ver
+`applyShipmentUpdateFromWebhook` en `src/services/payment.service.ts`.
 
 ### Pagos con Stripe (Fase 8 — solo test/sandbox)
 

@@ -193,9 +193,11 @@ email when `affectedCount === 1`. This is the single funnel every order passes t
 sweeper runs: only one UPDATE affects the row, so the email fires exactly once. A plain in-memory
 guard (`if (order.paymentStatus === "paid")`) would **not** give this — two callers could both read
 `processing` before either writes and both send. A `idempotencyKey: order-confirmation/${order.id}`
-passed to Resend is a second 24h safety net. The send is extracted into a `sendOrderConfirmationEmail(order)`
-helper that `order.reload({ include: items excluding unitCost })` then templates + `sendEmail`, wrapped
-in its own `try/catch` that only logs. It is dispatched **fire-and-forget** (`void`, **not** awaited):
+passed to Resend is a second 24h safety net. The send is a thin `sendOrderConfirmationEmail(order)`
+wrapper over a shared `sendOrderEmail(order, { subject, idempotencyKey, tracking? })` helper (Fase 8.6
+refactor) that `order.reload({ include: items excluding unitCost })` then templates + `sendEmail`, wrapped
+in its own `try/catch` that only logs — the same helper backs the Fase 8.6 "pedido enviado" email
+(`sendShipmentEmail`, with `tracking` populated). It is dispatched **fire-and-forget** (`void`, **not** awaited):
 the email must never block the webhook's `200` — if Resend were slow, Stripe could exceed its response
 timeout and retry the event in a loop. The order is already `paid`, so the send runs in the background
 and a failed email/reload can never propagate. Right after that `affectedCount === 1` guard,
@@ -226,9 +228,9 @@ double-restock. `src/services/pendingOrderSweeper.ts` (`startPendingOrderSweeper
 (`retrieve`): if the PaymentIntent is `succeeded` it marks the order `paid` (recovers a missed
 webhook), otherwise it cancels the PaymentIntent and calls `releaseOrderStock`.
 
-**Envío en vivo / Skydropx** (Fase 8.1–8.5, activo — cotización en vivo, órdenes con tarifa real y
-guía automática al pagar; Fase 8.6+ — webhook de estado de Skydropx — sigue pendiente, ver
-`roadmap-skydropx.md`):
+**Envío en vivo / Skydropx** (Fase 8.1–8.6, activo — cotización en vivo, órdenes con tarifa real,
+guía automática al pagar y webhook de estado de envío; Fase 8.7 — Swagger de los endpoints nuevos —
+pendiente, ver `roadmap-skydropx.md`):
 `POST /api/shipping/rates` `[público]` (`src/routes/shipping.routes.ts` →
 `shipping.controller.ts`'s `getShippingRates`) cotiza el envío en vivo contra Skydropx Pro para el
 checkout, con la tarifa plana existente (`cart.ts`'s `computeShipping`) como **fallback** — la
@@ -331,11 +333,40 @@ es obligatorio pese a documentarse opcional; se usa `"4G"`, el valor de ejemplo 
 pollings de `GET /shipments/{id}` a lo largo de ~12s sin resolver) — la paquetería procesa la guía
 en su propio tiempo. Por eso `createShipmentForOrder` **solo** persiste `Order.skydropxShipmentId`
 (disponible de inmediato); `trackingNumber`/`trackingUrl`/`labelUrl`/`shipmentStatus` nacen `null` y
-quedan así hasta que el webhook de Skydropx (Fase 8.6, no implementado) los reporte — es
-precisamente el mecanismo diseñado para esto, así que no se hace polling bloqueante aquí. El correo
-"tu pedido fue enviado" (reusa `orderConfirmationTemplate` con `tracking`) tampoco se dispara desde
-Fase 8.5 por la misma razón: no hay `tracking_number` que mostrar todavía; ese disparo también queda
-para la Fase 8.6.
+quedan así hasta que el webhook de Skydropx (Fase 8.6, abajo) los reporte — es precisamente el
+mecanismo diseñado para esto, así que no se hace polling bloqueante aquí. El correo
+"tu pedido va en camino" (reusa `orderConfirmationTemplate` con `tracking`) tampoco se dispara desde
+Fase 8.5 por la misma razón: no hay `tracking_number` que mostrar todavía; ese disparo lo hace el
+webhook de la Fase 8.6.
+
+**Webhook de estado de envío** (Fase 8.5↔8.6 completado — `POST /api/webhooks/skydropx`,
+`src/routes/webhook.routes.ts` → `order.controller.ts`'s `skydropxWebhook`): montado bajo el mismo
+`/api/webhooks` con `express.raw` que el de Stripe (antes del `express.json()` global), así que
+`req.body` es el `Buffer` crudo que exige la verificación de firma. `verifySkydropxWebhookSignature`
+(`skydropx.service.ts`) valida la firma **HMAC-SHA512** del header `Authorization: HMAC <firma>`
+(hex minúsculas sobre el cuerpo crudo, con `SKYDROPX_WEBHOOK_SECRET` — hard-require en
+`config/skydropx.ts`, igual que `STRIPE_WEBHOOK_SECRET`), comparándola con `crypto.timingSafeEqual`
+(previo chequeo de longitud, que la función exige) — nunca `===`. Firma ausente/mal formada/inválida
+o cuerpo no-`Buffer`/no-JSON → **400**; cualquier evento verificado → `200 { received: true }` aunque
+no se maneje, para no provocar reintentos en bucle (mismo patrón que Stripe). Solo se maneja el
+evento `packages` (payload estilo JSON:API confirmado contra la doc oficial:
+`{ data: { type: "packages", attributes: { status, tracking_number, tracking_url_provider,
+label_url }, relationships: { shipment: { data: { id } } } } }`). **Ojo:** `data.id` es el id del
+**paquete**, no del envío; el `skydropxShipmentId` que persistimos (id de `shipments`) viaja en
+`relationships.shipment.data.id` — por ahí se localiza la orden. `applyShipmentUpdateFromWebhook`
+(`payment.service.ts`, tolerante a "orden no encontrada" como los handlers de Stripe) puebla
+`trackingNumber`/`trackingUrl`/`labelUrl` **por primera vez** (este webhook es el primer punto que
+los recibe; los `*Url` solo se escriben cuando llegan no nulos, para que un evento posterior que los
+omita no borre lo que uno anterior fijó), guarda `shipmentStatus` (estado crudo íntegro) y avanza
+`Order.status` con `advanceOrderStatus` — `delivered` → `delivered`, cualquier otro estado con
+actividad → `shipped`, **solo hacia adelante** (rango `pending<paid<shipped<delivered`; un evento
+tardío/fuera de orden nunca retrocede la orden, y una orden `cancelled` no se reactiva). El correo
+"tu pedido va en camino" (`sendShipmentEmail`, reusa `orderConfirmationTemplate` con
+`tracking: { number, url, carrier }`, fire-and-forget) se dispara **exactamente una vez**: la
+primera vez que llega un `tracking_number` se reclama con un guard atómico
+`Order.update({ ...trackingNumber }, { where: { id, trackingNumber: null } })` (mismo patrón que el
+correo de confirmación) — los eventos siguientes (misma guía, nuevo estado) actualizan estado/urls
+pero no reenvían el correo.
 
 **Guard de idempotencia con centinela**: a diferencia del correo de confirmación (donde el guard es
 la propia transición atómica de `paymentStatus`), aquí el id real de la guía solo se conoce
@@ -619,8 +650,8 @@ data (plus nullable `paymentIntentId`/`paymentStatus` from Fase 8, and nullable
 order, `null` when it fell back to the flat rate — plus nullable `shippingRequiresDropoff`, the
 admin-only "no home pickup" flag from that same rate; plus nullable `skydropxShipmentId`/
 `trackingNumber`/`trackingUrl`/`labelUrl`/`shipmentStatus` from Fase 8.5 — the last four stay `null`
-until the Skydropx webhook (Fase 8.6) reports them, since shipment creation is asynchronous — see
-the **Envío en vivo / Skydropx** and **Checkout** sections);
+until the Skydropx webhook (Fase 8.6, `POST /api/webhooks/skydropx`) reports them, since shipment
+creation is asynchronous — see the **Envío en vivo / Skydropx** and **Checkout** sections);
 `OrderItem` freezes per-unit prices (`unitOriginalPrice`, `unitSalePrice`, `unitCost`) so
 historical orders aren't affected by later `Product` price changes. `AdminUser` and
 `BrandSettings` (singleton) round out the Fase 1 data model; `AdminUser` also gained three
@@ -637,7 +668,9 @@ nullable password-reset columns in Fase 9 (`resetPasswordCodeHash`, `resetPasswo
   `STRIPE_WEBHOOK_SECRET` (both required — the server throws at startup without them),
   optional `STRIPE_CURRENCY`/`PENDING_ORDER_TTL_MINUTES`/`PENDING_ORDER_SWEEP_INTERVAL_MINUTES`,
   plus Cloudinary keys, `RESEND_API_KEY` + `EMAIL_FROM` (both required — the server throws at
-  startup without them), `SKYDROPX_CLIENT_ID` + `SKYDROPX_CLIENT_SECRET` (both required) and
+  startup without them), `SKYDROPX_CLIENT_ID` + `SKYDROPX_CLIENT_SECRET` + `SKYDROPX_WEBHOOK_SECRET`
+  (all three required — the last one is the HMAC secret used to verify the Skydropx status webhook,
+  Fase 8.6) and
   `SHIP_FROM_POSTAL_CODE`/`SHIP_FROM_STATE`/`SHIP_FROM_CITY`/`SHIP_FROM_NEIGHBORHOOD`/
   `SHIP_FROM_STREET`/`SHIP_FROM_EXTERNAL_NUMBER`/`SHIP_FROM_NAME`/`SHIP_FROM_PHONE` (all
   required — see the **Envío en vivo / Skydropx** section), optional `SKYDROPX_BASE_URL`

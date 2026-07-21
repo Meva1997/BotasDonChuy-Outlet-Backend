@@ -6,6 +6,7 @@ dotenv.config();
 
 const clientId = process.env.SKYDROPX_CLIENT_ID;
 const clientSecret = process.env.SKYDROPX_CLIENT_SECRET;
+const webhookSecret = process.env.SKYDROPX_WEBHOOK_SECRET;
 
 // Llaves exigidas: sin ellas ninguna cotización ni guía puede generarse, así que
 // fallamos rápido al arrancar en vez de descubrirlo en el primer checkout.
@@ -19,6 +20,14 @@ if (!clientSecret) {
     "SKYDROPX_CLIENT_SECRET no está configurada. Agrégala al .env (ver roadmap-skydropx.md §1 — usa la cuenta sandbox para desarrollo, las credenciales de producción quedan como SKYDROPX_CLIENT_SECRET_PROD).",
   );
 }
+// Secreto del webhook de Skydropx (Fase 8.6): con él se verifica la firma HMAC-SHA512 de
+// cada evento entrante. Hard-require igual que STRIPE_WEBHOOK_SECRET — un webhook sin
+// verificación de firma aceptaría eventos falsos, así que fallamos rápido si falta.
+if (!webhookSecret) {
+  throw new Error(
+    "SKYDROPX_WEBHOOK_SECRET no está configurada. Agrégala al .env (secreto HMAC del webhook de Skydropx — ver roadmap-skydropx.md §7). En el panel de Skydropx configura el webhook con autenticación HMAC y usa ahí el mismo secreto.",
+  );
+}
 
 /**
  * Credenciales OAuth2 client_credentials. `.env` apunta por defecto a la cuenta
@@ -27,6 +36,9 @@ if (!clientSecret) {
  */
 export const SKYDROPX_CLIENT_ID: string = clientId;
 export const SKYDROPX_CLIENT_SECRET: string = clientSecret;
+
+/** Secreto HMAC del webhook de Skydropx (Fase 8.6), para verificar la firma de cada evento. */
+export const SKYDROPX_WEBHOOK_SECRET: string = webhookSecret;
 
 /** Host activo — sandbox por defecto en desarrollo (ver roadmap-skydropx.md §1). */
 export const SKYDROPX_BASE_URL =

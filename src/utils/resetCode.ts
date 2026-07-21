@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { constantTimeEqual } from "./constantTimeEqual";
 
 /** Minutos de vigencia del código de recuperación antes de expirar. */
 export const RESET_CODE_TTL_MINUTES = 15;
@@ -27,8 +28,5 @@ export function hashResetCode(code: string): string {
  * (timingSafeEqual evita filtrar información por tiempo de respuesta).
  */
 export function verifyResetCode(code: string, storedHash: string): boolean {
-  const candidate = Buffer.from(hashResetCode(code), "hex");
-  const stored = Buffer.from(storedHash, "hex");
-  if (candidate.length !== stored.length) return false;
-  return crypto.timingSafeEqual(candidate, stored);
+  return constantTimeEqual(hashResetCode(code), storedHash);
 }

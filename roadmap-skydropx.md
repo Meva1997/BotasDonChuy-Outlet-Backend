@@ -4,7 +4,7 @@ Hoja de ruta de implementación para conectar Skydropx Pro a la tienda: cotizaci
 
 > **Cómo usarlo:** igual que `ROADMAP.md` — marca `[x]` cada tarea al completarla, en orden de fases (8.1 → 8.7). Cada fase incluye un bloque "Cómo verificar".
 
-> **Estado:** Fases 8.1–8.5 implementadas y probadas contra sandbox real; 8.6–8.7 pendientes.
+> **Estado:** Fases 8.1–8.5 implementadas y probadas contra sandbox real; 8.6 implementada (verificación HMAC probada localmente, falta confirmar un evento real de Skydropx end-to-end); 8.7 pendiente.
 
 ---
 
@@ -254,9 +254,9 @@ Fase 8.3 usó para `quotations`):**
       actuales de los `OrderItem` de la orden) y se persiste el `quotationId`/`rateId` frescos —
       **sin tocar** `order.shipping`/`order.total` (ya cobrados). Verificado end-to-end contra una
       orden real con cotización vencida: re-cotizó y generó la guía correctamente.
-- [ ] Email "tu pedido fue enviado" con `tracking` poblado — **movido a la Fase 8.6** (ver
+- [x] Email "tu pedido fue enviado" con `tracking` poblado — **hecho en la Fase 8.6** (ver
       corrección de spec arriba): no hay `tracking_number` que enviar hasta que el webhook lo
-      reporte.
+      reporte, así que el disparo vive en `applyShipmentUpdateFromWebhook`.
 
 **Cómo verificar:** ✅ Probado contra sandbox real con una orden `paid` existente:
 `createShipmentForOrder` detectó la cotización vencida, re-cotizó, creó la guía
@@ -271,15 +271,25 @@ mismo `void`).
 
 **Objetivo:** que los cambios de estado del paquete (`in_transit`, `delivered`, etc.) actualicen la orden sin polling manual — y, ya que es el primer punto que recibe ese dato, que también pueble `trackingNumber`/`trackingUrl`/`labelUrl` y dispare el correo de envío (ver la corrección de spec de la Fase 8.5: la creación de la guía es asíncrona, así que ese trabajo no podía hacerse ahí).
 
-**Tareas:**
-- [ ] `POST /api/webhooks/skydropx` en `src/routes/webhook.routes.ts` (mismo archivo que el de Stripe) — el mount `/api/webhooks` en `app.ts` **ya** usa `express.raw({ type: "application/json" })`, así que el cuerpo crudo que necesita la verificación HMAC ya está disponible sin cambios adicionales al middleware.
-- [ ] Verificación de firma: **HMAC-SHA512** sobre el cuerpo crudo con `SKYDROPX_WEBHOOK_SECRET`, comparación con `crypto.timingSafeEqual` (no `===`, para evitar timing attacks) contra el header `Authorization: HMAC <firma>`.
-- [ ] Manejar evento tipo `packages`: extraer el `shipment_id`/`tracking_number` para localizar la orden (`Order.findOne({ where: { skydropxShipmentId } })` — más directo que buscar por `trackingNumber`, que nace `null` y solo este webhook lo llena) y mapear `attributes.status` → `Order.status` (`shipped`/`delivered`) + `Order.shipmentStatus`.
-- [ ] **Heredado de la Fase 8.5** (ver su corrección de spec — la creación de la guía es asíncrona, `POST /shipments` no devuelve tracking): este webhook es el que primero recibe `tracking_number`/`label_url` (y la URL de rastreo del carrier, si el payload la trae), así que aquí se pueblan `Order.trackingNumber`/`trackingUrl`/`labelUrl` por primera vez.
-- [ ] **Heredado de la Fase 8.5**: en cuanto `trackingNumber` pasa de `null` a un valor (primera vez que este webhook lo reporta para la orden — guard idempotente igual que el correo de confirmación, para no reenviar en eventos de actualización posteriores como `delivered`), disparar el correo "tu pedido fue enviado" (`orderConfirmationTemplate` con `tracking: { number, url, carrier }`, fire-and-forget igual que `sendOrderConfirmationEmail`).
-- [ ] Firma inválida o ausente → `400`. Evento verificado (aunque el tipo no se maneje) → siempre `200 { received: true }`, mismo patrón que el webhook de Stripe, para que Skydropx no reintente en bucle.
+**⚠️ Shape del payload confirmado contra la documentación oficial (Context7
+`/websites/pro_skydropx_es-mx_api-docs`):** el evento de paquete es estilo JSON:API —
+`{ data: { type: "packages", attributes: { status, tracking_number, tracking_url_provider,
+label_url }, relationships: { shipment: { data: { id } }, order?: {...} } } }`. **Ojo:** `data.id`
+es el id del **paquete**, no del envío; el `skydropxShipmentId` que persistimos (el id de
+`shipments`) viaja en `relationships.shipment.data.id` — por ahí se localiza la orden. La URL de
+rastreo del carrier llega como `attributes.tracking_url_provider`. La firma es **HMAC-SHA512 sobre
+el cuerpo crudo, en hexadecimal minúsculas**, header `Authorization: HMAC <firma>` (Skydropx
+también admite un Bearer token estático, menos seguro; solo implementamos HMAC).
 
-**Cómo verificar:** enviar un payload de prueba con firma HMAC válida (generado con el mismo algoritmo) → `200` y la orden correspondiente cambia de estado. Con firma inválida → `400`, la orden no cambia.
+**Tareas:**
+- [x] `POST /api/webhooks/skydropx` en `src/routes/webhook.routes.ts` (mismo archivo que el de Stripe) — el mount `/api/webhooks` en `app.ts` **ya** usa `express.raw({ type: "application/json" })`, así que el cuerpo crudo que necesita la verificación HMAC ya está disponible sin cambios adicionales al middleware. El controlador `skydropxWebhook` vive en `order.controller.ts` (junto a `stripeWebhook`).
+- [x] Verificación de firma: **HMAC-SHA512** sobre el cuerpo crudo con `SKYDROPX_WEBHOOK_SECRET` (`verifySkydropxWebhookSignature` en `skydropx.service.ts`), comparación con `crypto.timingSafeEqual` (no `===`, para evitar timing attacks; previo chequeo de longitud, que `timingSafeEqual` exige) contra el header `Authorization: HMAC <firma>`. `SKYDROPX_WEBHOOK_SECRET` se agregó como hard-require en `config/skydropx.ts` (fail-fast al arrancar, igual que `STRIPE_WEBHOOK_SECRET`).
+- [x] Manejar evento tipo `packages`: extraer el `shipmentId` de `relationships.shipment.data.id` para localizar la orden (`Order.findOne({ where: { skydropxShipmentId } })` — más directo que buscar por `trackingNumber`, que nace `null` y solo este webhook lo llena) y mapear `attributes.status` → `Order.status` (`shipped`/`delivered`, **solo hacia adelante** vía `advanceOrderStatus` para no retroceder ante eventos fuera de orden; una orden `cancelled` no se reactiva) + `Order.shipmentStatus` (estado crudo íntegro). Toda la lógica vive en `applyShipmentUpdateFromWebhook` (`payment.service.ts`), tolerante a "orden no encontrada".
+- [x] **Heredado de la Fase 8.5** (ver su corrección de spec — la creación de la guía es asíncrona, `POST /shipments` no devuelve tracking): este webhook es el que primero recibe `tracking_number`/`label_url` (y la URL de rastreo del carrier, `tracking_url_provider`), así que aquí se pueblan `Order.trackingNumber`/`trackingUrl`/`labelUrl` por primera vez. Los `*Url` solo se escriben cuando llegan no nulos, para que un evento posterior que los omita no borre lo que uno anterior fijó.
+- [x] **Heredado de la Fase 8.5**: en cuanto `trackingNumber` pasa de `null` a un valor (primera vez que este webhook lo reporta para la orden — guard atómico `WHERE trackingNumber IS NULL` igual que el correo de confirmación, para no reenviar en eventos de actualización posteriores como `delivered`), disparar el correo "tu pedido va en camino" (`sendShipmentEmail` → `orderConfirmationTemplate` con `tracking: { number, url, carrier }`, fire-and-forget igual que `sendOrderConfirmationEmail`; ambos comparten ahora el helper `sendOrderEmail`).
+- [x] Firma inválida o ausente → `400`. Evento verificado (aunque el tipo no se maneje) → siempre `200 { received: true }`, mismo patrón que el webhook de Stripe, para que Skydropx no reintente en bucle.
+
+**Cómo verificar:** ✅ Verificación de firma probada localmente contra el código compilado: firma HMAC-SHA512 válida → `true`; firma incorrecta, header ausente, `Bearer` en vez de `HMAC` y cuerpo alterado → `false`. **Pendiente:** confirmar el flujo completo con un evento `packages` real de Skydropx (o un payload de prueba firmado, `POST` al endpoint) → `200` y la orden cambia de estado / se puebla el tracking / se dispara el correo; firma inválida → `400`, la orden no cambia.
 
 ---
 
@@ -342,7 +352,7 @@ Response: 200 { received: true } | 400 (firma inválida)
 - `SKYDROPX_CLIENT_ID` — ✅ ya en `.env` (requerida, hard-fail al arrancar si falta; **credencial sandbox** por defecto, ver §1).
 - `SKYDROPX_CLIENT_SECRET` — ✅ ya en `.env` (requerida, hard-fail al arrancar si falta; **credencial sandbox** por defecto, ver §1).
 - `SKYDROPX_BASE_URL` — ✅ ya en `.env` (`https://sb-pro.skydropx.com` por defecto; `https://pro.skydropx.com` guardado como `SKYDROPX_BASE_URL_PROD` para el lanzamiento).
-- `SKYDROPX_WEBHOOK_SECRET` — ❌ falta, agregar para verificar HMAC en Fase 8.6.
+- `SKYDROPX_WEBHOOK_SECRET` — ✅ ya en `.env` (requerida, hard-fail al arrancar si falta — igual que `STRIPE_WEBHOOK_SECRET`; secreto HMAC con el que se verifica la firma de cada evento en Fase 8.6). En producción, configurar el webhook en el panel de Skydropx con autenticación HMAC y usar el mismo secreto que Skydropx entregue.
 - `SHIP_FROM_POSTAL_CODE`, `SHIP_FROM_STATE`, `SHIP_FROM_CITY`, `SHIP_FROM_NEIGHBORHOOD` — ✅ ya en `.env` (requeridas desde Fase 8.3, `address_from` de cada cotización).
 - `SHIP_FROM_STREET`, `SHIP_FROM_EXTERNAL_NUMBER`, `SHIP_FROM_NAME`, `SHIP_FROM_PHONE` — ✅ ya en `.env` (requeridas desde Fase 8.5 — antes reservadas/opcionales, ahora hard-require: `createShipmentForOrder` las usa para el `address_from` de `POST /shipments`).
 
@@ -389,13 +399,13 @@ Response: 200 { received: true } | 400 (firma inválida)
 - [x] Guard de idempotencia propio (centinela `skydropxShipmentId` antes del `POST`, ver corrección de spec)
 - [x] Disparo fire-and-forget
 - [x] Re-cotización automática cuando el rate/quotation guardado ya no está disponible
-- [ ] Email "pedido enviado" con `tracking` poblado — movido a la Fase 8.6 (la guía se crea async, sin tracking disponible al pagar)
+- [x] Email "pedido enviado" con `tracking` poblado — hecho en la Fase 8.6 (la guía se crea async, sin tracking disponible al pagar)
 
 **Fase 8.6 — Webhook de Skydropx**
-- [ ] `POST /api/webhooks/skydropx` con verificación HMAC-SHA512
-- [ ] Actualización de `Order.status`/`shipmentStatus` desde eventos `packages`
-- [ ] Poblar `trackingNumber`/`trackingUrl`/`labelUrl` (heredado de la Fase 8.5, ver su corrección de spec)
-- [ ] Disparar el correo "pedido enviado" con `tracking` poblado (heredado de la Fase 8.5)
+- [x] `POST /api/webhooks/skydropx` con verificación HMAC-SHA512
+- [x] Actualización de `Order.status`/`shipmentStatus` desde eventos `packages` (avance solo hacia adelante)
+- [x] Poblar `trackingNumber`/`trackingUrl`/`labelUrl` (heredado de la Fase 8.5, ver su corrección de spec)
+- [x] Disparar el correo "pedido enviado" con `tracking` poblado (heredado de la Fase 8.5)
 
 **Fase 8.7 — Swagger**
 - [ ] Schemas `ShippingRate`/`ShippingRatesInput`/`ShippingRatesResponse`

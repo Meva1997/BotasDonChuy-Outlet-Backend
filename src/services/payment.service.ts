@@ -270,12 +270,23 @@ export async function createShipmentForOrder(order: Order): Promise<void> {
 }
 
 /**
- * Recarga la orden con sus `items` (sin `unitCost`) y envía el correo de confirmación.
- * Aislado y con try/catch propio para poder dispararse en segundo plano (fire-and-forget)
- * desde `markOrderPaidFromWebhook` sin bloquear la respuesta del webhook ni propagar
- * errores. `sendEmail` ya "loguea pero no lanza"; el try/catch cubre además la recarga.
+ * Recarga la orden con sus `items` (sin `unitCost`) y le manda un correo con el mismo
+ * `orderConfirmationTemplate`. Aislado y con try/catch propio para poder dispararse en segundo
+ * plano (fire-and-forget) desde los webhooks sin bloquear su respuesta ni propagar errores.
+ * `sendEmail` ya "loguea pero no lanza"; el try/catch cubre además la recarga.
+ *
+ * El template renderiza el bloque de rastreo cuando recibe `tracking` (correo "pedido enviado",
+ * Fase 8.6) y el placeholder "estamos preparando tu envío" cuando no (correo de confirmación,
+ * Fase 9.3) — de ahí que `sendOrderConfirmationEmail`/`sendShipmentEmail` compartan este helper.
  */
-async function sendOrderConfirmationEmail(order: Order): Promise<void> {
+async function sendOrderEmail(
+  order: Order,
+  opts: {
+    subject: string;
+    idempotencyKey: string;
+    tracking?: { number: string; url?: string; carrier?: string };
+  },
+): Promise<void> {
   try {
     await order.reload({
       include: [
@@ -284,7 +295,7 @@ async function sendOrderConfirmationEmail(order: Order): Promise<void> {
     });
     await sendEmail({
       to: order.customerEmail,
-      subject: `Confirmación de tu pedido #${order.id} — Botas Don Chuy Outlet`,
+      subject: opts.subject,
       html: orderConfirmationTemplate({
         orderId: order.id,
         createdAt: order.createdAt,
@@ -309,15 +320,207 @@ async function sendOrderConfirmationEmail(order: Order): Promise<void> {
           references: order.references,
         },
         shippingCarrier: order.shippingCarrier,
+        tracking: opts.tracking,
       }),
-      idempotencyKey: `order-confirmation/${order.id}`,
+      idempotencyKey: opts.idempotencyKey,
     });
   } catch (err) {
-    console.error(
-      "[email] No se pudo enviar la confirmación de pedido:",
-      err,
+    console.error("[email] No se pudo enviar el correo del pedido:", err);
+  }
+}
+
+/** Correo de confirmación de pago (Fase 9.3), sin datos de rastreo. */
+function sendOrderConfirmationEmail(order: Order): Promise<void> {
+  return sendOrderEmail(order, {
+    subject: `Confirmación de tu pedido #${order.id} — Botas Don Chuy Outlet`,
+    idempotencyKey: `order-confirmation/${order.id}`,
+  });
+}
+
+/** Correo "tu pedido va en camino" (Fase 8.6), con el número de guía ya disponible. */
+function sendShipmentEmail(
+  order: Order,
+  tracking: { number: string; url?: string; carrier?: string },
+): Promise<void> {
+  return sendOrderEmail(order, {
+    subject: `Tu pedido #${order.id} va en camino — Botas Don Chuy Outlet`,
+    idempotencyKey: `order-shipped/${order.id}`,
+    tracking,
+  });
+}
+
+/**
+ * Rango de avance del `status` de una orden para aplicar las actualizaciones del webhook de
+ * Skydropx SOLO hacia adelante: un evento tardío o fuera de orden (p. ej. un `in_transit` que
+ * llega después de un `delivered`) nunca debe retroceder la orden. Una orden `cancelled` no se
+ * reactiva desde este webhook (no está en el rango, así que queda excluida del avance).
+ */
+const ORDER_STATUS_RANK: Record<string, number> = {
+  pending: 0,
+  paid: 1,
+  shipped: 2,
+  delivered: 3,
+};
+
+/**
+ * Mapea el `status` del paquete de Skydropx al `status` destino de la orden, o `null` si el evento
+ * no representa un avance con actividad real de rastreo. Un status ausente/vacío NO avanza la orden:
+ * sin evidencia de rastreo no hay por qué marcarla `shipped` (la creación de la guía es asíncrona y
+ * puede emitir un primer evento sin estado). `delivered` → `delivered`; cualquier otro estado con
+ * actividad → `shipped`. El estado crudo de Skydropx se guarda íntegro en `Order.shipmentStatus`,
+ * así que este mapeo grueso no pierde información.
+ */
+function targetOrderStatus(packageStatus: string | null): "shipped" | "delivered" | null {
+  if (!packageStatus) return null; // sin status no hay actividad que reportar: no avanzar
+  return packageStatus.toLowerCase() === "delivered" ? "delivered" : "shipped";
+}
+
+/**
+ * Status estrictamente por debajo de `target` en `ORDER_STATUS_RANK`: los únicos desde los que el
+ * avance solo-hacia-adelante puede saltar a `target`. Se usa como `WHERE status IN (...)` para que
+ * el avance sea atómico a nivel de BD — dos eventos concurrentes/fuera de orden no pueden retroceder
+ * la orden. `cancelled` no está en el rango, así que nunca aparece aquí (no se reactiva).
+ */
+function statusesBelow(target: "shipped" | "delivered"): string[] {
+  const targetRank = ORDER_STATUS_RANK[target];
+  return Object.keys(ORDER_STATUS_RANK).filter((s) => ORDER_STATUS_RANK[s] < targetRank);
+}
+
+/**
+ * Normaliza una cadena que puede venir en blanco: `""` o solo espacios → `null`; en otro caso, la
+ * cadena recortada. Skydropx puede mandar un campo presente pero vacío, y un truthy check trataría
+ * `""` como ausente pero `"   "` (solo espacios) como presente — normalizar aquí evita que un
+ * tracking en blanco dispare el correo o se persista como valor "real".
+ */
+function blankToNull(value: string | null): string | null {
+  if (value == null) return null;
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+/**
+ * Resultado de procesar un evento del webhook de Skydropx:
+ *  - `applied`     → se encontró la orden y se actualizó.
+ *  - `retry-later` → no hay orden para ese envío todavía, pero alguna guía está en creación
+ *                    (centinela `"creating"`); el evento puede ser para ella una vez persistido su
+ *                    id real, así que se le pide a Skydropx que reintente (el controlador responde 503).
+ *  - `unknown`     → no hay orden ni guía en creación: envío ajeno, se descarta con 200.
+ */
+export type ShipmentWebhookResult = "applied" | "retry-later" | "unknown";
+
+/** Evento de paquete de Skydropx ya extraído del payload del webhook (ver `skydropxWebhook`). */
+export interface SkydropxPackageEvent {
+  shipmentId: string;
+  status: string | null;
+  trackingNumber: string | null;
+  trackingUrl: string | null;
+  labelUrl: string | null;
+}
+
+/**
+ * Aplica a la orden un evento de paquete ya verificado del webhook de Skydropx (Fase 8.6).
+ * Tolerante a "orden no encontrada" (loguea y retorna, nunca lanza) para que un evento verificado
+ * siempre responda 200 y Skydropx no reintente en bucle por un envío ajeno.
+ *
+ * La creación de la guía es asíncrona (ver `createShipmentForOrder`): `POST /shipments` no
+ * devuelve `tracking_number`/`label_url`, así que este webhook es el PRIMER punto que los recibe.
+ * Puebla `trackingNumber`/`trackingUrl`/`labelUrl`/`shipmentStatus`, avanza `Order.status`
+ * (`shipped`/`delivered`, solo hacia adelante) y dispara el correo "pedido enviado" exactamente
+ * una vez —la primera vez que llega un `tracking_number`— con un guard atómico
+ * `WHERE trackingNumber IS NULL` (mismo patrón que el correo de confirmación): serializa a nivel
+ * de BD para no reenviar en los eventos de actualización posteriores (`in_transit`, `delivered`).
+ */
+export async function applyShipmentUpdateFromWebhook(
+  event: SkydropxPackageEvent,
+): Promise<ShipmentWebhookResult> {
+  // Normaliza los campos del evento: `""`/solo-espacios → `null` (ver `blankToNull`), así un
+  // tracking en blanco no dispara el correo ni se persiste como valor "real".
+  const status = blankToNull(event.status);
+  const trackingNumber = blankToNull(event.trackingNumber);
+  const trackingUrl = blankToNull(event.trackingUrl);
+  const labelUrl = blankToNull(event.labelUrl);
+
+  const order = await Order.findOne({
+    where: { skydropxShipmentId: event.shipmentId },
+  });
+  if (!order) {
+    // La guía puede existir ya en Skydropx pero aún no estar persistida: `createShipmentForOrder`
+    // marca la fila con el centinela `"creating"` ANTES del `POST /shipments` y solo escribe el id
+    // real al volver. Si un webhook llega en esa ventana, todavía no hay fila que encontrar por el
+    // `skydropxShipmentId` real. En vez de descartarlo (perdiéndolo para siempre), se le pide a
+    // Skydropx que reintente: cuando reintente, el id real ya estará persistido y el evento
+    // encontrará su orden. Solo se pide reintento si HAY una guía en creación; un envío realmente
+    // ajeno se descarta con 200 para no entrar en bucle de reintentos.
+    const pendingCreation = await Order.count({
+      where: { skydropxShipmentId: SHIPMENT_CREATION_SENTINEL },
+    });
+    if (pendingCreation > 0) {
+      console.warn(
+        `[skydropx] webhook de paquete para el envío ${event.shipmentId} llegó mientras una guía se está creando; se pedirá reintento.`,
+      );
+      return "retry-later";
+    }
+    console.warn(
+      `[skydropx] webhook de paquete sin orden asociada (skydropxShipmentId ${event.shipmentId}).`,
+    );
+    return "unknown";
+  }
+
+  // Campos "último gana": estado crudo + urls. Se escriben en todo evento. Los `*Url` solo cuando
+  // vienen no nulos, para que un evento posterior que los omita no borre lo que uno anterior fijó.
+  const fieldUpdates: {
+    shipmentStatus: string | null;
+    trackingUrl?: string;
+    labelUrl?: string;
+  } = { shipmentStatus: status };
+  if (trackingUrl) fieldUpdates.trackingUrl = trackingUrl;
+  if (labelUrl) fieldUpdates.labelUrl = labelUrl;
+
+  // Avance de `status` SOLO hacia adelante y atómico a nivel de BD: el objetivo se decide por el
+  // `status` del paquete, pero el `WHERE status IN (<rangos por debajo>)` deja que la BD serialice
+  // el cambio, así dos eventos concurrentes o fuera de orden no pueden retroceder la orden (p. ej.
+  // un `in_transit` tardío tras un `delivered` no afecta ninguna fila). Va en su propio UPDATE (no
+  // dentro de `fieldUpdates`) porque su condición de guarda es distinta: `fieldUpdates` es
+  // "último gana" y el status es "solo hacia adelante".
+  const target = targetOrderStatus(status);
+  if (target) {
+    await Order.update(
+      { status: target },
+      { where: { id: order.id, status: { [Op.in]: statusesBelow(target) } } },
     );
   }
+
+  // Guard atómico del correo "pedido enviado": solo la PRIMERA vez que llega un número de guía se
+  // reclama con `WHERE trackingNumber IS NULL` y se dispara el correo. El intento se omite cuando el
+  // snapshot ya muestra un `trackingNumber` (caso común de los eventos de actualización posteriores),
+  // ahorrando un UPDATE no-op seguido de su fallback; el `WHERE trackingNumber IS NULL` sigue
+  // serializando el caso de dos primeros eventos concurrentes.
+  let shipmentEmailClaimed = false;
+  if (trackingNumber && order.trackingNumber == null) {
+    const [claimed] = await Order.update(
+      { ...fieldUpdates, trackingNumber },
+      { where: { id: order.id, trackingNumber: null } },
+    );
+    shipmentEmailClaimed = claimed === 1;
+    if (!shipmentEmailClaimed) {
+      // Otra ejecución concurrente ya reclamó el trackingNumber: solo persistir estado/urls.
+      await Order.update(fieldUpdates, { where: { id: order.id } });
+    }
+  } else {
+    // Sin número de guía nuevo (o ya estaba): solo actualizar estado/urls, sin re-disparar el correo.
+    await Order.update(fieldUpdates, { where: { id: order.id } });
+  }
+
+  if (shipmentEmailClaimed) {
+    // Fire-and-forget, misma razón que en los demás correos: no debe bloquear el 200 del webhook.
+    void sendShipmentEmail(order, {
+      number: trackingNumber!,
+      url: trackingUrl ?? undefined,
+      carrier: order.shippingCarrier ?? undefined,
+    });
+  }
+
+  return "applied";
 }
 
 /**
