@@ -376,6 +376,39 @@ const options: Options = {
                 "Dato operativo SOLO para el panel admin (se excluye de la respuesta pública de POST /api/orders): true = la paquetería elegida no recoge a domicilio, el dueño debe llevar el paquete a su sucursal. null cuando la orden usó la tarifa plana de respaldo o es previa a esta columna.",
               example: false,
             },
+            skydropxShipmentId: {
+              type: "string",
+              nullable: true,
+              description:
+                "id de la guía (shipment) creada en Skydropx al confirmarse el pago. null antes de pagar, si la orden usó la tarifa plana de respaldo (sin rate de Skydropx que convertir en guía), o mientras se reclama con el valor centinela \"creating\" (ver createShipmentForOrder).",
+              example: "ship_7c1a9e",
+            },
+            trackingNumber: {
+              type: "string",
+              nullable: true,
+              description:
+                "Número de guía. La creación de la guía es asíncrona: queda null hasta que el webhook de Skydropx (POST /api/webhooks/skydropx) lo reporte.",
+              example: "ESF1234567890",
+            },
+            trackingUrl: {
+              type: "string",
+              nullable: true,
+              description: "URL de rastreo de la paquetería. Igual que trackingNumber, la llena el webhook de Skydropx.",
+              example: "https://www.estafeta.com/Rastreo/ESF1234567890",
+            },
+            labelUrl: {
+              type: "string",
+              nullable: true,
+              description: "URL de la etiqueta/guía imprimible. La llena el webhook de Skydropx.",
+              example: "https://cdn.skydropx.com/labels/ship_7c1a9e.pdf",
+            },
+            shipmentStatus: {
+              type: "string",
+              nullable: true,
+              description:
+                "Último estado crudo reportado por el webhook de Skydropx (p. ej. \"in_transit\", \"delivered\"). null hasta el primer evento.",
+              example: "in_transit",
+            },
             items: {
               type: "array",
               items: { $ref: "#/components/schemas/OrderItem" },

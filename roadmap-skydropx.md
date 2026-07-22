@@ -4,7 +4,7 @@ Hoja de ruta de implementación para conectar Skydropx Pro a la tienda: cotizaci
 
 > **Cómo usarlo:** igual que `ROADMAP.md` — marca `[x]` cada tarea al completarla, en orden de fases (8.1 → 8.7). Cada fase incluye un bloque "Cómo verificar".
 
-> **Estado:** Fases 8.1–8.5 implementadas y probadas contra sandbox real; 8.6 implementada (verificación HMAC probada localmente, falta confirmar un evento real de Skydropx end-to-end); 8.7 pendiente.
+> **Estado:** Fases 8.1–8.5 implementadas y probadas contra sandbox real; 8.6 implementada (verificación HMAC probada localmente, falta confirmar un evento real de Skydropx end-to-end); 8.7 (Swagger) completada.
 
 ---
 
@@ -298,12 +298,12 @@ también admite un Bearer token estático, menos seguro; solo implementamos HMAC
 **Objetivo:** documentar los endpoints nuevos antes de comitear, por el Workflow de [CLAUDE.md](CLAUDE.md) ("Whenever a commit/push adds or changes routes... la documentación Swagger MUST be written/updated first").
 
 **Tareas:**
-- [ ] `components.schemas` nuevos en `src/config/swagger.ts`: `ShippingRatesInput`, `ShippingRate`, `ShippingRatesResponse`.
-- [ ] Tag nuevo `Shipping` (o reutilizar `Orders` si se prefiere agrupar).
-- [ ] Bloques `@openapi` JSDoc sobre `POST /api/shipping/rates` y `POST /api/webhooks/skydropx`.
-- [ ] Actualizar los schemas existentes `CreateOrderInput` (agregar `quotationId`/`rateId`) y `Order` (agregar las columnas nuevas de §5).
+- [x] `components.schemas` nuevos en `src/config/swagger.ts`: `ShippingRatesInput`, `ShippingRate`, `ShippingRatesResponse`.
+- [x] Tag nuevo `Shipping`.
+- [x] Bloques `@openapi` JSDoc sobre `POST /api/shipping/rates` y `POST /api/webhooks/skydropx`.
+- [x] Actualizar los schemas existentes `CreateOrderInput` (agregar `quotationId`/`rateId`) y `Order` (agregar las columnas nuevas de §5: `skydropxShipmentId`, `trackingNumber`, `trackingUrl`, `labelUrl`, `shipmentStatus` — `skydropxQuotationId`/`skydropxRateId` ya estaban).
 
-**Cómo verificar:** `GET /api/docs.json` incluye los schemas y paths nuevos; `/api/docs` los renderiza correctamente en la UI.
+**Cómo verificar:** ✅ Verificado contra el build compilado (`dist/config/swagger.js`): `swaggerSpec.paths` incluye `/api/shipping/rates` y `/api/webhooks/skydropx`, el schema `Order` lista las 5 columnas nuevas, el tag `Shipping` está registrado, y cada `$ref` usado en `src/routes/*.ts` resuelve contra un schema/response declarado (sin referencias colgantes). `pnpm build`/`tsc --noEmit` sin errores.
 
 ---
 
@@ -408,8 +408,8 @@ Response: 200 { received: true } | 400 (firma inválida)
 - [x] Disparar el correo "pedido enviado" con `tracking` poblado (heredado de la Fase 8.5)
 
 **Fase 8.7 — Swagger**
-- [ ] Schemas `ShippingRate`/`ShippingRatesInput`/`ShippingRatesResponse`
-- [ ] `@openapi` en rutas nuevas
-- [ ] `CreateOrderInput`/`Order` actualizados
+- [x] Schemas `ShippingRate`/`ShippingRatesInput`/`ShippingRatesResponse`
+- [x] `@openapi` en rutas nuevas
+- [x] `CreateOrderInput`/`Order` actualizados
 
-**Al terminar:** marcar la casilla `Skydropx POST /api/shipping/rates` en [ROADMAP.md](ROADMAP.md) §Fase 8 y §7 (checklist maestro).
+**Al terminar:** marcar la casilla `Skydropx POST /api/shipping/rates` en [ROADMAP.md](ROADMAP.md) §Fase 8 y §7 (checklist maestro). — ✅ hecho.
