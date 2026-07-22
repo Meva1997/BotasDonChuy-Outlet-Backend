@@ -7,11 +7,15 @@ Construido con Express 5, TypeScript y Sequelize sobre PostgreSQL.
 
 - **Runtime:** Node.js + TypeScript
 - **Framework:** Express 5
-- **ORM:** Sequelize 6 (PostgreSQL)
+- **ORM:** Sequelize 6 (PostgreSQL), migraciones versionadas con `sequelize-cli`
 - **Seguridad:** Helmet, CORS, express-rate-limit, bcrypt, JSON Web Tokens
 - **Validación:** Zod
 - **Documentación API:** Swagger UI (OpenAPI 3.0) vía swagger-jsdoc + swagger-ui-express
 - **Imágenes:** Cloudinary + multer (subida en memoria → `upload_stream`)
+- **Pagos:** Stripe (PaymentIntents + webhook firmado, test/sandbox)
+- **Envíos:** Skydropx Pro (cotización en vivo, guía automática, webhook de estado)
+- **Emails transaccionales:** Resend
+- **Logging y monitoreo:** pino (+ pino-pretty en dev) y Sentry (`@sentry/node`, opcional)
 - **Gestor de paquetes:** pnpm
 
 ## Requisitos
@@ -78,8 +82,10 @@ SENTRY_DSN=https://...ingest.sentry.io/...  # opcional: si falta, Sentry queda d
 ALERT_EMAIL_TO=tu_correo@ejemplo.com     # opcional: destino de las alertas operativas (correo vía Resend)
 ```
 
-> En `NODE_ENV=development` los modelos se sincronizan automáticamente con
-> `sequelize.sync({ alter: true })`.
+> **El esquema nunca se sincroniza automáticamente**, ni siquiera en desarrollo. `connectDB()`
+> solo autentica la conexión; todo cambio de esquema pasa por una migración versionada
+> (`pnpm migrate`, ver [Migraciones](#migraciones)) — dev y prod comparten exactamente el mismo
+> camino de cambios.
 
 > **Stripe (solo test/sandbox por ahora).** El PaymentIntent y el webhook son reales, con
 > llaves de test. Para obtener el `STRIPE_WEBHOOK_SECRET` en local y probar los eventos, ver
@@ -87,12 +93,39 @@ ALERT_EMAIL_TO=tu_correo@ejemplo.com     # opcional: destino de las alertas oper
 
 ## Scripts
 
-| Comando      | Descripción                                          |
-| ------------ | ---------------------------------------------------- |
-| `pnpm dev`   | Servidor en desarrollo con recarga (`ts-node-dev`)   |
-| `pnpm build` | Compila TypeScript a `dist/` (`tsc`)                 |
-| `pnpm start` | Ejecuta la build de producción (`node dist/app.js`)  |
-| `pnpm seed`  | Llena la base de datos con productos, histórico de ventas, usuario admin semilla y configuración de marca (`src/seed.ts`) |
+| Comando               | Descripción                                          |
+| ---------------------- | ---------------------------------------------------- |
+| `pnpm dev`              | Servidor en desarrollo con recarga (`ts-node-dev`)   |
+| `pnpm build`            | Compila TypeScript a `dist/` (`tsc`)                 |
+| `pnpm start`            | Ejecuta la build de producción (`node dist/app.js`)  |
+| `pnpm seed`             | Llena la base de datos con productos, histórico de ventas, usuario admin semilla y configuración de marca (`src/seed.ts`) |
+| `pnpm migrate`          | Aplica las migraciones de esquema pendientes (`sequelize-cli db:migrate`) |
+| `pnpm migrate:undo`     | Revierte la última migración aplicada (`db:migrate:undo`) |
+| `pnpm migrate:undo:all` | Revierte **todas** las migraciones (`db:migrate:undo:all`) |
+| `pnpm migrate:status`   | Lista qué migraciones están aplicadas y cuáles pendientes (`db:migrate:status`) |
+
+## Migraciones
+
+El esquema se versiona con `sequelize-cli`, driveado por `.sequelizerc` (registra
+`ts-node/register` para que las migraciones se escriban en TypeScript como el resto del repo, y
+apunta `migrations-path`/`seeders-path`/`models-path` a `src/migrations`/`src/seeders`/
+`src/models`). La config de conexión del CLI vive en `src/config/sequelize-cli.js` (JS plano, no
+compilado por `tsc` — como el CLI nunca importa `app.ts`, carga su propio `dotenv.config()`) y
+resuelve `DATABASE_URL` igual que la app.
+
+`src/migrations/` reconstruye el esquema actual como una migración `createTable` por tabla, en
+orden de dependencias (`products` → `product_sizes` → `orders` → `order_items` → `adminusers` →
+`brand_settings`), más las migraciones incrementales que fueron llegando después (p. ej.
+`order-refund-fields`, que agrega `refunded` al enum `paymentStatus` y las columnas de reembolso).
+
+```bash
+pnpm migrate         # aplica las migraciones pendientes
+pnpm migrate:status   # verifica qué quedó aplicado
+```
+
+> **Al agregar o modificar una columna/tabla**, escribe la migración correspondiente en
+> `src/migrations/` — no hay `sync({ alter: true })` de respaldo que la replique en ningún
+> ambiente, desarrollo incluido.
 
 ## Endpoints
 
@@ -113,8 +146,10 @@ ALERT_EMAIL_TO=tu_correo@ejemplo.com     # opcional: destino de las alertas oper
 | `POST`   | `/api/admin/products/:id/images` | ✅ | Sube de 1 a 3 imágenes del producto a Cloudinary |
 | `DELETE` | `/api/admin/products/:id/images` | ✅ | Borra una imagen del producto (por `publicId`) de Cloudinary |
 | `POST`   | `/api/orders`                 | —    | Checkout: crea un pedido desde el carrito          |
+| `POST`   | `/api/shipping/rates`         | —    | Cotiza tarifas de envío en vivo (Skydropx) para el carrito, con fallback a tarifa plana |
 | `GET`    | `/api/admin/dashboard`        | ✅   | Métricas agregadas del panel (KPIs, ingresos, ventas recientes, inventario) |
 | `GET`    | `/api/admin/orders`           | ✅   | Lista paginada de pedidos con sus items (incl. `unitCost`) |
+| `POST`   | `/api/admin/orders/:id/cancel` | ✅  | Cancela manualmente un pedido `pending`/`paid` (reembolso real vía Stripe si ya estaba pagado) |
 | `GET`    | `/api/admin/reports/monthly`  | ✅   | Ventas por mes por producto (`MonthlyReport[]`; mes en curso con `partial`) |
 | `GET`    | `/api/admin/reports/replenishment` | ✅ | Reposición sugerida (`ReplenishmentRow[]`; pronóstico + cobertura + margen) |
 | `GET`    | `/api/admin/brand`            | —    | Identidad de marca (lectura pública, crea el singleton con defaults si falta) |
@@ -220,6 +255,23 @@ cuando aplica, cuántas piezas quedan. Ver **Errores y mensajes** más abajo.
 `GET /api/admin/orders` devuelve una página de órdenes (`page`/`perPage`, `perPage` por defecto
 `20`) con sus `items`, más recientes primero, sin excluir `unitCost` (a diferencia de las rutas
 públicas). Responde con `{ orders, total, page, perPage, totalPages }`.
+
+### `POST /api/admin/orders/:id/cancel` (cancelación/reembolso manual)
+
+Para cuando un cliente pide cancelar fuera del flujo normal (WhatsApp, llamada). Body opcional
+`{ reason? }`. Solo son cancelables `pending` y `paid`; un pedido `shipped`/`delivered` (ya tiene
+guía generada, no se restockea) o ya `cancelled` responde `409`.
+
+- **`pending`** → libera el stock reservado (`releaseOrderStock`) y, si tenía un `paymentIntentId`,
+  intenta cancelarlo en Stripe (best-effort, para no dejarlo huérfano).
+- **`paid`** → primero emite un **reembolso real y total** en Stripe
+  (`stripe.refunds.create` con `idempotencyKey: refund-order-${id}`, así que dos cancelaciones
+  concurrentes nunca reembolsan dos veces) y **solo después** restockea, dentro de una transacción
+  que re-verifica `status === "paid"` bajo `FOR UPDATE` (una segunda cancelación concurrente ya la
+  encuentra cerrada). Queda en `status: "cancelled"` / `paymentStatus: "refunded"` con
+  `refundId`/`refundedAt` poblados.
+- Si el reembolso en Stripe **falla**, nunca se restockea (el dinero no volvió): se loguea, se
+  reporta a Sentry, se dispara una alerta operativa por correo y responde `502`.
 
 ### `GET /api/admin/reports/monthly` y `/replenishment` (reportes)
 
@@ -399,6 +451,35 @@ PNG/JPEG/WEBP) y se suben con `upload_stream` (`src/services/image.service.ts`) 
   rompería la imagen en la tienda). Los errores de multer (tamaño/formato/campo inesperado) se mapean
   a `400` en el `errorHandler`.
 
+## Logging y monitoreo
+
+`src/config/logger.ts` exporta una instancia compartida de **pino** (`logger`), usada en cada cron,
+webhook o envío en segundo plano que antes usaba `console.*` — nivel `info` en producción (una
+línea JSON por registro) / `debug` en desarrollo (con `pino-pretty`), configurable con `LOG_LEVEL`.
+No hay middleware de logging de requests (`pino-http`): todo lo que se loguea aquí es un
+cron/webhook/envío en background, no tráfico HTTP normal.
+
+`src/config/sentry.ts` inicializa `@sentry/node` **solo si `SENTRY_DSN` está definido** (si falta,
+continúa con solo un warning en el log) — a diferencia de Stripe/Resend/Cloudinary/Skydropx, Sentry
+es monitoreo opcional, no una dependencia del negocio. Se importa como la primera línea de
+`src/app.ts`, antes incluso que `express`, para estar armado antes de que cualquier otro módulo de
+configuración pueda lanzar por una env var faltante. El manejador global de errores reporta a Sentry
+todo error no controlado que llegue al `500`.
+
+`src/services/alert.service.ts` envía correos operativos (vía Resend) a `ALERT_EMAIL_TO` (opcional
+— si falta, no hace nada y solo loguea un warning) en dos casos: falla al generar una guía de
+Skydropx después de haber pagado el pedido (`createShipmentForOrder`), y fallas repetidas (3
+seguidas) del barrido de órdenes pendientes contra Stripe para la misma orden. Estos son avisos
+operativos, no un sistema de reintentos automáticos.
+
+## Apagado ordenado (graceful shutdown)
+
+`SIGTERM`/`SIGINT` disparan un `gracefulShutdown` compartido en `src/app.ts` que: (1) detiene el
+`pendingOrderSweeper` (deja de abrir trabajo nuevo), (2) `server.close()` — deja de aceptar
+conexiones nuevas y espera a que terminen las que están en vuelo, (3) cierra el pool de Sequelize.
+Así un redeploy no corta una transacción de checkout a medias. Señales repetidas se ignoran, y un
+timeout de 10s (`unref()`ado) fuerza `process.exit(1)` si alguna conexión colgada bloquea el cierre.
+
 ## Errores y mensajes
 
 Todos los errores salen del `errorHandler` (`src/middlewares/errorHandler.ts`) como
@@ -459,69 +540,87 @@ anotaciones JSDoc `@openapi` sobre su router en `src/routes/*.ts`.
 ## Estructura
 
 ```
+.sequelizerc                     # Config de sequelize-cli (ts-node/register + rutas de migrations/seeders/models)
 src/
-├── app.ts                       # Punto de entrada: Express, middleware y arranque
+├── app.ts                       # Punto de entrada: Express, middleware, arranque y apagado ordenado
 ├── seed.ts                      # Script de seed (productos, histórico, admin, marca)
 ├── config/
 │   ├── database.ts              # Conexión Sequelize a PostgreSQL
+│   ├── sequelize-cli.js         # Config de conexión para sequelize-cli (JS plano, dotenv propio)
 │   ├── stripe.ts                # Cliente Stripe + llaves exigidas (test/sandbox)
 │   ├── cloudinary.ts            # Cliente Cloudinary + llaves exigidas (fail-fast al arrancar)
 │   ├── resend.ts                # Cliente Resend + RESEND_API_KEY/EMAIL_FROM exigidos (fail-fast)
+│   ├── skydropx.ts              # Cliente/llaves de Skydropx + SHIP_FROM_* exigidos (fail-fast)
+│   ├── logger.ts                # Instancia compartida de pino (structured logging)
+│   ├── sentry.ts                # Inicializa @sentry/node si SENTRY_DSN está definido (opcional)
+│   ├── zod.ts                   # z.config(z.locales.es()) — mensajes por defecto de zod en español
 │   └── swagger.ts               # Spec OpenAPI base (swagger-jsdoc) servida en /api/docs
 ├── controllers/
-│   ├── product.controller.ts    # Lógica de productos (listar, obtener por id)
-│   ├── auth.controller.ts       # Login, forgot-password, me
-│   ├── order.controller.ts      # Checkout (POST /api/orders) + admin orders + webhook de pagos
+│   ├── product.controller.ts    # Lógica de productos (listar, obtener por id, CRUD admin)
+│   ├── auth.controller.ts       # Login, forgot-password, verify-reset-code, reset-password, me
+│   ├── order.controller.ts      # Checkout, admin orders, cancelación manual, webhooks de Stripe/Skydropx
+│   ├── shipping.controller.ts   # POST /api/shipping/rates (cotización en vivo)
 │   ├── dashboard.controller.ts  # GET /api/admin/dashboard
 │   ├── reports.controller.ts    # GET /api/admin/reports/monthly y /replenishment
-│   ├── brand.controller.ts      # GET/PUT /api/admin/brand
+│   ├── brand.controller.ts      # GET/PUT /api/admin/brand + POST/DELETE del logo
 │   └── adminUser.controller.ts  # /api/admin/users + PUT /api/admin/account
 ├── middlewares/
 │   ├── AppError.ts               # Clase de error con status code para respuestas controladas
 │   ├── asyncHandler.ts            # Wrapper para controllers async (evita try/catch repetido)
 │   ├── errorHandler.ts            # Middleware centralizado de manejo de errores
-│   ├── rateLimit.ts               # authRateLimiter: 10 req / 15 min en rutas de auth
+│   ├── rateLimit.ts               # authRateLimiter / shippingRateLimiter / orderRateLimiter
 │   ├── requireAuth.ts             # Verifica JWT Bearer, adjunta req.user; requireRole helper
 │   └── upload.ts                  # multer en memoria (uploadProductImages / uploadLogo)
 ├── routes/
 │   ├── product.routes.ts        # Rutas /api/products
-│   ├── adminProduct.routes.ts   # Rutas /api/admin/products (CRUD admin, requireAuth)
+│   ├── adminProduct.routes.ts   # Rutas /api/admin/products (CRUD admin + imágenes, requireAuth)
 │   ├── auth.routes.ts           # Rutas /api/auth
 │   ├── order.routes.ts          # Ruta /api/orders (checkout público)
-│   ├── adminOrder.routes.ts     # Ruta /api/admin/orders (requireAuth)
+│   ├── adminOrder.routes.ts     # Rutas /api/admin/orders (listado + cancelación manual, requireAuth)
 │   ├── adminDashboard.routes.ts # Ruta /api/admin/dashboard (requireAuth)
 │   ├── adminReports.routes.ts   # Rutas /api/admin/reports/* (requireAuth)
-│   ├── brand.routes.ts          # Ruta /api/admin/brand (GET pública, PUT requireAuth)
+│   ├── shipping.routes.ts       # Ruta /api/shipping/rates (cotización en vivo, pública)
+│   ├── brand.routes.ts          # Ruta /api/admin/brand (GET pública, PUT/logo requireAuth)
 │   ├── adminUser.routes.ts      # Rutas /api/admin/users (requireAuth)
 │   ├── account.routes.ts        # Ruta /api/admin/account (requireAuth)
-│   └── webhook.routes.ts        # Ruta /api/webhooks/stripe (webhook de Stripe, firma verificada)
+│   └── webhook.routes.ts        # Rutas /api/webhooks/stripe y /api/webhooks/skydropx (firma verificada)
 ├── schemas/
-│   ├── auth.ts                   # Esquema zod de login
+│   ├── auth.ts                   # Esquemas zod de login y recuperación de contraseña
 │   ├── checkout.ts                # Esquema zod de envío/checkout
+│   ├── shipping.ts                # Esquema zod de cotización de envío
 │   ├── product.ts                 # Esquema zod de producto
 │   ├── brand.ts                   # Esquema zod de update parcial de BrandSettings
 │   └── adminUser.ts               # Esquemas zod de alta de usuario y update de cuenta propia
 ├── services/
 │   ├── cart.ts                    # computeTotals, computeShipping, SHIPPING_BY_TYPE
-│   ├── orders.service.ts          # Checkout: stock atómico, totales, precios congelados; releaseOrderStock (restock)
-│   ├── payment.service.ts         # Stripe: crea PaymentIntent, concilia pagos/fallos del webhook; manda el correo de confirmación al pasar a paid
+│   ├── orders.service.ts          # Checkout: stock atómico, totales, precios congelados; releaseOrderStock / cancelOrderByAdmin
+│   ├── payment.service.ts         # Stripe: PaymentIntent, concilia pagos/fallos/reembolsos, crea guía Skydropx, dispara correos
 │   ├── pendingOrderSweeper.ts     # Barrido de órdenes pending abandonadas (libera stock, reconcilia con Stripe)
+│   ├── skydropx.service.ts        # Cliente REST de Skydropx (OAuth2, throttle 2 req/s, cotización, guía, poll)
+│   ├── packing.ts                 # buildParcel: arma una sola caja apilada por pedido
+│   ├── productAvailability.ts     # assertProductAvailable: guardia compartida checkout/cotización
+│   ├── alert.service.ts           # sendAlertEmail: avisos operativos (guía fallida, sweeper con fallas repetidas)
 │   ├── image.service.ts           # Cloudinary: sube buffer (upload_stream) y borra asset (destroy)
 │   ├── email.service.ts           # sendEmail(...) sobre Resend; loguea pero nunca lanza
 │   ├── email/templates/           # Plantillas HTML como funciones (passwordResetCode.ts, orderConfirmation.ts)
 │   ├── dashboard.service.ts       # Agregación en memoria para GET /api/admin/dashboard
-│   ├── reports.service.ts         # Reportes mensuales + reposición (usa forecast.ts)
+│   ├── reports.service.ts         # Reportes mensuales + reposición (usa forecast.ts, cachea 60s)
 │   └── forecast.ts                # Función pura portada del frontend
 ├── utils/
 │   ├── password.ts                # Helpers de hash/verificación de contraseñas (bcrypt)
 │   ├── date.ts                    # Helpers de fecha UTC (isoDay/isoMonth/formatShortDate/...)
+│   ├── formatMoney.ts             # Formateo es-MX compartido por correos/reportes/errores de precio
+│   ├── parseId.ts                 # Valida :id numérico antes de tocar Sequelize (evita 500 por NaN)
+│   ├── constantTimeEqual.ts       # Comparación en tiempo constante (firma HMAC de Skydropx y código de reset)
 │   ├── productSizesInclude.ts     # Include reusado para resolver los VIRTUAL stock/sizes de Product
 │   └── resetCode.ts               # Genera/hashea el código de recuperación de 5 dígitos
+├── migrations/                  # Migraciones versionadas (sequelize-cli), una por tabla + incrementales
+├── seeders/                     # Reservado para sequelize-cli (vacío; el seed real vive en seed.ts)
 └── models/
     ├── Product.ts                # Modelo Product (bota | sombrero | ropa)
     ├── ProductSize.ts            # Stock por talla (productId, size, stock), único por (productId, size)
-    ├── AdminUser.ts              # Usuarios del panel (id, name, email, passwordHash, role)
-    ├── Order.ts                  # Pedidos (totales + datos de envío)
+    ├── AdminUser.ts              # Usuarios del panel (id, name, email, passwordHash, role, reset de contraseña)
+    ├── Order.ts                  # Pedidos (totales, envío, pago, tracking, reembolso)
     ├── OrderItem.ts              # Renglones de pedido con precios congelados
     ├── BrandSettings.ts          # Configuración de marca (singleton)
     └── associations.ts           # Relaciones entre modelos (hasMany/belongsTo)
