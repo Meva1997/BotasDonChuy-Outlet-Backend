@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { createOrder } from "../controllers/order.controller";
+import { orderRateLimiter } from "../middlewares/rateLimit";
 
 const router: Router = Router();
 
@@ -14,6 +15,7 @@ const router: Router = Router();
  *       la orden en estado `pending`. El cuerpo NO envía montos: el backend es la
  *       autoridad de precios. Si dos clientes compran la última unidad a la vez,
  *       solo uno recibe `201`; el otro recibe `409` y la talla queda en stock 0.
+ *       Sujeto a rate limiting.
  *     tags: [Orders]
  *     requestBody:
  *       required: true
@@ -40,7 +42,13 @@ const router: Router = Router();
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       429:
+ *         description: Demasiados pedidos desde la misma IP en poco tiempo.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
  */
-router.post("/", createOrder);
+router.post("/", orderRateLimiter, createOrder);
 
 export default router;

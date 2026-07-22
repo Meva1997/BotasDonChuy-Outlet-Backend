@@ -20,3 +20,15 @@ export const shippingRateLimiter: RateLimitRequestHandler = rateLimit({
   legacyHeaders: false,
   message: { message: "Demasiadas cotizaciones de envío. Intenta de nuevo en un momento." },
 });
+
+// POST /api/orders es público y cada request exitoso crea un PaymentIntent real
+// en Stripe y una fila Order. Sin límite por IP, un flood sostenido puede saturar
+// la tabla de órdenes y el rate limit de la cuenta de Stripe, aunque el
+// pendingOrderSweeper libere las órdenes pending no pagadas después de un rato.
+export const orderRateLimiter: RateLimitRequestHandler = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Demasiados pedidos. Intenta de nuevo en un momento." },
+});
