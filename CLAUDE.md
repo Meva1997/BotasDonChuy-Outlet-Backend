@@ -683,6 +683,39 @@ nullable password-reset columns in Fase 9 (`resetPasswordCodeHash`, `resetPasswo
 `resetPasswordAttempts` — see the **Password reset via 5-digit code** section). `src/seed.ts`
 (`pnpm seed`) populates all of the above from the frontend's mock data.
 
+**Logging y monitoreo** (Fase H.4 — `roadmap-hardening.md`): `src/config/logger.ts` exports a
+shared `pino` instance (`logger`) used everywhere a background job, webhook handler, or
+fire-and-forget side effect used to `console.*` — level defaults to `info` in production (one
+JSON line per record) / `debug` in dev (pretty-printed via `pino-pretty`), overridable with
+`LOG_LEVEL`. There is **no** request-logging middleware (`pino-http`) — every logged flow here is
+a cron/webhook/background send, not an HTTP request, so instrumenting every public `GET` would add
+noise the roadmap doesn't ask for. Context fields are passed pino's object-first way
+(`logger.warn({ orderId, paymentIntentId }, "mensaje")`); the field name **`err`** is used
+consistently for `Error` objects so pino's default serializer expands `err.stack` automatically.
+`src/config/sentry.ts` initializes `@sentry/node` **only if `SENTRY_DSN` is set** (logs a warning
+and continues otherwise) — unlike Stripe/Resend/Cloudinary/Skydropx, Sentry is opt-in monitoring,
+not a business dependency, so it doesn't hard-require its env var. It's imported as the very first
+line of `src/app.ts` (before even `express`) so it's armed before any other config module's
+fail-fast validation could throw. `errorHandler.ts`'s catch-all branch calls both `logger.error`
+and `Sentry.captureException` for every unhandled error reaching the 500 response.
+`src/services/alert.service.ts`'s `sendAlertEmail({ subject, context })` reuses
+`email.service.ts`'s `sendEmail` (which never throws) to send an operational email to
+`ALERT_EMAIL_TO` (optional — no-ops with a log warning if unset) for two cases: `payment.service.ts`'s
+`createShipmentForOrder` failing to generate a Skydropx label (unconditionally, with `fatal`
+Sentry severity, when Skydropx already **charged** for the label but persisting its id failed —
+the highest-priority case, since a retry would create and pay for a second label; conditionally,
+at warning severity, for the non-monetary failure branch — there's no real retry loop today, so
+this catch firing at all is the "agota reintentos" trigger from the roadmap), and
+`pendingOrderSweeper.ts`'s per-order reconciliation catch crossing `REPEATED_FAILURE_ALERT_THRESHOLD`
+(3) consecutive failures for the same order — tracked in an in-memory
+`Map<orderId, consecutiveFailures>` that resets on success or when the order leaves the stale
+window, and is deliberately **not** persisted (resets on redeploy — acceptable for a soft
+operational alert, not a correctness guarantee). `email.service.ts`'s own two failure branches
+(Resend returned an error / the send threw) stay log-only, by design — routing them through
+`sendAlertEmail` would create a loop where a Resend outage tries to alert about itself over the
+same broken channel. `src/seed.ts`'s `console.log` calls are unchanged (a one-off CLI script, not
+server request-path code — out of scope for this phase).
+
 ## Conventions
 
 - TypeScript runs in `strict` mode with decorators enabled (`experimentalDecorators`,
@@ -699,8 +732,12 @@ nullable password-reset columns in Fase 9 (`resetPasswordCodeHash`, `resetPasswo
   `SHIP_FROM_STREET`/`SHIP_FROM_EXTERNAL_NUMBER`/`SHIP_FROM_NAME`/`SHIP_FROM_PHONE` (all
   required — see the **Envío en vivo / Skydropx** section), optional `SKYDROPX_BASE_URL`
   (defaults to the sandbox host), optional `SKYDROPX_CARRIERS` (comma-separated `provider_name`
-  slugs to restrict the quotation's `requested_carriers` — see the Skydropx section), and optional
-  `FRONTEND_URL`). `.env` is gitignored — never commit it (the Stripe/Resend keys are
+  slugs to restrict the quotation's `requested_carriers` — see the Skydropx section),
+  `FRONTEND_URL`, `SENTRY_DSN` (optional — enables Sentry error tracking if set, see the
+  **Logging y monitoreo** section below), `ALERT_EMAIL_TO` (optional — destination for
+  operational alert emails, same section), and `LOG_LEVEL` (optional — overrides the pino
+  logger's level, defaults to `info` in production / `debug` otherwise). `.env` is gitignored —
+  never commit it (the Stripe/Resend keys are
   test/sandbox; Skydropx currently points at its own separate sandbox account too — see
   `roadmap-skydropx.md` §1).
 - Dependencies wired in: `jsonwebtoken` + `bcrypt` (auth), `zod` (validation),
@@ -709,7 +746,9 @@ nullable password-reset columns in Fase 9 (`resetPasswordCodeHash`, `resetPasswo
   `stripe` (payments — real PaymentIntent + signed webhook),
   `cloudinary` + `multer` (image uploads — Fase 3: multer memory storage → Cloudinary
   `upload_stream`; `multer-storage-cloudinary` is installed but **unused**, see the image section),
-  `resend` (transactional emails — Fase 9: password-reset code, see the Emails section).
+  `resend` (transactional emails — Fase 9: password-reset code, see the Emails section),
+  `pino` + `pino-pretty` (structured logging — Fase H.4, see the **Logging y monitoreo**
+  section) and `@sentry/node` (optional error tracking, same section).
   Skydropx has no SDK dependency — `src/services/skydropx.service.ts` calls its REST API
   directly with the native `fetch`.
   Prefer these existing libraries when implementing those features.

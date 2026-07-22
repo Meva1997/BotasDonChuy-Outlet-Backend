@@ -12,6 +12,8 @@ import {
   getShippingRates as getSkydropxRates,
   SkydropxRequestError,
 } from "../services/skydropx.service";
+import { logger } from "../config/logger";
+import { Sentry } from "../config/sentry";
 
 /**
  * POST /api/shipping/rates — cotización de envío en vivo (checkout público).
@@ -61,8 +63,9 @@ export const getShippingRates: RequestHandler = asyncHandler(
         product.widthCm <= 0 ||
         product.heightCm <= 0
       ) {
-        console.warn(
-          `[skydropx] "${product.name}" (id ${product.id}) tiene una dimensión de envío en 0; se usará la tarifa plana de respaldo.`,
+        logger.warn(
+          { productId: product.id, productName: product.name },
+          "[skydropx] dimensión de envío en 0; se usará la tarifa plana de respaldo",
         );
         hasInvalidDimensions = true;
       }
@@ -96,7 +99,7 @@ export const getShippingRates: RequestHandler = asyncHandler(
           res.json({ quotationId, rates });
           return;
         }
-        console.warn(
+        logger.warn(
           "[skydropx] la cotización no devolvió tarifas utilizables a tiempo, usando tarifa plana de respaldo",
         );
       } catch (err) {
@@ -106,11 +109,14 @@ export const getShippingRates: RequestHandler = asyncHandler(
         // detrás de un warning indistinguible de una caída de la paquetería.
         const status = err instanceof SkydropxRequestError ? err.status : undefined;
         const isClientError = status !== undefined && status >= 400 && status < 500;
-        const log = isClientError ? console.error : console.warn;
+        const level: "error" | "warn" = isClientError ? "error" : "warn";
         const prefix = isClientError
           ? "[skydropx] cotización rechazada (posible bug de integración, no una caída de Skydropx)"
           : "[skydropx] cotización en vivo falló, usando tarifa plana de respaldo";
-        log(`${prefix}: ${(err as Error).message}`);
+        logger[level]({ err, status, event: "skydropx.quotation" }, prefix);
+        if (isClientError) {
+          Sentry.captureException(err, { extra: { status } });
+        }
       }
     }
 

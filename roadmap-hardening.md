@@ -27,7 +27,7 @@ resolverse **antes** del primer deploy a producción real con clientes pagando.
 | Tests automatizados | ❌ `pnpm test` es un placeholder | Regresión silenciosa en stock atómico, webhooks, totales |
 | Migraciones de esquema | ✅ `sequelize-cli` en `src/migrations/` (Fase H.2) | — |
 | Rate limit en `POST /api/orders` | ❌ ausente | Un bot puede crear PaymentIntents/órdenes `pending` sin límite |
-| Logging estructurado / monitoreo de errores | ❌ solo `console.*` (37 usos) | Un webhook que empieza a fallar pasa desapercibido |
+| Logging estructurado / monitoreo de errores | ✅ `pino` + Sentry opcional + alertas por correo (Fase H.4) | — |
 | Apagado ordenado (`SIGTERM`/`SIGINT`) | ❌ ausente | Redeploys pueden cortar conexiones de BD a medio transaction |
 | Cancelación/reembolso manual de orden (admin) | ❌ ausente | Sin vía para atender "cancela mi pedido" fuera del webhook de Stripe |
 | Dominio verificado en Resend | ⏳ pendiente (manual, ya en `ROADMAP.md` §9) | Emails a clientes reales siguen bloqueados (403 fuera de la cuenta) |
@@ -144,14 +144,14 @@ sistemas externos que pueden fallar de forma silenciosa (todos estos flujos est�
 "logear y continuar", a propósito — pero eso solo es seguro si alguien lee ese log).
 
 **Tareas:**
-- [ ] Reemplazar `console.log`/`console.error` sueltos (37 usos) por un logger estructurado
+- [x] Reemplazar `console.log`/`console.error` sueltos (37 usos) por un logger estructurado
   (`pino` — rápido, JSON por línea, bajo overhead) con niveles (`info`/`warn`/`error`).
-- [ ] Contexto mínimo en cada log de los flujos críticos: `orderId`, `paymentIntentId`/
+- [x] Contexto mínimo en cada log de los flujos críticos: `orderId`, `paymentIntentId`/
   `skydropxShipmentId`, nombre del evento de webhook.
-- [ ] Integrar un servicio de error tracking (Sentry, tier gratis alcanza para este volumen) en el
+- [x] Integrar un servicio de error tracking (Sentry, tier gratis alcanza para este volumen) en el
   `errorHandler` (`src/middlewares/errorHandler.ts`) para los 500 no manejados, y en los catches
   silenciosos de `payment.service.ts`/`skydropx.service.ts` que hoy solo loguean.
-- [ ] Alerta (puede ser tan simple como un correo vía Resend, o un webhook a Slack/Discord) cuando
+- [x] Alerta (puede ser tan simple como un correo vía Resend, o un webhook a Slack/Discord) cuando
   `pendingOrderSweeper` encuentra una orden que Stripe reporta como fallida repetidamente, o cuando
   `createShipmentForOrder` agota reintentos.
 
@@ -235,9 +235,9 @@ antes de que se pueda mergear.
 - [x] `orderRateLimiter` en `POST /api/orders`
 
 **Fase H.4 — Logging y monitoreo**
-- [ ] Logger estructurado (`pino`) reemplazando `console.*`
-- [ ] Error tracking (Sentry) en `errorHandler` y catches silenciosos
-- [ ] Alertas para fallos repetidos de Skydropx/sweeper
+- [x] Logger estructurado (`pino`) reemplazando `console.*`
+- [x] Error tracking (Sentry) en `errorHandler` y catches silenciosos
+- [x] Alertas para fallos repetidos de Skydropx/sweeper
 
 **Fase H.5 — Apagado ordenado + cancelación manual**
 - [ ] `SIGTERM`/`SIGINT` cierran servidor, pool y sweeper

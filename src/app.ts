@@ -1,9 +1,11 @@
+import "./config/sentry"; // arma Sentry antes que cualquier otro módulo pueda lanzar al arrancar
 import express, { type Express } from "express";
 import cors from "cors";
 import helmet from "helmet";
 import dotenv from "dotenv";
 import swaggerUi from "swagger-ui-express";
 import { connectDB } from "./config/database";
+import { logger } from "./config/logger";
 import "./config/cloudinary"; // valida las llaves de Cloudinary al arrancar (fail-fast)
 import "./config/resend"; // valida RESEND_API_KEY + EMAIL_FROM al arrancar (fail-fast)
 import "./config/skydropx"; // valida SKYDROPX_CLIENT_ID + SKYDROPX_CLIENT_SECRET al arrancar (fail-fast)
@@ -101,7 +103,7 @@ app.get("/health", (req, res) => {
 app.use(errorHandler);
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server running at http://localhost:${PORT}`);
+  logger.info(`Server running at http://localhost:${PORT}`);
 });
 
 export default app;

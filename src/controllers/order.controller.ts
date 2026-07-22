@@ -9,6 +9,7 @@ import { stripe, STRIPE_WEBHOOK_SECRET } from "../config/stripe";
 import { verifySkydropxWebhookSignature } from "../services/skydropx.service";
 import { Order, type OrderAttributes } from "../models/Order";
 import { OrderItem } from "../models/OrderItem";
+import { logger } from "../config/logger";
 
 /** Payload de un evento de paquete del webhook de Skydropx (estilo JSON:API). */
 interface SkydropxWebhookBody {
@@ -83,8 +84,9 @@ export const stripeWebhook: RequestHandler = asyncHandler(
         STRIPE_WEBHOOK_SECRET,
       );
     } catch (err) {
-      console.warn(
-        `[stripe] firma de webhook inválida: ${(err as Error).message}`,
+      logger.warn(
+        { err, event: "stripe.signature_verification" },
+        "[stripe] firma de webhook inválida",
       );
       res.status(400).json({ message: "Firma de webhook inválida" });
       return;

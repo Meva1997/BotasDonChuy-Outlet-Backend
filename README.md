@@ -71,6 +71,11 @@ SHIP_FROM_STREET=...          # dirección de origen de la guía (Fase 8.5)
 SHIP_FROM_EXTERNAL_NUMBER=...
 SHIP_FROM_NAME=...
 SHIP_FROM_PHONE=...
+
+# Logging y monitoreo (Fase H.4) — todas opcionales, nada de esto bloquea el arranque
+LOG_LEVEL=debug                         # opcional: nivel de pino (default info en prod, debug en dev)
+SENTRY_DSN=https://...ingest.sentry.io/...  # opcional: si falta, Sentry queda deshabilitado (solo se loguea)
+ALERT_EMAIL_TO=tu_correo@ejemplo.com     # opcional: destino de las alertas operativas (correo vía Resend)
 ```
 
 > En `NODE_ENV=development` los modelos se sincronizan automáticamente con

@@ -1,4 +1,5 @@
 import { resend, EMAIL_FROM } from "../config/resend";
+import { logger } from "../config/logger";
 
 interface SendEmailInput {
   to: string | string[];
@@ -33,12 +34,14 @@ export async function sendEmail({
     );
 
     if (error) {
-      console.error("[email] Resend devolvió un error:", error);
+      // Solo log, nunca Sentry.captureException ni sendAlertEmail: esta es la propia
+      // ruta de correo — alertar por email aquí crearía un bucle si Resend está caído.
+      logger.error({ err: error }, "[email] Resend devolvió un error");
       return;
     }
 
-    console.log(`[email] Enviado "${subject}" a ${to} (id: ${data?.id})`);
+    logger.info({ subject, to, resendId: data?.id }, "[email] Enviado");
   } catch (err) {
-    console.error("[email] Falló el envío (excepción):", err);
+    logger.error({ err }, "[email] Falló el envío (excepción)");
   }
 }
