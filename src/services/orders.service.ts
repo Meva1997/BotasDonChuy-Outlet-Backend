@@ -8,6 +8,10 @@ import { AppError } from "../middlewares/AppError";
 import { computeTotals, type CartLineItem } from "./cart";
 import { assertProductAvailable } from "./productAvailability";
 import { getQuotationRate, toSkydropxAddress, SkydropxRequestError } from "./skydropx.service";
+import { sendAlertEmail } from "./alert.service";
+import { stripe } from "../config/stripe";
+import { logger } from "../config/logger";
+import { Sentry } from "../config/sentry";
 import type { CreateOrderInput } from "../schemas/checkout";
 
 const RATE_UNAVAILABLE_MESSAGE =
@@ -276,4 +280,128 @@ export async function releaseOrderStock(
       { transaction: t },
     );
   });
+}
+
+/**
+ * Cancelación/reembolso manual de una orden desde el panel admin (Fase H.5), para
+ * cuando el cliente pide cancelar fuera del flujo de Stripe (WhatsApp, llamada).
+ *
+ *  - Solo son cancelables `pending` y `paid`. Una orden `shipped`/`delivered` ya salió
+ *    con guía (no tiene sentido restockearla) y una `cancelled` ya está cerrada → 409.
+ *  - **`pending`** (sin cobro capturado): reusa `releaseOrderStock` (restock + `cancelled`)
+ *    y, best-effort, cancela el PaymentIntent en Stripe para no dejarlo huérfano.
+ *  - **`paid`**: reembolsa en Stripe **antes** de restockear. El reembolso lleva una
+ *    `idempotencyKey` derivada del id de la orden, así dos cancelaciones concurrentes no
+ *    generan dos reembolsos. El restock va en una transacción que re-verifica
+ *    `status === "paid"` bajo `FOR UPDATE`: si otra llamada ya lo cerró, no repone de más.
+ *    Un reembolso fallido NO restockea (el dinero no volvió) y dispara una alerta operativa.
+ */
+export async function cancelOrderByAdmin(
+  orderId: number,
+  reason?: string,
+): Promise<Order> {
+  const order = await Order.findByPk(orderId);
+  if (!order) {
+    throw new AppError("No se encontró el pedido que quieres cancelar.", 404);
+  }
+
+  if (order.status === "cancelled") {
+    throw new AppError("Este pedido ya está cancelado.", 409);
+  }
+  if (order.status === "shipped" || order.status === "delivered") {
+    throw new AppError(
+      "Este pedido ya fue enviado y no se puede cancelar desde aquí. Gestiona la devolución con la paquetería.",
+      409,
+    );
+  }
+
+  if (order.status === "pending") {
+    // Aún no hay cobro capturado; liberar el stock reservado y cerrar la orden.
+    await releaseOrderStock(orderId);
+    // Best-effort: cancelar el PaymentIntent para no dejarlo colgado en Stripe.
+    if (order.paymentIntentId) {
+      try {
+        await stripe.paymentIntents.cancel(order.paymentIntentId);
+      } catch (err) {
+        logger.warn(
+          { orderId, paymentIntentId: order.paymentIntentId, err },
+          "[cancel] no se pudo cancelar el PaymentIntent de una orden pending",
+        );
+      }
+    }
+    logger.info({ orderId, reason }, "[cancel] orden pending cancelada por admin");
+  } else {
+    // status === "paid": reembolso real antes de restockear.
+    if (!order.paymentIntentId) {
+      throw new AppError(
+        "El pedido figura como pagado pero no tiene un pago de Stripe asociado; no se puede reembolsar automáticamente.",
+        409,
+      );
+    }
+
+    let refund;
+    try {
+      refund = await stripe.refunds.create(
+        { payment_intent: order.paymentIntentId },
+        { idempotencyKey: `refund-order-${order.id}` },
+      );
+    } catch (err) {
+      logger.error(
+        { orderId, paymentIntentId: order.paymentIntentId, err },
+        "[cancel] falló el reembolso en Stripe",
+      );
+      Sentry.captureException(err, { extra: { orderId } });
+      void sendAlertEmail({
+        subject: `Reembolso fallido al cancelar la orden #${orderId}`,
+        context: {
+          orderId,
+          paymentIntentId: order.paymentIntentId,
+          reason,
+          error: (err as Error).message,
+        },
+      });
+      throw new AppError(
+        "No se pudo procesar el reembolso en Stripe. El pedido no se canceló; intenta de nuevo o revísalo en el panel de Stripe.",
+        502,
+      );
+    }
+
+    // Reembolso OK: restock + cierre en una transacción, con guard de idempotencia.
+    await sequelize.transaction(async (t) => {
+      const locked = await Order.findByPk(orderId, {
+        lock: t.LOCK.UPDATE,
+        transaction: t,
+      });
+      // Si otra cancelación concurrente ya lo cerró, no repongas de más (el reembolso
+      // de esa otra llamada es el mismo por la idempotencyKey, no un cobro extra).
+      if (!locked || locked.status !== "paid") return;
+
+      const items = await OrderItem.findAll({ where: { orderId }, transaction: t });
+      for (const item of items) {
+        await ProductSize.update(
+          { stock: sequelize.literal(`stock + ${item.quantity}`) },
+          { where: { productId: item.productId, size: item.size }, transaction: t },
+        );
+      }
+
+      await locked.update(
+        {
+          status: "cancelled",
+          paymentStatus: "refunded",
+          refundId: refund.id,
+          refundedAt: new Date(),
+        },
+        { transaction: t },
+      );
+    });
+    logger.info(
+      { orderId, refundId: refund.id, reason },
+      "[cancel] orden paid cancelada y reembolsada por admin",
+    );
+  }
+
+  const full = await Order.findByPk(orderId, {
+    include: [{ model: OrderItem, as: "items" }],
+  });
+  return full!;
 }

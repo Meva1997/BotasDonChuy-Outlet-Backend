@@ -22,7 +22,7 @@ export interface OrderAttributes {
   // Seam de pagos (Stripe llega en Fase 8). Nullable hoy: la orden nace en
   // status "pending" / paymentStatus "unpaid" y el PaymentIntent aún no existe.
   paymentIntentId: string | null;
-  paymentStatus: "unpaid" | "processing" | "paid" | "failed";
+  paymentStatus: "unpaid" | "processing" | "paid" | "failed" | "refunded";
   // Envío en vivo con Skydropx (Fase 8.4). Nullable: una orden creada por el
   // fallback de tarifa plana (Skydropx no disponible al cotizar) no tiene
   // cotización asociada. Cuando existen, `skydropxQuotationId` permite re-consultar
@@ -48,6 +48,12 @@ export interface OrderAttributes {
   trackingUrl: string | null;
   labelUrl: string | null;
   shipmentStatus: string | null;
+  // Cancelación/reembolso manual (Fase H.5). Se pueblan solo cuando una orden `paid`
+  // se cancela por el panel admin y Stripe procesa el reembolso: `refundId` es el id
+  // del reembolso (`re_...`) y `refundedAt` el momento en que se aplicó. Nullas en
+  // cualquier otro caso. Ver `cancelOrderByAdmin` en orders.service.ts.
+  refundId: string | null;
+  refundedAt: Date | null;
 }
 
 interface OrderCreationAttributes extends Optional<
@@ -65,6 +71,8 @@ interface OrderCreationAttributes extends Optional<
   | "trackingUrl"
   | "labelUrl"
   | "shipmentStatus"
+  | "refundId"
+  | "refundedAt"
 > {}
 
 export class Order
@@ -88,7 +96,7 @@ export class Order
   declare references: string;
   declare shippingCarrier: string;
   declare paymentIntentId: string | null;
-  declare paymentStatus: "unpaid" | "processing" | "paid" | "failed";
+  declare paymentStatus: "unpaid" | "processing" | "paid" | "failed" | "refunded";
   declare skydropxQuotationId: string | null;
   declare skydropxRateId: string | null;
   declare shippingRequiresDropoff: boolean | null;
@@ -97,6 +105,8 @@ export class Order
   declare trackingUrl: string | null;
   declare labelUrl: string | null;
   declare shipmentStatus: string | null;
+  declare refundId: string | null;
+  declare refundedAt: Date | null;
   declare readonly createdAt: Date;
   declare readonly updatedAt: Date;
   declare items?: OrderItem[];
@@ -198,7 +208,7 @@ Order.init(
       defaultValue: null,
     },
     paymentStatus: {
-      type: DataTypes.ENUM("unpaid", "processing", "paid", "failed"),
+      type: DataTypes.ENUM("unpaid", "processing", "paid", "failed", "refunded"),
       allowNull: false,
       defaultValue: "unpaid",
     },
@@ -239,6 +249,16 @@ Order.init(
     },
     shipmentStatus: {
       type: DataTypes.STRING,
+      allowNull: true,
+      defaultValue: null,
+    },
+    refundId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      defaultValue: null,
+    },
+    refundedAt: {
+      type: DataTypes.DATE,
       allowNull: true,
       defaultValue: null,
     },

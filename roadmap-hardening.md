@@ -28,8 +28,8 @@ resolverse **antes** del primer deploy a producción real con clientes pagando.
 | Migraciones de esquema | ✅ `sequelize-cli` en `src/migrations/` (Fase H.2) | — |
 | Rate limit en `POST /api/orders` | ❌ ausente | Un bot puede crear PaymentIntents/órdenes `pending` sin límite |
 | Logging estructurado / monitoreo de errores | ✅ `pino` + Sentry opcional + alertas por correo (Fase H.4) | — |
-| Apagado ordenado (`SIGTERM`/`SIGINT`) | ❌ ausente | Redeploys pueden cortar conexiones de BD a medio transaction |
-| Cancelación/reembolso manual de orden (admin) | ❌ ausente | Sin vía para atender "cancela mi pedido" fuera del webhook de Stripe |
+| Apagado ordenado (`SIGTERM`/`SIGINT`) | ✅ `gracefulShutdown` en `src/app.ts` (Fase H.5) | — |
+| Cancelación/reembolso manual de orden (admin) | ✅ `POST /api/admin/orders/:id/cancel` (Fase H.5) | — |
 | Dominio verificado en Resend | ⏳ pendiente (manual, ya en `ROADMAP.md` §9) | Emails a clientes reales siguen bloqueados (403 fuera de la cuenta) |
 
 ---
@@ -166,22 +166,34 @@ en un entorno de prueba) y confirmar que aparece en Sentry/el canal de alertas, 
 una fase propia.
 
 **Tareas — apagado ordenado:**
-- [ ] Manejar `SIGTERM`/`SIGINT` en `src/app.ts`: dejar de aceptar conexiones nuevas
+- [x] Manejar `SIGTERM`/`SIGINT` en `src/app.ts`: dejar de aceptar conexiones nuevas
   (`server.close()`), esperar requests en vuelo, cerrar el pool de Sequelize
-  (`sequelize.close()`) y detener el timer del `pendingOrderSweeper` antes de salir — hoy un
-  redeploy puede cortar una transacción de checkout a medias.
+  (`sequelize.close()`) y detener el timer del `pendingOrderSweeper`
+  (`stopPendingOrderSweeper`, nuevo export) antes de salir. `gracefulShutdown` ignora señales
+  repetidas (flag `isShuttingDown`) y trae un guard de timeout forzado (`process.exit(1)` a los
+  10 s) por si una conexión colgada impide que `server.close()` resuelva.
 
 **Tareas — cancelación/reembolso manual (admin):**
-- [ ] `POST /api/admin/orders/:id/cancel` `[auth]`: para una orden `pending` o `paid` que el cliente
-  pidió cancelar fuera del flujo normal (WhatsApp, llamada). Debe reusar
-  `orders.service.releaseOrderStock` para `pending`; para `paid` necesita además llamar a
-  `stripe.refunds.create` (reembolso real) antes de restockear — **no existe hoy ningún camino de
-  reembolso en el código**, ni parcial ni total.
-  - [ ] Zod schema propio (`cancelOrderSchema`, quizás con `reason` opcional para el registro).
-  - [ ] `409` si la orden ya está `cancelled`/`delivered` (no tiene sentido cancelar dos veces ni
-    después de entregada).
-- [ ] Documentar en Swagger (`src/config/swagger.ts`) igual que el resto de rutas admin, por el
-  Workflow de `CLAUDE.md`.
+- [x] `POST /api/admin/orders/:id/cancel` `[auth]`: para una orden `pending` o `paid` que el cliente
+  pidió cancelar fuera del flujo normal (WhatsApp, llamada). Reusa
+  `orders.service.releaseOrderStock` para `pending` (+ best-effort `paymentIntents.cancel`); para
+  `paid` llama a `stripe.refunds.create` (reembolso total real, con `idempotencyKey`
+  `refund-order-{id}` contra doble reembolso) **antes** de restockear, y persiste
+  `paymentStatus: "refunded"` + `refundId`/`refundedAt`. Un reembolso fallido no restockea y dispara
+  `sendAlertEmail`. Todo en `orders.service.cancelOrderByAdmin`.
+  - [x] Zod schema propio (`cancelOrderSchema`, con `reason` opcional para el registro).
+  - [x] `409` si la orden ya está `cancelled`/`delivered` — **y también `shipped`** (decisión de
+    esta fase: una orden ya enviada salió con guía, no se restockea; el roadmap original solo listaba
+    `cancelled`/`delivered`).
+- [x] Documentar en Swagger (`src/config/swagger.ts` + `@openapi` en `adminOrder.routes.ts`) igual que
+  el resto de rutas admin, por el Workflow de `CLAUDE.md`.
+
+> **Nota de migración (`refunded`):** representar el reembolso con un valor nuevo del enum
+> `paymentStatus` obligó a una migración `ALTER TYPE ... ADD VALUE` (Postgres no permite `ADD VALUE`
+> dentro de una transacción, ni tiene `DROP VALUE`). El `down` recrea el tipo sin `refunded`, y para
+> ello **quita y repone el `DEFAULT 'unpaid'`** de la columna alrededor del swap — sin eso el
+> `ALTER COLUMN TYPE` falla ("default ... cannot be cast automatically"). Ver
+> `src/migrations/20260722120600-order-refund-fields.ts`.
 
 **Cómo verificar:** matar el proceso con `SIGTERM` durante un checkout en curso (agregar un
 `await sleep()` temporal para ensanchar la ventana) → la transacción termina o hace rollback limpio,
@@ -240,8 +252,8 @@ antes de que se pueda mergear.
 - [x] Alertas para fallos repetidos de Skydropx/sweeper
 
 **Fase H.5 — Apagado ordenado + cancelación manual**
-- [ ] `SIGTERM`/`SIGINT` cierran servidor, pool y sweeper
-- [ ] `POST /api/admin/orders/:id/cancel` con reembolso Stripe
+- [x] `SIGTERM`/`SIGINT` cierran servidor, pool y sweeper
+- [x] `POST /api/admin/orders/:id/cancel` con reembolso Stripe
 
 **Fase H.6 — CI**
 - [ ] Workflow de GitHub Actions con Postgres de servicio + `pnpm test`

@@ -338,7 +338,7 @@ const options: Options = {
             },
             paymentStatus: {
               type: "string",
-              enum: ["unpaid", "processing", "paid", "failed"],
+              enum: ["unpaid", "processing", "paid", "failed", "refunded"],
               example: "unpaid",
             },
             paymentIntentId: { type: "string", nullable: true, example: null },
@@ -409,6 +409,19 @@ const options: Options = {
                 "Último estado crudo reportado por el webhook de Skydropx (p. ej. \"in_transit\", \"delivered\"). null hasta el primer evento.",
               example: "in_transit",
             },
+            refundId: {
+              type: "string",
+              nullable: true,
+              description:
+                "id del reembolso de Stripe (re_...). Solo se puebla al cancelar manualmente una orden pagada (POST /api/admin/orders/:id/cancel); null en cualquier otro caso.",
+              example: "re_3Abc123",
+            },
+            refundedAt: {
+              type: "string",
+              format: "date-time",
+              nullable: true,
+              description: "Momento en que se aplicó el reembolso. null si la orden no se reembolsó.",
+            },
             items: {
               type: "array",
               items: { $ref: "#/components/schemas/OrderItem" },
@@ -427,6 +440,18 @@ const options: Options = {
               description:
                 "Secreto del PaymentIntent de Stripe; el cliente lo usa para confirmar el pago.",
               example: "pi_3Abc123_secret_XyZ",
+            },
+          },
+        },
+        CancelOrderInput: {
+          type: "object",
+          properties: {
+            reason: {
+              type: "string",
+              maxLength: 200,
+              description:
+                "Motivo opcional de la cancelación, para el registro (p. ej. \"el cliente pidió cancelar por WhatsApp\").",
+              example: "El cliente pidió cancelar por WhatsApp",
             },
           },
         },

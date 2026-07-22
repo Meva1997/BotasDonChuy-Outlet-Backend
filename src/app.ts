@@ -4,7 +4,7 @@ import cors from "cors";
 import helmet from "helmet";
 import dotenv from "dotenv";
 import swaggerUi from "swagger-ui-express";
-import { connectDB } from "./config/database";
+import { connectDB, sequelize } from "./config/database";
 import { logger } from "./config/logger";
 import "./config/cloudinary"; // valida las llaves de Cloudinary al arrancar (fail-fast)
 import "./config/resend"; // valida RESEND_API_KEY + EMAIL_FROM al arrancar (fail-fast)
@@ -24,7 +24,10 @@ import adminUserRoutes from "./routes/adminUser.routes";
 import accountRoutes from "./routes/account.routes";
 import shippingRoutes from "./routes/shipping.routes";
 import { errorHandler } from "./middlewares/errorHandler";
-import { startPendingOrderSweeper } from "./services/pendingOrderSweeper";
+import {
+  startPendingOrderSweeper,
+  stopPendingOrderSweeper,
+} from "./services/pendingOrderSweeper";
 import "./models/Product"; // register the model so sync() creates its table
 import "./models/ProductSize";
 import "./models/AdminUser";
@@ -102,8 +105,55 @@ app.get("/health", (req, res) => {
 
 app.use(errorHandler);
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   logger.info(`Server running at http://localhost:${PORT}`);
 });
+
+/**
+ * Apagado ordenado (Fase H.5). Un redeploy envía `SIGTERM` (o `SIGINT` con Ctrl+C
+ * en dev): en vez de morir de golpe a media transacción, se cierra en orden —
+ *   1. detener el sweeper (deja de abrir trabajo nuevo),
+ *   2. `server.close()` deja de aceptar conexiones y espera las requests en vuelo,
+ *   3. cerrar el pool de Sequelize.
+ * Un guard de timeout fuerza la salida si algo cuelga, para no dejar el proceso zombie.
+ */
+let isShuttingDown = false;
+async function gracefulShutdown(signal: string): Promise<void> {
+  if (isShuttingDown) return; // ignora señales repetidas
+  isShuttingDown = true;
+  logger.info({ signal }, "Apagado ordenado iniciado");
+
+  // Red de seguridad: si el cierre se atora (una conexión colgada que impide que
+  // `server.close()` resuelva), salir con código de error tras 10s. `unref()` para
+  // que este timer no mantenga vivo el proceso por sí solo si todo cierra antes.
+  const forceExit = setTimeout(() => {
+    logger.error("Apagado ordenado excedió el tiempo límite; forzando salida");
+    process.exit(1);
+  }, 10_000);
+  forceExit.unref();
+
+  try {
+    stopPendingOrderSweeper();
+    logger.info("Sweeper de pendientes detenido");
+
+    await new Promise<void>((resolve, reject) => {
+      server.close((err) => (err ? reject(err) : resolve()));
+    });
+    logger.info("Servidor HTTP cerrado (sin conexiones nuevas)");
+
+    await sequelize.close();
+    logger.info("Pool de la base de datos cerrado");
+
+    clearTimeout(forceExit);
+    process.exit(0);
+  } catch (err) {
+    logger.error({ err }, "Error durante el apagado ordenado");
+    clearTimeout(forceExit);
+    process.exit(1);
+  }
+}
+
+process.on("SIGTERM", () => void gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => void gracefulShutdown("SIGINT"));
 
 export default app;
