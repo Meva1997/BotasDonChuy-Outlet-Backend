@@ -2,11 +2,21 @@ import { Op, type WhereOptions } from "sequelize";
 import { Order } from "../models/Order";
 import { releaseOrderStock } from "./orders.service";
 import { markOrderPaidFromWebhook } from "./payment.service";
+import { sendAlertEmail } from "./alert.service";
+import { logger } from "../config/logger";
+import { Sentry } from "../config/sentry";
 import {
   stripe,
   PENDING_ORDER_TTL_MINUTES,
   PENDING_ORDER_SWEEP_INTERVAL_MINUTES,
 } from "../config/stripe";
+
+// Rastreo en memoria de fallos consecutivos por orden (Fase H.4): no existía ningún estado de
+// este tipo antes — se resetea en cada restart/redeploy, aceptable porque es una alerta operativa
+// blanda, no una garantía de correctitud. Se alerta UNA vez al cruzar el umbral (no en cada ciclo
+// posterior) y se olvida la orden si sale de la ventana de "pending" vencidas o si tiene éxito.
+const consecutiveFailuresByOrderId = new Map<number, number>();
+const REPEATED_FAILURE_ALERT_THRESHOLD = 3;
 
 /**
  * Barrido de órdenes `pending` abandonadas.
@@ -37,6 +47,13 @@ async function sweepOnce(): Promise<void> {
   };
   const stale = await Order.findAll({ where });
 
+  // Olvida el contador de cualquier orden que ya no esté en la ventana de "pending" vencidas
+  // (se resolvió o salió del alcance del barrido) — evita que el Map crezca sin límite.
+  const staleIds = new Set(stale.map((o) => o.id));
+  for (const id of consecutiveFailuresByOrderId.keys()) {
+    if (!staleIds.has(id)) consecutiveFailuresByOrderId.delete(id);
+  }
+
   for (const order of stale) {
     const paymentIntentId = order.paymentIntentId;
     if (!paymentIntentId) continue;
@@ -45,6 +62,7 @@ async function sweepOnce(): Promise<void> {
 
       if (pi.status === "succeeded") {
         await markOrderPaidFromWebhook(paymentIntentId);
+        consecutiveFailuresByOrderId.delete(order.id);
         continue;
       }
 
@@ -54,18 +72,31 @@ async function sweepOnce(): Promise<void> {
       try {
         await stripe.paymentIntents.cancel(paymentIntentId);
       } catch (cancelErr) {
-        console.warn(
-          `[sweeper] no se pudo cancelar el PaymentIntent ${paymentIntentId}: ${(cancelErr as Error).message}`,
+        logger.warn(
+          { paymentIntentId, err: cancelErr },
+          "[sweeper] no se pudo cancelar el PaymentIntent",
         );
       }
 
       await releaseOrderStock(order.id);
+      consecutiveFailuresByOrderId.delete(order.id);
     } catch (err) {
       // Un fallo con una orden no debe frenar el barrido de las demás.
-      console.error(
-        `[sweeper] error reconciliando la orden ${order.id}:`,
-        (err as Error).message,
-      );
+      logger.error({ orderId: order.id, err }, "[sweeper] error reconciliando la orden");
+      Sentry.captureException(err, { extra: { orderId: order.id } });
+
+      const failures = (consecutiveFailuresByOrderId.get(order.id) ?? 0) + 1;
+      consecutiveFailuresByOrderId.set(order.id, failures);
+      if (failures === REPEATED_FAILURE_ALERT_THRESHOLD) {
+        void sendAlertEmail({
+          subject: `Orden #${order.id} falla repetidamente en el barrido de pendientes`,
+          context: {
+            orderId: order.id,
+            consecutiveFailures: failures,
+            lastError: (err as Error).message,
+          },
+        });
+      }
     }
   }
 }
@@ -82,13 +113,18 @@ export function startPendingOrderSweeper(): void {
 
   const intervalMs = PENDING_ORDER_SWEEP_INTERVAL_MINUTES * 60_000;
   timer = setInterval(() => {
-    sweepOnce().catch((err) =>
-      console.error("[sweeper] fallo en el ciclo de barrido:", err),
-    );
+    sweepOnce().catch((err) => {
+      logger.error({ err }, "[sweeper] fallo en el ciclo de barrido");
+      Sentry.captureException(err);
+    });
   }, intervalMs);
   timer.unref();
 
-  console.log(
-    `🧹 Barrido de órdenes pending activo (cada ${PENDING_ORDER_SWEEP_INTERVAL_MINUTES} min, TTL ${PENDING_ORDER_TTL_MINUTES} min)`,
+  logger.info(
+    {
+      intervalMinutes: PENDING_ORDER_SWEEP_INTERVAL_MINUTES,
+      ttlMinutes: PENDING_ORDER_TTL_MINUTES,
+    },
+    "Barrido de órdenes pending activo",
   );
 }

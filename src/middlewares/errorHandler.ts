@@ -3,6 +3,8 @@ import { ZodError } from "zod";
 import { MulterError } from "multer";
 import { UniqueConstraintError, ValidationError as SequelizeValidationError } from "sequelize";
 import { AppError } from "./AppError";
+import { logger } from "../config/logger";
+import { Sentry } from "../config/sentry";
 
 interface ErrorDetail {
   path: string;
@@ -137,6 +139,9 @@ export const errorHandler = (
     return;
   }
 
-  console.error(err);
+  // El log estructurado es el rastro siempre-activo; Sentry es el índice consultable/
+  // alertable encima de él (no-op seguro si SENTRY_DSN nunca se configuró).
+  logger.error({ err }, "Error no manejado llegó al errorHandler");
+  Sentry.captureException(err);
   res.status(500).json({ message: "Error interno del servidor" });
 };

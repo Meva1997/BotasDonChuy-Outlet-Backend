@@ -12,6 +12,7 @@ import {
 } from "../config/skydropx";
 import { EMAIL_FROM } from "../config/resend";
 import { sendEmail } from "./email.service";
+import { sendAlertEmail } from "./alert.service";
 import { orderConfirmationTemplate } from "./email/templates/orderConfirmation";
 import { buildParcel, type ParcelLineItem } from "./packing";
 import {
@@ -22,6 +23,8 @@ import {
   toSkydropxAddress,
   type SkydropxContact,
 } from "./skydropx.service";
+import { logger } from "../config/logger";
+import { Sentry } from "../config/sentry";
 
 /**
  * Integración de pagos con Stripe (Fase 8, activa).
@@ -66,8 +69,9 @@ export async function markOrderPaidFromWebhook(
 ): Promise<void> {
   const order = await Order.findOne({ where: { paymentIntentId } });
   if (!order) {
-    console.warn(
-      `[stripe] payment_intent.succeeded sin orden asociada: ${paymentIntentId}`,
+    logger.warn(
+      { paymentIntentId, event: "payment_intent.succeeded" },
+      "[stripe] payment_intent.succeeded sin orden asociada",
     );
     return;
   }
@@ -126,8 +130,9 @@ const STORE_COMPANY_NAME = "Botas Don Chuy Outlet";
  */
 export async function createShipmentForOrder(order: Order): Promise<void> {
   if (!order.skydropxQuotationId || !order.skydropxRateId) {
-    console.warn(
-      `[skydropx] La orden #${order.id} no tiene cotización de Skydropx (tarifa plana de respaldo); no se genera guía automática.`,
+    logger.warn(
+      { orderId: order.id },
+      "[skydropx] orden sin cotización de Skydropx (tarifa plana de respaldo); no se genera guía automática",
     );
     return;
   }
@@ -144,10 +149,11 @@ export async function createShipmentForOrder(order: Order): Promise<void> {
       { where: { id: order.id, skydropxShipmentId: null } },
     );
   } catch (err) {
-    console.error(
-      `[skydropx] No se pudo reclamar la creación de guía de la orden #${order.id}:`,
-      err,
+    logger.error(
+      { orderId: order.id, err },
+      "[skydropx] no se pudo reclamar la creación de guía",
     );
+    Sentry.captureException(err, { extra: { orderId: order.id } });
     return; // no se llamó a Skydropx todavía; nada que reconciliar
   }
   if (claimed === 0) return; // otra llamada ya está creando (o ya creó) la guía de esta orden
@@ -173,8 +179,9 @@ export async function createShipmentForOrder(order: Order): Promise<void> {
       destinationAddress,
     );
     if (!currentRate) {
-      console.warn(
-        `[skydropx] La cotización de la orden #${order.id} ya no está disponible; re-cotizando para poder generar la guía.`,
+      logger.warn(
+        { orderId: order.id },
+        "[skydropx] cotización vencida; re-cotizando para poder generar la guía",
       );
       const items = await OrderItem.findAll({ where: { orderId: order.id } });
       const products = await Product.findAll({
@@ -235,17 +242,31 @@ export async function createShipmentForOrder(order: Order): Promise<void> {
     createdShipmentId = shipmentId; // a partir de aquí, Skydropx ya cobró la guía
     await Order.update({ skydropxShipmentId: shipmentId }, { where: { id: order.id } });
   } catch (err) {
-    console.error(`[skydropx] No se pudo generar la guía de envío de la orden #${order.id}:`, err);
+    logger.error(
+      { orderId: order.id, err },
+      "[skydropx] no se pudo generar la guía de envío",
+    );
+    Sentry.captureException(err, { extra: { orderId: order.id } });
 
     if (createdShipmentId) {
       // Skydropx ya creó (y cobró) la guía, pero no se pudo persistir su id — NO liberar el
       // centinela: hacerlo dejaría la orden como si nunca se hubiera intentado, y un reintento
       // futuro (manual o automático, ver roadmap-skydropx.md §8) generaría una SEGUNDA guía
-      // pagada para la misma orden. Se deja "creating" y se loguea con máxima severidad para
-      // reconciliación manual (el dueño puede confirmar el id real en el panel de Skydropx).
-      console.error(
-        `[skydropx] CRÍTICO: la guía ${createdShipmentId} de la orden #${order.id} se creó en Skydropx (dinero real cobrado) pero no se pudo guardar en la base de datos. Requiere reconciliación MANUAL — no reintentar automáticamente, generaría una guía duplicada.`,
+      // pagada para la misma orden. Se deja "creating" y se loguea/alerta con máxima severidad
+      // para reconciliación manual (el dueño puede confirmar el id real en el panel de Skydropx).
+      logger.error(
+        { orderId: order.id, skydropxShipmentId: createdShipmentId },
+        "[skydropx] CRÍTICO: guía cobrada pero no persistida — requiere reconciliación manual",
       );
+      Sentry.captureException(err, {
+        level: "fatal",
+        extra: { orderId: order.id, skydropxShipmentId: createdShipmentId },
+      });
+      // Alerta incondicional (sin umbral): dinero real ya cobrado, necesita atención humana ya.
+      void sendAlertEmail({
+        subject: `CRÍTICO: guía Skydropx cobrada sin persistir — orden #${order.id}`,
+        context: { orderId: order.id, skydropxShipmentId: createdShipmentId },
+      });
       return;
     }
 
@@ -255,16 +276,25 @@ export async function createShipmentForOrder(order: Order): Promise<void> {
     // siempre por un fallo transitorio (Skydropx caído, saldo insuficiente, etc.). Esta
     // liberación también va en su propio try/catch: si fallara, no debe escapar como una
     // rechazo sin capturar de una función fire-and-forget.
+    //
+    // Este es el disparador de la alerta "createShipmentForOrder agota reintentos" del roadmap:
+    // no existe un bucle de reintentos real, así que este catch disparándose ES el evento —
+    // severidad de advertencia porque, a diferencia del caso de arriba, aún no se cobró nada.
+    void sendAlertEmail({
+      subject: `Fallo generando guía Skydropx — orden #${order.id}`,
+      context: { orderId: order.id, message: (err as Error).message },
+    });
     try {
       await Order.update(
         { skydropxShipmentId: null },
         { where: { id: order.id, skydropxShipmentId: SHIPMENT_CREATION_SENTINEL } },
       );
     } catch (releaseErr) {
-      console.error(
-        `[skydropx] No se pudo liberar el centinela de la orden #${order.id} tras el fallo anterior:`,
-        releaseErr,
+      logger.error(
+        { orderId: order.id, err: releaseErr },
+        "[skydropx] no se pudo liberar el centinela tras el fallo anterior",
       );
+      Sentry.captureException(releaseErr, { extra: { orderId: order.id } });
     }
   }
 }
@@ -325,7 +355,10 @@ async function sendOrderEmail(
       idempotencyKey: opts.idempotencyKey,
     });
   } catch (err) {
-    console.error("[email] No se pudo enviar el correo del pedido:", err);
+    // Sin sendAlertEmail aquí: es un problema tolerado por diseño (ver CLAUDE.md) y, si Resend
+    // está caído, alertar por el mismo canal caería en el mismo bucle que se evita en alert.service.ts.
+    logger.error({ orderId: order.id, err }, "[email] no se pudo enviar el correo del pedido");
+    Sentry.captureException(err, { extra: { orderId: order.id } });
   }
 }
 
@@ -455,13 +488,15 @@ export async function applyShipmentUpdateFromWebhook(
       where: { skydropxShipmentId: SHIPMENT_CREATION_SENTINEL },
     });
     if (pendingCreation > 0) {
-      console.warn(
-        `[skydropx] webhook de paquete para el envío ${event.shipmentId} llegó mientras una guía se está creando; se pedirá reintento.`,
+      logger.warn(
+        { skydropxShipmentId: event.shipmentId, event: "packages" },
+        "[skydropx] webhook de paquete llegó mientras una guía se está creando; se pedirá reintento",
       );
       return "retry-later";
     }
-    console.warn(
-      `[skydropx] webhook de paquete sin orden asociada (skydropxShipmentId ${event.shipmentId}).`,
+    logger.warn(
+      { skydropxShipmentId: event.shipmentId, event: "packages" },
+      "[skydropx] webhook de paquete sin orden asociada",
     );
     return "unknown";
   }
@@ -535,8 +570,9 @@ export async function markOrderPaymentFailed(
 ): Promise<void> {
   const order = await Order.findOne({ where: { paymentIntentId } });
   if (!order) {
-    console.warn(
-      `[stripe] payment_intent.payment_failed sin orden asociada: ${paymentIntentId}`,
+    logger.warn(
+      { paymentIntentId, event: "payment_intent.payment_failed" },
+      "[stripe] payment_intent.payment_failed sin orden asociada",
     );
     return;
   }
