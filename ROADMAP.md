@@ -246,7 +246,7 @@ Fase 7):
 **Por qué ahora (o después):** Stripe ya quedó resuelto en sandbox junto con el checkout (Fase 4); Skydropx queda diferido porque hoy el front calcula el envío localmente (`computeShipping`) y no bloquea la compra.
 
 **Tareas:**
-- [ ] **Skydropx** — `POST /api/shipping/rates`: construir payload `POST {SKYDROPX_BASE_URL}/api/v1/quotations` con las dimensiones del producto; normalizar respuesta a `ShippingRate[]`. Mapeo `ShippingData → Skydropx` en [frontend/BACKEND.md](../frontend/BACKEND.md) §5.4. Hasta entonces, el front calcula envío localmente (`computeShipping`).
+- [x] **Skydropx** (✅ hecho — ver [roadmap-skydropx.md](roadmap-skydropx.md)) — cotización en vivo (`POST /api/shipping/rates`, con fallback a `computeShipping`), órdenes con tarifa real, guía automática al pagar y webhook de estado de envío; Swagger documentado (Fase 8.7).
   > **Nota de integración con Fase 9 (emails):** cuando Skydropx quede cableado y `Order` gane columnas de guía/rastreo (p. ej. `trackingNumber`/`trackingUrl`/`carrier`), lo natural es un email adicional "tu pedido fue enviado" reusando `src/services/email.service.ts` y el layout base de la Fase 9 — **no** un servicio de correo aparte. Por eso el email de confirmación de pedido de la Fase 9 debe construirse con una plantilla que **no dé por hecho** que nunca habrá datos de envío (aunque hoy no los tenga), para no tener que rediseñarla cuando Skydropx llegue.
 - [x] **Stripe** (✅ hecho, solo test/sandbox) — `POST /api/orders` crea el pedido en `pending` y genera un PaymentIntent real (`src/services/payment.service.ts`); `POST /api/webhooks/stripe` verifica la firma sobre el cuerpo crudo (`express.raw`) y maneja `payment_intent.succeeded` → `paid`, `payment_intent.payment_failed` → `failed` y `payment_intent.canceled` → restock + `cancelled`. Un barrido (`src/services/pendingOrderSweeper.ts`) libera el stock de órdenes `pending` abandonadas reconciliándolas contra Stripe. Llaves exigidas: `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET`.
 
@@ -417,7 +417,7 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 - [x] `PUT /api/admin/account`
 
 **Fase 8 — Después**
-- [ ] Skydropx `POST /api/shipping/rates`
+- [x] Skydropx `POST /api/shipping/rates` (cotización, guía automática, webhook — ver [roadmap-skydropx.md](roadmap-skydropx.md))
 - [x] Stripe PaymentIntent + webhook (solo test/sandbox; firma verificada + barrido de `pending`)
 
 **Fase 9 — Emails transaccionales (Resend)**

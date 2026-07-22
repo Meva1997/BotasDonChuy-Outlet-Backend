@@ -20,6 +20,7 @@ const options: Options = {
       { name: "Admin - Products", description: "CRUD de productos (requiere auth)" },
       { name: "Auth", description: "Autenticación de administradores" },
       { name: "Orders", description: "Checkout y pedidos del cliente" },
+      { name: "Shipping", description: "Cotización de envío en vivo (Skydropx)" },
       { name: "Admin - Dashboard", description: "Métricas agregadas del panel (requiere auth)" },
       { name: "Admin - Orders", description: "Listado completo de pedidos con items (requiere auth)" },
       { name: "Admin - Reports", description: "Reportes de ventas y reposición (requiere auth)" },
@@ -278,6 +279,20 @@ const options: Options = {
             },
             customer: { $ref: "#/components/schemas/ShippingInput" },
             shippingCarrier: { type: "string", nullable: true, example: "Estafeta" },
+            quotationId: {
+              type: "string",
+              nullable: true,
+              description:
+                "id de cotización de Skydropx (de POST /api/shipping/rates). Debe ir junto con rateId, o ninguno. El servidor re-consulta la cotización y cobra el total autoritativo de ese rate; si se omiten, cobra la tarifa plana.",
+              example: "quot_5b2e1f",
+            },
+            rateId: {
+              type: "string",
+              nullable: true,
+              description:
+                "id del rate elegido dentro de la cotización. Debe ir junto con quotationId, o ninguno.",
+              example: "rate_9f8a3c",
+            },
           },
         },
         ShippingInput: {
@@ -341,6 +356,59 @@ const options: Options = {
             postalCode: { type: "string", example: "38000" },
             references: { type: "string", nullable: true },
             shippingCarrier: { type: "string", nullable: true, example: "Estafeta" },
+            skydropxQuotationId: {
+              type: "string",
+              nullable: true,
+              description:
+                "Cotización de Skydropx usada para el envío. null cuando la orden usó la tarifa plana de respaldo.",
+              example: "quot_5b2e1f",
+            },
+            skydropxRateId: {
+              type: "string",
+              nullable: true,
+              description: "Rate elegido dentro de la cotización. null en tarifa plana.",
+              example: "rate_9f8a3c",
+            },
+            shippingRequiresDropoff: {
+              type: "boolean",
+              nullable: true,
+              description:
+                "Dato operativo SOLO para el panel admin (se excluye de la respuesta pública de POST /api/orders): true = la paquetería elegida no recoge a domicilio, el dueño debe llevar el paquete a su sucursal. null cuando la orden usó la tarifa plana de respaldo o es previa a esta columna.",
+              example: false,
+            },
+            skydropxShipmentId: {
+              type: "string",
+              nullable: true,
+              description:
+                "id de la guía (shipment) creada en Skydropx al confirmarse el pago. null antes de pagar, si la orden usó la tarifa plana de respaldo (sin rate de Skydropx que convertir en guía), o mientras se reclama con el valor centinela \"creating\" (ver createShipmentForOrder).",
+              example: "ship_7c1a9e",
+            },
+            trackingNumber: {
+              type: "string",
+              nullable: true,
+              description:
+                "Número de guía. La creación de la guía es asíncrona: queda null hasta que el webhook de Skydropx (POST /api/webhooks/skydropx) lo reporte.",
+              example: "ESF1234567890",
+            },
+            trackingUrl: {
+              type: "string",
+              nullable: true,
+              description: "URL de rastreo de la paquetería. Igual que trackingNumber, la llena el webhook de Skydropx.",
+              example: "https://www.estafeta.com/Rastreo/ESF1234567890",
+            },
+            labelUrl: {
+              type: "string",
+              nullable: true,
+              description: "URL de la etiqueta/guía imprimible. La llena el webhook de Skydropx.",
+              example: "https://cdn.skydropx.com/labels/ship_7c1a9e.pdf",
+            },
+            shipmentStatus: {
+              type: "string",
+              nullable: true,
+              description:
+                "Último estado crudo reportado por el webhook de Skydropx (p. ej. \"in_transit\", \"delivered\"). null hasta el primer evento.",
+              example: "in_transit",
+            },
             items: {
               type: "array",
               items: { $ref: "#/components/schemas/OrderItem" },
@@ -359,6 +427,72 @@ const options: Options = {
               description:
                 "Secreto del PaymentIntent de Stripe; el cliente lo usa para confirmar el pago.",
               example: "pi_3Abc123_secret_XyZ",
+            },
+          },
+        },
+        ShippingRatesInput: {
+          type: "object",
+          required: ["customer", "items"],
+          properties: {
+            customer: { $ref: "#/components/schemas/ShippingInput" },
+            items: {
+              type: "array",
+              minItems: 1,
+              maxItems: 50,
+              items: {
+                type: "object",
+                required: ["productId", "size", "quantity"],
+                properties: {
+                  productId: { type: "integer", example: 1 },
+                  size: { type: "integer", example: 26 },
+                  quantity: { type: "integer", minimum: 1, maximum: 99, example: 1 },
+                },
+              },
+            },
+          },
+        },
+        ShippingRate: {
+          type: "object",
+          properties: {
+            rateId: {
+              type: "string",
+              nullable: true,
+              description: "null cuando es la tarifa plana de respaldo (Skydropx no disponible).",
+              example: "rate_9f8a3c",
+            },
+            carrier: { type: "string", example: "Estafeta" },
+            service: { type: "string", example: "Terrestre" },
+            amount: { type: "number", format: "float", example: 145.0 },
+            total: { type: "number", format: "float", example: 145.0 },
+            days: {
+              type: "integer",
+              nullable: true,
+              description: "Días estimados de entrega; null en la tarifa plana de respaldo.",
+              example: 3,
+            },
+            requiresDropoff: {
+              type: "boolean",
+              description:
+                "true = el servicio no incluye recolección a domicilio (el paquete se lleva a la sucursal). Dato operativo para el dueño; el checkout no necesita mostrarlo. Se persiste en la orden como shippingRequiresDropoff.",
+              example: false,
+            },
+          },
+        },
+        ShippingRatesResponse: {
+          type: "object",
+          properties: {
+            quotationId: {
+              type: "string",
+              nullable: true,
+              description:
+                "id de la cotización en Skydropx. null cuando se usó la tarifa plana de respaldo (falla, timeout, o sin tarifas utilizables a tiempo).",
+              example: "quot_5b2e1f",
+            },
+            rates: {
+              type: "array",
+              description:
+                "Al menos un rate siempre presente: la tarifa plana de respaldo (carrier \"Estándar\", rateId null) si Skydropx no pudo cotizar.",
+              items: { $ref: "#/components/schemas/ShippingRate" },
             },
           },
         },

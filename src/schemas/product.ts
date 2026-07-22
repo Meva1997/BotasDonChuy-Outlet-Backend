@@ -68,11 +68,13 @@ const productBaseSchema = z.object({
     .max(40, "El código no puede pasar de 40 caracteres")
     .optional()
     .or(z.literal("")),
-  // Medidas de envío: van a la paquetería, así que se piden siempre.
-  weightKg: z.number("El peso (kg) es requerido").nonnegative("El peso no puede ser negativo"),
-  lengthCm: z.number("El largo (cm) es requerido").nonnegative("El largo no puede ser negativo"),
-  widthCm: z.number("El ancho (cm) es requerido").nonnegative("El ancho no puede ser negativo"),
-  heightCm: z.number("El alto (cm) es requerido").nonnegative("El alto no puede ser negativo"),
+  // Medidas de envío: van a la paquetería para cotizar en vivo con Skydropx, así
+  // que deben ser mayores a 0 (un valor en 0 no solo generaría una guía mala —
+  // tumbaría el checkout completo al fallar la cotización, ver roadmap-skydropx.md §2).
+  weightKg: z.number("El peso (kg) es requerido").positive("El peso debe ser mayor a 0"),
+  lengthCm: z.number("El largo (cm) es requerido").positive("El largo debe ser mayor a 0"),
+  widthCm: z.number("El ancho (cm) es requerido").positive("El ancho debe ser mayor a 0"),
+  heightCm: z.number("El alto (cm) es requerido").positive("El alto debe ser mayor a 0"),
   visible: z.boolean().default(true),
 });
 

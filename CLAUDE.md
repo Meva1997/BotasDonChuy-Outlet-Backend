@@ -134,22 +134,40 @@ Resend only delivers to the account owner's address (`403` to anyone else — sw
 
 **Checkout** (`src/routes/order.routes.ts`, `src/controllers/order.controller.ts`,
 `src/services/orders.service.ts`): `POST /api/orders` is **public** (mounted at `/api/orders`).
-The body `{ items: [{ productId, size, quantity }], customer, shippingCarrier? }` is validated with
-`createOrderSchema` (zod, `src/schemas/checkout.ts`). `orders.service.createOrder` does everything
+The body `{ items: [{ productId, size, quantity }], customer, shippingCarrier?, quotationId?,
+rateId? }` is validated with `createOrderSchema` (zod, `src/schemas/checkout.ts`). `quotationId`/
+`rateId` (Fase 8.4 — cotización en vivo) are optional but **both-or-neither** (a `.refine()` rejects
+one without the other): when the checkout quoted live via `POST /api/shipping/rates`, they carry the
+chosen Skydropx quotation/rate; when it fell back to the flat rate (Skydropx down at quote time),
+they're omitted. `orders.service.createOrder` does everything
 inside a single `sequelize.transaction`: it **aggregates** duplicate `(productId, size)` lines,
 processes them in deterministic `(productId, size)` order (deadlock avoidance), and for each line
 runs an **atomic** `ProductSize.update({ stock: literal('stock - N') }, { where: { …, stock: { [Op.gte]: N } } })`
 — if `affectedCount === 0` it throws `AppError(409)`, so concurrent buyers of the last unit get
 exactly one `201` and one `409` (the size drops to stock 0). Totals are **recomputed server-side**
 with the `cart` service (the client never sends amounts), and prices are **frozen** into each
-`OrderItem` (`unitOriginalPrice`/`unitSalePrice`/`unitCost`/`nameSnapshot`). `createOrderSchema`
+`OrderItem` (`unitOriginalPrice`/`unitSalePrice`/`unitCost`/`nameSnapshot`). **Shipping is
+authoritative too** (Fase 8.4): when `quotationId`/`rateId` come in, `createOrder` **re-consults the
+Skydropx quotation** (`getQuotationRate`, a single `GET`) and uses that rate's `total` as `shipping`
+(recomputing `total = subtotal − savings + shipping`) — never a client-sent amount, same rule as the
+price recompute; it also persists `skydropxQuotationId`/`skydropxRateId` and fills `shippingCarrier`
+from the rate's carrier, plus `shippingRequiresDropoff` (from the rate's `requiresDropoff` — see the
+**Envío en vivo / Skydropx** section) — an operational flag for the store owner (no home pickup,
+must drop the package at the carrier's branch), **excluded from the public response** the same way
+`unitCost` is (the reload adds `attributes: { exclude: ['shippingRequiresDropoff'] }` alongside the
+`items` exclusion), and `null` on the flat-rate fallback since it never came from Skydropx. Without
+`quotationId`/`rateId` it uses `computeShipping` (flat rate) as before. The re-consult
+runs **before** the transaction opens (deliberately deviating from the roadmap's "inside the
+transaction" wording): it's a network `GET` that touches no DB row, so keeping it out avoids holding
+`ProductSize` locks open across a up-to-5s call. A rate that's no longer available (expired/gone) →
+`409`; a network failure re-consulting → `503` — both actionable. `createOrderSchema`
 caps `quantity` at 99/item and `items` at 50/order (the real per-size limit is enforced by the
 atomic decrement → `409`). `unitCost` is frozen in the row but **excluded from the public response**
 (the order is reloaded with `attributes: { exclude: ['unitCost'] }` on `items`), matching the rule
 that cost fields only appear on authenticated admin routes. Orders are created with
 `status: "pending"` / `paymentStatus: "unpaid"`; the response is `{ order, clientSecret }`.
 
-**Payments / Stripe** (Fase 8, activo — solo Stripe; Skydropx sigue diferido): the `stripe`
+**Payments / Stripe** (Fase 8, activo): the `stripe`
 package is installed and configured in `src/config/stripe.ts` (its own `dotenv.config()` at module
 top, like `database.ts`, since imports run before `app.ts`'s `dotenv.config()`). That module
 **hard-requires** `STRIPE_SECRET_KEY` **and** `STRIPE_WEBHOOK_SECRET` (throws at startup if either
@@ -175,12 +193,17 @@ email when `affectedCount === 1`. This is the single funnel every order passes t
 sweeper runs: only one UPDATE affects the row, so the email fires exactly once. A plain in-memory
 guard (`if (order.paymentStatus === "paid")`) would **not** give this — two callers could both read
 `processing` before either writes and both send. A `idempotencyKey: order-confirmation/${order.id}`
-passed to Resend is a second 24h safety net. The send is extracted into a `sendOrderConfirmationEmail(order)`
-helper that `order.reload({ include: items excluding unitCost })` then templates + `sendEmail`, wrapped
-in its own `try/catch` that only logs. It is dispatched **fire-and-forget** (`void`, **not** awaited):
+passed to Resend is a second 24h safety net. The send is a thin `sendOrderConfirmationEmail(order)`
+wrapper over a shared `sendOrderEmail(order, { subject, idempotencyKey, tracking? })` helper (Fase 8.6
+refactor) that `order.reload({ include: items excluding unitCost })` then templates + `sendEmail`, wrapped
+in its own `try/catch` that only logs — the same helper backs the Fase 8.6 "pedido enviado" email
+(`sendShipmentEmail`, with `tracking` populated). It is dispatched **fire-and-forget** (`void`, **not** awaited):
 the email must never block the webhook's `200` — if Resend were slow, Stripe could exceed its response
 timeout and retry the event in a loop. The order is already `paid`, so the send runs in the background
-and a failed email/reload can never propagate.
+and a failed email/reload can never propagate. Right after that `affectedCount === 1` guard,
+`markOrderPaidFromWebhook` also fires `void createShipmentForOrder(order)` (Fase 8.5 — see the
+**Envío en vivo / Skydropx** section for its own idempotency guard, since the shipment id isn't
+known until after the Skydropx call and can't reuse this same `paymentStatus` guard directly).
 
 `POST /api/webhooks/stripe` (`src/routes/webhook.routes.ts` → `stripeWebhook`): mounted in
 `src/app.ts` with `express.raw({ type: "application/json" })` **before** the global
@@ -204,6 +227,165 @@ double-restock. `src/services/pendingOrderSweeper.ts` (`startPendingOrderSweeper
 `PENDING_ORDER_TTL_MINUTES` with a `paymentIntentId`, and **reconciles each against Stripe**
 (`retrieve`): if the PaymentIntent is `succeeded` it marks the order `paid` (recovers a missed
 webhook), otherwise it cancels the PaymentIntent and calls `releaseOrderStock`.
+
+**Envío en vivo / Skydropx** (Fase 8.1–8.6, activo — cotización en vivo, órdenes con tarifa real,
+guía automática al pagar y webhook de estado de envío; Fase 8.7 — Swagger de los endpoints nuevos —
+pendiente, ver `roadmap-skydropx.md`):
+`POST /api/shipping/rates` `[público]` (`src/routes/shipping.routes.ts` →
+`shipping.controller.ts`'s `getShippingRates`) cotiza el envío en vivo contra Skydropx Pro para el
+checkout, con la tarifa plana existente (`cart.ts`'s `computeShipping`) como **fallback** — la
+tienda nunca debe dejar de cotizar porque la paquetería esté caída o responda mal. `src/config/
+skydropx.ts` sigue el mismo patrón que `stripe.ts`/`resend.ts`/`cloudinary.ts` (`dotenv.config()`
+propio, **hard-require** al arrancar) para `SKYDROPX_CLIENT_ID`/`SKYDROPX_CLIENT_SECRET` y para
+**todos** los campos `SHIP_FROM_*` (`POSTAL_CODE`/`STATE`/`CITY`/`NEIGHBORHOOD` desde Fase 8.3 para
+cotizar; `STREET`/`EXTERNAL_NUMBER`/`NAME`/`PHONE` desde Fase 8.5, antes reservados/opcionales,
+ahora hard-require porque `createShipmentForOrder` los usa para el `address_from` de la guía).
+
+`src/services/skydropx.service.ts` es el cliente HTTP compartido: autentica con OAuth2
+`client_credentials` (`POST /api/v1/oauth/token`), cachea el `access_token` en memoria y lo renueva
+~5 min antes de que expire (`expires_in: 7200`, 2h), y limita **todas** las llamadas salientes
+(incluida la de token) a 2 req/s con un `throttle()` de cola compartida a nivel de módulo — el
+límite documentado de la cuenta Skydropx. Cada `fetch` individual lleva su propio
+`AbortSignal.timeout` (`REQUEST_TIMEOUT_MS`, 5s) para que una conexión colgada no bloquee
+indefinidamente — el presupuesto de 8s de `pollQuotation` (`POLL_TIMEOUT_MS`) solo se revisa
+*entre* intentos, no protege contra un solo `fetch` que nunca resuelve. Los fallos HTTP se
+lanzan como `SkydropxRequestError` (conserva el `status`) en vez de un `Error` genérico, para que
+el llamador pueda distinguir un 4xx (bug de integración de nuestro lado — dirección/parcel mal
+armados) de una falla transitoria de red/5xx.
+
+`getShippingRates(addressFrom, addressTo, parcel)` crea la cotización (`POST /api/v1/quotations`,
+shape `{ quotation: { address_from, address_to, parcels } }` — confirmado contra sandbox real, ver
+`roadmap-skydropx.md` §Fase 8.3; incluye `requested_carriers` solo si `SKYDROPX_CARRIERS` está
+definido, ver más abajo) y hace poll (`GET /api/v1/quotations/{id}`) cada segundo hasta que
+ninguna tarifa quede `pending`, se junten **`MIN_READY_RATES` (3)** tarifas utilizables, o se agote
+el timeout (`POLL_TIMEOUT_MS`, **8s**) — `is_completed` puede no llegar nunca a
+`true` (timeouts internos de Skydropx ajenos a nosotros), así que el poll no lo espera. El **corte
+temprano por 3 tarifas listas** es la mayor ganancia de latencia: en sandbox (y a veces en prod)
+alguna paquetería se queda `pending` indefinidamente y sin este corte mantendría el poll ocupado
+hasta agotar los 8s completos por una sola tarifa colgada.
+**Cuidado:** un `rates: []` en la primera lectura (cotización recién creada, ninguna paquetería
+respondió aún) no es "ya resuelto" — `.some()` sobre un array vacío da `false`, así que el chequeo
+de "sigue pendiente" trata explícitamente un array vacío como pendiente, o el poll cortaría en el
+primer intento con cero tarifas. Solo se devuelven tarifas **utilizables** (`isUsableRate`: `success:
+true`, no `pending`, con `amount`/`total` no nulos — llegan como **strings**, requieren `parseFloat`),
+**ordenadas de más barata a más cara y recortadas a `MAX_RATES_RETURNED` (5)** para que el checkout
+muestre una lista corta (3-5 opciones) aun cuando `SKYDROPX_CARRIERS` no esté configurado y Skydropx
+cotice muchas paqueterías. `SKYDROPX_CARRIERS` (env opcional, lista separada por comas de slugs
+`provider_name` en minúsculas, p.ej. `"dhl,paquetexpress,fedex,estafeta,redpack"`) restringe el
+`requested_carriers` de la cotización — menos proveedores upstream = respuesta aún más rápida; sin él
+se cotizan todas y solo se recorta al devolver. `getQuotationRate(quotationId, rateId)`
+(Fase 8.4) re-consulta una cotización ya creada con un solo `GET` (sin poll — el cliente solo pudo
+elegir un rate ya resuelto) y devuelve ese rate normalizado, o `null` si ya no está disponible; es la
+fuente autoritativa del costo de envío que usa `orders.service.createOrder` (ver **Checkout**).
+
+Cada `NormalizedShippingRate` incluye `requiresDropoff` (`rateRequiresDropoff`): `true` cuando la
+paquetería **no** recoge el paquete a domicilio y el dueño debe llevarlo a su sucursal. La señal es
+**combinada a propósito** — el campo estructurado del rate crudo de Skydropx (`pickup === false`) más
+un regex sobre `provider_service_name` (`/sin\s+recolecci[oó]n/i`), porque en sandbox algunos
+servicios literalmente llamados "Sin recolección" venían con `pickup: true`; ante la duda se prefiere
+sobre-avisar (el costo de un falso negativo es que el paquete nunca sale). Es un dato **operativo
+para el dueño**, no para el comprador: `POST /api/shipping/rates` lo expone en cada tarifa (el
+checkout no necesita mostrarlo), y `createOrder` lo persiste en `Order.shippingRequiresDropoff` desde
+el rate re-consultado (nunca de un valor que mande el cliente) — ver **Checkout**.
+
+`src/services/packing.ts`'s `buildParcel` arma **una sola caja apilada** por pedido: peso y alto se
+suman por unidad, largo y ancho toman el máximo del carrito — nunca subcotiza el peso/alto, aunque
+puede sobrestimar. `shipping.controller.ts` valida, antes de cotizar, que cada producto en el
+carrito tenga `weightKg`/`lengthCm`/`widthCm`/`heightCm` > 0 (mismo invariante que `productSchema`
+exige desde Fase 8.2, ver más abajo) — un producto con alguna dimensión en `0` (fila anterior a esa
+validación) haría que `buildParcel` arme una caja subdimensionada pero válida en vez de fallar, así
+que en ese caso se **salta la cotización en vivo directo al fallback de tarifa plana** en vez de
+cotizar con datos malos. `POST /api/shipping/rates` está gateado por `shippingRateLimiter`
+(`src/middlewares/rateLimit.ts`, 20 req/min por IP) — es público y sin este límite un solo cliente
+podría acaparar el presupuesto de 2 req/s compartido por toda la cuenta y degradar la cotización de
+compradores reales.
+
+`src/services/productAvailability.ts`'s `assertProductAvailable(product)` es la guardia compartida
+de "producto disponible" (existe, `visible`, no soft-deleted) entre `orders.service.createOrder` y
+`shipping.controller.getShippingRates` — ambos flujos deben mostrar el mismo mensaje accionable
+(ver **Error handling** más abajo), así que viven en un solo lugar en vez de duplicarse.
+
+`productSchema`/`productUpdateSchema` (`src/schemas/product.ts`) exigen `weightKg`/`lengthCm`/
+`widthCm`/`heightCm` **> 0** (`.positive()`, antes `.nonnegative()`) desde Fase 8.2: con cotización
+en vivo, un producto en `0` no solo generaría una guía mala, tumbaría la cotización del carrito
+completo. El frontend (`ProductForm.tsx`) valida estos cuatro campos con la misma regla para que un
+producto legado en `0` se marque como inválido en el propio formulario en vez de fallar recién al
+enviar con un 400 desde un campo no relacionado.
+
+**Guía automática al pagar** (Fase 8.5, activo — `createShipmentForOrder` en
+`src/services/payment.service.ts`, disparada fire-and-forget desde `markOrderPaidFromWebhook` justo
+después del guard `affected === 1` que también dispara `sendOrderConfirmationEmail`, ver
+**Payments / Stripe**): crea la guía real contra Skydropx (`POST /api/v1/shipments`, shape
+`{ shipment: { rate_id, address_from, address_to, packages } }` — confirmado contra sandbox real
+igual que `quotations`, ver `roadmap-skydropx.md` §Fase 8.5) a partir del `skydropxRateId` guardado
+en la orden. Si la orden no tiene cotización de Skydropx (cayó al fallback de tarifa plana en el
+checkout), no hay `rate_id` que convertir en guía: se loguea y se omite, el dueño la genera
+manualmente. Dos hallazgos no documentados por Skydropx, confirmados por prueba y error contra
+sandbox: `packages[].consignment_note` no es texto libre pese a describirse como "Waybill ID" —
+Skydropx lo valida contra el catálogo SAT `c_ClaveProdServ` (Carta Porte, obligatoria para
+transporte terrestre de mercancías en México desde 2022) y un valor inventado da `422`; se usa un
+código fijo de "Calzado" (`53102400`, acorde al giro de la tienda — no vale la pena mapear por
+categoría de producto para un solo paquete combinado por pedido). `packages[].package_type` también
+es obligatorio pese a documentarse opcional; se usa `"4G"`, el valor de ejemplo de la doc oficial.
+
+**La creación de la guía es asíncrona**: `POST /shipments` responde `202` con
+`workflow_status: "in_progress"` y `tracking_number`/`label_url` en `null` (confirmado con 6
+pollings de `GET /shipments/{id}` a lo largo de ~12s sin resolver) — la paquetería procesa la guía
+en su propio tiempo. Por eso `createShipmentForOrder` **solo** persiste `Order.skydropxShipmentId`
+(disponible de inmediato); `trackingNumber`/`trackingUrl`/`labelUrl`/`shipmentStatus` nacen `null` y
+quedan así hasta que el webhook de Skydropx (Fase 8.6, abajo) los reporte — es precisamente el
+mecanismo diseñado para esto, así que no se hace polling bloqueante aquí. El correo
+"tu pedido va en camino" (reusa `orderConfirmationTemplate` con `tracking`) tampoco se dispara desde
+Fase 8.5 por la misma razón: no hay `tracking_number` que mostrar todavía; ese disparo lo hace el
+webhook de la Fase 8.6.
+
+**Webhook de estado de envío** (Fase 8.5↔8.6 completado — `POST /api/webhooks/skydropx`,
+`src/routes/webhook.routes.ts` → `order.controller.ts`'s `skydropxWebhook`): montado bajo el mismo
+`/api/webhooks` con `express.raw` que el de Stripe (antes del `express.json()` global), así que
+`req.body` es el `Buffer` crudo que exige la verificación de firma. `verifySkydropxWebhookSignature`
+(`skydropx.service.ts`) valida la firma **HMAC-SHA512** del header `Authorization: HMAC <firma>`
+(hex minúsculas sobre el cuerpo crudo, con `SKYDROPX_WEBHOOK_SECRET` — hard-require en
+`config/skydropx.ts`, igual que `STRIPE_WEBHOOK_SECRET`), comparándola con `crypto.timingSafeEqual`
+(previo chequeo de longitud, que la función exige) — nunca `===`. Firma ausente/mal formada/inválida
+o cuerpo no-`Buffer`/no-JSON → **400**; cualquier evento verificado → `200 { received: true }` aunque
+no se maneje, para no provocar reintentos en bucle (mismo patrón que Stripe). Solo se maneja el
+evento `packages` (payload estilo JSON:API confirmado contra la doc oficial:
+`{ data: { type: "packages", attributes: { status, tracking_number, tracking_url_provider,
+label_url }, relationships: { shipment: { data: { id } } } } }`). **Ojo:** `data.id` es el id del
+**paquete**, no del envío; el `skydropxShipmentId` que persistimos (id de `shipments`) viaja en
+`relationships.shipment.data.id` — por ahí se localiza la orden. `applyShipmentUpdateFromWebhook`
+(`payment.service.ts`, tolerante a "orden no encontrada" como los handlers de Stripe) puebla
+`trackingNumber`/`trackingUrl`/`labelUrl` **por primera vez** (este webhook es el primer punto que
+los recibe; los `*Url` solo se escriben cuando llegan no nulos, para que un evento posterior que los
+omita no borre lo que uno anterior fijó), guarda `shipmentStatus` (estado crudo íntegro) y avanza
+`Order.status` con `advanceOrderStatus` — `delivered` → `delivered`, cualquier otro estado con
+actividad → `shipped`, **solo hacia adelante** (rango `pending<paid<shipped<delivered`; un evento
+tardío/fuera de orden nunca retrocede la orden, y una orden `cancelled` no se reactiva). El correo
+"tu pedido va en camino" (`sendShipmentEmail`, reusa `orderConfirmationTemplate` con
+`tracking: { number, url, carrier }`, fire-and-forget) se dispara **exactamente una vez**: la
+primera vez que llega un `tracking_number` se reclama con un guard atómico
+`Order.update({ ...trackingNumber }, { where: { id, trackingNumber: null } })` (mismo patrón que el
+correo de confirmación) — los eventos siguientes (misma guía, nuevo estado) actualizan estado/urls
+pero no reenvían el correo.
+
+**Guard de idempotencia con centinela**: a diferencia del correo de confirmación (donde el guard es
+la propia transición atómica de `paymentStatus`), aquí el id real de la guía solo se conoce
+**después** del `POST` — que ya cuesta dinero real (doble guía = saldo gastado dos veces) — así que
+no puede usarse como guard de antemano. `createShipmentForOrder` reclama el derecho a crear la guía
+con un valor centinela (`Order.update({ skydropxShipmentId: "creating" }, { where: { id,
+skydropxShipmentId: null } })`) **antes** de llamar a Skydropx; si el `UPDATE` no afecta ninguna
+fila, otra llamada ya está creando (o ya creó) la guía de esa orden y esta se retira sin tocar
+Skydropx. Si la creación falla, el centinela se libera (`skydropxShipmentId` vuelve a `null`) para
+permitir un reintento posterior (manual o automático — ese reintento en sí no existe todavía).
+
+Si el `skydropxQuotationId`/`skydropxRateId` guardado ya no está disponible (cotización vencida —
+vigentes 24h — o la memoria en proceso de `getQuotationRate` se perdió en un reinicio del server
+entre el checkout y el pago), `createShipmentForOrder` re-cotiza desde cero: reconstruye el parcel
+con las dimensiones **actuales** de `Product` para cada `OrderItem` de la orden (no hay dimensiones
+congeladas, a diferencia de los precios) y llama a `getShippingRates` de nuevo, prefiriendo un rate
+del mismo `carrier` que ya se le mostró al cliente. El `quotationId`/`rateId` frescos se persisten,
+pero `order.shipping`/`order.total` **nunca** cambian — ya se cobraron; la re-cotización solo sirve
+para obtener un `rate_id` vigente con el que generar el envío físico.
 
 **Dashboard** (`src/routes/adminDashboard.routes.ts`, `src/routes/adminOrder.routes.ts`,
 `src/controllers/dashboard.controller.ts`, `src/controllers/order.controller.ts`,
@@ -463,7 +645,14 @@ without it they default to `0`/`[]`. Product images live in the `images` column 
 `VIRTUAL` that returns `images[0]?.url ?? null` (kept for frontend compat — the source of truth is
 `images`, so there's no physical column to keep in sync). See the **Imágenes / Cloudinary** section.
 `Order` holds a frozen snapshot of totals and shipping
-data; `OrderItem` freezes per-unit prices (`unitOriginalPrice`, `unitSalePrice`, `unitCost`) so
+data (plus nullable `paymentIntentId`/`paymentStatus` from Fase 8, and nullable
+`skydropxQuotationId`/`skydropxRateId` from Fase 8.4 — the live-shipping quotation/rate used for the
+order, `null` when it fell back to the flat rate — plus nullable `shippingRequiresDropoff`, the
+admin-only "no home pickup" flag from that same rate; plus nullable `skydropxShipmentId`/
+`trackingNumber`/`trackingUrl`/`labelUrl`/`shipmentStatus` from Fase 8.5 — the last four stay `null`
+until the Skydropx webhook (Fase 8.6, `POST /api/webhooks/skydropx`) reports them, since shipment
+creation is asynchronous — see the **Envío en vivo / Skydropx** and **Checkout** sections);
+`OrderItem` freezes per-unit prices (`unitOriginalPrice`, `unitSalePrice`, `unitCost`) so
 historical orders aren't affected by later `Product` price changes. `AdminUser` and
 `BrandSettings` (singleton) round out the Fase 1 data model; `AdminUser` also gained three
 nullable password-reset columns in Fase 9 (`resetPasswordCodeHash`, `resetPasswordExpiresAt`,
@@ -479,14 +668,26 @@ nullable password-reset columns in Fase 9 (`resetPasswordCodeHash`, `resetPasswo
   `STRIPE_WEBHOOK_SECRET` (both required — the server throws at startup without them),
   optional `STRIPE_CURRENCY`/`PENDING_ORDER_TTL_MINUTES`/`PENDING_ORDER_SWEEP_INTERVAL_MINUTES`,
   plus Cloudinary keys, `RESEND_API_KEY` + `EMAIL_FROM` (both required — the server throws at
-  startup without them) and optional `FRONTEND_URL`). `.env` is gitignored — never commit it
-  (the Stripe/Resend keys are test/sandbox).
+  startup without them), `SKYDROPX_CLIENT_ID` + `SKYDROPX_CLIENT_SECRET` + `SKYDROPX_WEBHOOK_SECRET`
+  (all three required — the last one is the HMAC secret used to verify the Skydropx status webhook,
+  Fase 8.6) and
+  `SHIP_FROM_POSTAL_CODE`/`SHIP_FROM_STATE`/`SHIP_FROM_CITY`/`SHIP_FROM_NEIGHBORHOOD`/
+  `SHIP_FROM_STREET`/`SHIP_FROM_EXTERNAL_NUMBER`/`SHIP_FROM_NAME`/`SHIP_FROM_PHONE` (all
+  required — see the **Envío en vivo / Skydropx** section), optional `SKYDROPX_BASE_URL`
+  (defaults to the sandbox host), optional `SKYDROPX_CARRIERS` (comma-separated `provider_name`
+  slugs to restrict the quotation's `requested_carriers` — see the Skydropx section), and optional
+  `FRONTEND_URL`). `.env` is gitignored — never commit it (the Stripe/Resend keys are
+  test/sandbox; Skydropx currently points at its own separate sandbox account too — see
+  `roadmap-skydropx.md` §1).
 - Dependencies wired in: `jsonwebtoken` + `bcrypt` (auth), `zod` (validation),
-  `express-rate-limit` (auth routes), `swagger-jsdoc` + `swagger-ui-express` (API docs),
+  `express-rate-limit` (auth routes, and now `POST /api/shipping/rates`),
+  `swagger-jsdoc` + `swagger-ui-express` (API docs),
   `stripe` (payments — real PaymentIntent + signed webhook),
   `cloudinary` + `multer` (image uploads — Fase 3: multer memory storage → Cloudinary
   `upload_stream`; `multer-storage-cloudinary` is installed but **unused**, see the image section),
   `resend` (transactional emails — Fase 9: password-reset code, see the Emails section).
+  Skydropx has no SDK dependency — `src/services/skydropx.service.ts` calls its REST API
+  directly with the native `fetch`.
   Prefer these existing libraries when implementing those features.
 - `pnpm-workspace.yaml` holds the pnpm `allowBuilds` map (decides which dependency lifecycle
   scripts may run, e.g. `bcrypt: true`, `@scarf/scarf: false`). pnpm v11 errors on undecided

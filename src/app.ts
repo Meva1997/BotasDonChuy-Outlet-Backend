@@ -6,6 +6,7 @@ import swaggerUi from "swagger-ui-express";
 import { connectDB } from "./config/database";
 import "./config/cloudinary"; // valida las llaves de Cloudinary al arrancar (fail-fast)
 import "./config/resend"; // valida RESEND_API_KEY + EMAIL_FROM al arrancar (fail-fast)
+import "./config/skydropx"; // valida SKYDROPX_CLIENT_ID + SKYDROPX_CLIENT_SECRET al arrancar (fail-fast)
 import "./config/zod"; // mensajes por defecto de zod en español (los pinta el front)
 import { swaggerSpec } from "./config/swagger";
 import productRoutes from "./routes/product.routes";
@@ -19,6 +20,7 @@ import adminReportsRoutes from "./routes/adminReports.routes";
 import brandRoutes from "./routes/brand.routes";
 import adminUserRoutes from "./routes/adminUser.routes";
 import accountRoutes from "./routes/account.routes";
+import shippingRoutes from "./routes/shipping.routes";
 import { errorHandler } from "./middlewares/errorHandler";
 import { startPendingOrderSweeper } from "./services/pendingOrderSweeper";
 import "./models/Product"; // register the model so sync() creates its table
@@ -66,6 +68,7 @@ app.use("/api/admin/brand", brandRoutes); // GET pública, PUT protegido dentro 
 app.use("/api/admin/users", adminUserRoutes);
 app.use("/api/admin/account", accountRoutes);
 app.use("/api/orders", orderRoutes); // checkout público
+app.use("/api/shipping", shippingRoutes); // cotización en vivo, pública
 // (El webhook de Stripe se monta arriba, antes de express.json(), para verificar
 // la firma sobre el cuerpo crudo.)
 

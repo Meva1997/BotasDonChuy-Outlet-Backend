@@ -150,6 +150,15 @@ export function orderConfirmationTemplate(input: OrderConfirmationInput): string
   const carrierLine = shippingCarrier
     ? `<p style="margin:8px 0 0;font-size:14px;color:#52525b;">Paquetería: ${escapeHtml(shippingCarrier)}</p>`
     : "";
+  // La intro cambia según el disparo: con `tracking` es el correo "pedido enviado" (Fase 8.6), sin
+  // él es la confirmación de pago (Fase 9.3). Sin esto, el correo de envío abriría con "Tu pago fue
+  // confirmado", copy de confirmación que no corresponde a un aviso de que el pedido ya salió.
+  const introHeading = input.tracking
+    ? `¡Tu pedido va en camino, ${escapeHtml(customerName)}!`
+    : `¡Gracias por tu compra, ${escapeHtml(customerName)}!`;
+  const introBody = input.tracking
+    ? `Tu pedido <strong>#${orderId}</strong> del ${formatOrderDate(createdAt)} ya salió de nuestra bodega. Abajo están los datos de rastreo y el resumen de tu compra.`
+    : `Tu pago fue confirmado. Aquí está el resumen de tu pedido <strong>#${orderId}</strong> del ${formatOrderDate(createdAt)}.`;
   const savingsRow =
     savings > 0 ? totalsRow("Ahorraste", `− ${formatMoney(savings)}`, { accent: true }) : "";
 
@@ -167,10 +176,9 @@ export function orderConfirmationTemplate(input: OrderConfirmationInput): string
             </tr>
             <tr>
               <td style="padding:32px;">
-                <p style="margin:0 0 8px;font-size:18px;font-weight:bold;line-height:1.4;">¡Gracias por tu compra, ${escapeHtml(customerName)}!</p>
+                <p style="margin:0 0 8px;font-size:18px;font-weight:bold;line-height:1.4;">${introHeading}</p>
                 <p style="margin:0 0 24px;font-size:15px;line-height:1.5;color:#52525b;">
-                  Tu pago fue confirmado. Aquí está el resumen de tu pedido
-                  <strong>#${orderId}</strong> del ${formatOrderDate(createdAt)}.
+                  ${introBody}
                 </p>
 
                 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;border-top:1px solid #e4e4e7;">

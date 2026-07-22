@@ -23,11 +23,48 @@ export interface OrderAttributes {
   // status "pending" / paymentStatus "unpaid" y el PaymentIntent aún no existe.
   paymentIntentId: string | null;
   paymentStatus: "unpaid" | "processing" | "paid" | "failed";
+  // Envío en vivo con Skydropx (Fase 8.4). Nullable: una orden creada por el
+  // fallback de tarifa plana (Skydropx no disponible al cotizar) no tiene
+  // cotización asociada. Cuando existen, `skydropxQuotationId` permite re-consultar
+  // el `total` autoritativo y `skydropxRateId` identifica el rate elegido — la base
+  // para generar la guía al pagar (Fase 8.5).
+  skydropxQuotationId: string | null;
+  skydropxRateId: string | null;
+  // Bandera operativa SOLO para el dueño (Fase 8.4+): `true` = la paquetería
+  // elegida NO recoge a domicilio, hay que llevar el paquete a su sucursal.
+  // Nullable/`null` cuando no aplica: órdenes con tarifa plana de respaldo (sin
+  // cotización Skydropx) u órdenes previas a esta columna. Se excluye de la
+  // respuesta pública de checkout — el cliente no la ve (ver orders.service.ts).
+  shippingRequiresDropoff: boolean | null;
+  // Guía automática al pagar (Fase 8.5). `skydropxShipmentId` es el guard anti-doble-guía:
+  // se reclama con un valor centinela ANTES de llamar a Skydropx (crear una guía cuesta dinero
+  // real) y se reemplaza por el id real de la guía al terminar — ver createShipmentForOrder en
+  // payment.service.ts. `trackingNumber`/`trackingUrl`/`labelUrl` quedan `null` hasta que el
+  // webhook de Skydropx (Fase 8.6) los reporte: la creación de la guía es asíncrona, la respuesta
+  // de `POST /shipments` no los incluye (confirmado contra sandbox real). `shipmentStatus` es el
+  // último estado que reporte ese mismo webhook (`in_transit`, `delivered`, etc.).
+  skydropxShipmentId: string | null;
+  trackingNumber: string | null;
+  trackingUrl: string | null;
+  labelUrl: string | null;
+  shipmentStatus: string | null;
 }
 
 interface OrderCreationAttributes extends Optional<
   OrderAttributes,
-  "id" | "references" | "shippingCarrier" | "paymentIntentId" | "paymentStatus"
+  | "id"
+  | "references"
+  | "shippingCarrier"
+  | "paymentIntentId"
+  | "paymentStatus"
+  | "skydropxQuotationId"
+  | "skydropxRateId"
+  | "shippingRequiresDropoff"
+  | "skydropxShipmentId"
+  | "trackingNumber"
+  | "trackingUrl"
+  | "labelUrl"
+  | "shipmentStatus"
 > {}
 
 export class Order
@@ -52,6 +89,14 @@ export class Order
   declare shippingCarrier: string;
   declare paymentIntentId: string | null;
   declare paymentStatus: "unpaid" | "processing" | "paid" | "failed";
+  declare skydropxQuotationId: string | null;
+  declare skydropxRateId: string | null;
+  declare shippingRequiresDropoff: boolean | null;
+  declare skydropxShipmentId: string | null;
+  declare trackingNumber: string | null;
+  declare trackingUrl: string | null;
+  declare labelUrl: string | null;
+  declare shipmentStatus: string | null;
   declare readonly createdAt: Date;
   declare readonly updatedAt: Date;
   declare items?: OrderItem[];
@@ -156,6 +201,46 @@ Order.init(
       type: DataTypes.ENUM("unpaid", "processing", "paid", "failed"),
       allowNull: false,
       defaultValue: "unpaid",
+    },
+    skydropxQuotationId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      defaultValue: null,
+    },
+    skydropxRateId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      defaultValue: null,
+    },
+    shippingRequiresDropoff: {
+      type: DataTypes.BOOLEAN,
+      allowNull: true,
+      defaultValue: null,
+    },
+    skydropxShipmentId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      defaultValue: null,
+    },
+    trackingNumber: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      defaultValue: null,
+    },
+    trackingUrl: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      defaultValue: null,
+    },
+    labelUrl: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      defaultValue: null,
+    },
+    shipmentStatus: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      defaultValue: null,
     },
   },
   {

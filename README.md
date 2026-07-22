@@ -56,6 +56,21 @@ PENDING_ORDER_SWEEP_INTERVAL_MINUTES=10 # opcional: cada cuánto corre el barrid
 RESEND_API_KEY=re_...                    # del dashboard de Resend
 EMAIL_FROM=Botas Don Chuy <onboarding@resend.dev>  # sin dominio verificado, usar onboarding@resend.dev
 FRONTEND_URL=http://localhost:3000       # opcional: base para links dentro de los correos
+
+# Skydropx (cotización en vivo + guía automática) — client id/secret, webhook secret y los 8 SHIP_FROM_* son OBLIGATORIOS
+SKYDROPX_CLIENT_ID=...
+SKYDROPX_CLIENT_SECRET=...
+SKYDROPX_WEBHOOK_SECRET=...             # secreto HMAC del webhook de estado de envío (Fase 8.6); el server no arranca sin él
+SKYDROPX_BASE_URL=https://sandbox-api.skydropx.com  # opcional (default: sandbox)
+SKYDROPX_CARRIERS=dhl,paquetexpress    # opcional: slugs provider_name separados por coma, restringe qué paqueterías cotizar
+SHIP_FROM_POSTAL_CODE=38000
+SHIP_FROM_STATE=Guanajuato
+SHIP_FROM_CITY=Celaya
+SHIP_FROM_NEIGHBORHOOD=Centro
+SHIP_FROM_STREET=...          # dirección de origen de la guía (Fase 8.5)
+SHIP_FROM_EXTERNAL_NUMBER=...
+SHIP_FROM_NAME=...
+SHIP_FROM_PHONE=...
 ```
 
 > En `NODE_ENV=development` los modelos se sincronizan automáticamente con
@@ -106,6 +121,7 @@ FRONTEND_URL=http://localhost:3000       # opcional: base para links dentro de l
 | `DELETE` | `/api/admin/users/:id`        | ✅   | Elimina un usuario (bloquea autoeliminación y al último `owner`) |
 | `PUT`    | `/api/admin/account`          | ✅   | Actualiza el correo y/o la contraseña de la cuenta propia |
 | `POST`   | `/api/webhooks/stripe`        | 🔑   | Webhook de Stripe (firma verificada; lo invoca Stripe, no de uso manual) |
+| `POST`   | `/api/webhooks/skydropx`      | 🔑   | Webhook de estado de envío de Skydropx (firma HMAC verificada; lo invoca Skydropx, no de uso manual) |
 
 ### `GET /api/products`
 
@@ -138,11 +154,19 @@ respuesta indica `{ ok, softDeleted }`.
 ### `POST /api/orders` (checkout público)
 
 Convierte el carrito del cliente en un pedido persistido. Body:
-`{ items: [{ productId, size, quantity }], customer, shippingCarrier? }`, validado con
-`createOrderSchema` (zod). El backend es la **autoridad de precios y stock**:
+`{ items: [{ productId, size, quantity }], customer, shippingCarrier?, quotationId?, rateId? }`,
+validado con `createOrderSchema` (zod). El backend es la **autoridad de precios, stock y envío**:
 
 - **Recalcula los totales** (`subtotal`, `savings`, `shipping`, `total`) en el servidor con el
   service `cart` — el cliente nunca envía montos.
+- **Envío autoritativo (Fase 8.4):** `quotationId`/`rateId` son opcionales pero van **juntos o
+  ninguno** (si el checkout cotizó en vivo contra `POST /api/shipping/rates` los manda; si cayó al
+  fallback de tarifa plana, los omite). Cuando vienen, el servidor **re-consulta** esa cotización en
+  Skydropx (`getQuotationRate`, un solo `GET`, antes de abrir la transacción) y usa el `total` de ese
+  rate como `shipping` — nunca un monto que mande el cliente. Persiste `skydropxQuotationId`/
+  `skydropxRateId` y `shippingCarrier` desde el rate elegido. Un rate ya no disponible → `409`; un
+  fallo de red al re-consultar → `503`. Sin `quotationId`/`rateId` usa `computeShipping` (tarifa
+  plana) como antes.
 - **Verifica y descuenta el stock por talla de forma atómica** dentro de una transacción, con un
   `UPDATE ... SET stock = stock - N WHERE stock >= N`. Si dos clientes compran la última unidad
   casi al mismo tiempo, solo uno recibe `201`; el otro recibe `409` y esa talla queda en stock 0.
@@ -150,7 +174,10 @@ Convierte el carrito del cliente en un pedido persistido. Body:
 - **Congela los precios** (`unitOriginalPrice`, `unitSalePrice`, `unitCost`) y el nombre en cada
   `OrderItem`, para que el histórico no cambie si el producto se reprecia. El `unitCost` (costo
   interno) se guarda congelado pero **se excluye de la respuesta pública** — solo lo ven las rutas
-  admin autenticadas.
+  admin autenticadas. Lo mismo aplica a `shippingRequiresDropoff` (bandera operativa de "hay que
+  llevar el paquete a la sucursal, no recogen a domicilio"): se persiste en la orden desde el rate
+  re-consultado, pero se excluye de la respuesta de este endpoint — solo le sirve al dueño y se ve
+  en `GET /api/admin/orders`.
 - Renglones duplicados del mismo `(productId, size)` se agregan; el descuento se hace en orden
   determinista por `(productId, size)` para evitar deadlocks entre checkouts concurrentes.
 - **Topes anti-abuso** (zod): máximo `99` unidades por artículo y `50` artículos por pedido (`400`
@@ -209,9 +236,50 @@ calcula el frontend.
   `costoEstimadoPedido` y `priority` (`urgente` <15 días · `pronto` <45 · `ok`). Las filas se ordenan
   por urgencia de cobertura y, dentro de cada nivel, por `margenMensual` desc.
 
+### Envío en vivo con Skydropx (Fase 8.1–8.6)
+
+`POST /api/shipping/rates` (público, `src/routes/shipping.routes.ts` →
+`shipping.controller.ts`) cotiza el envío en vivo contra Skydropx Pro para el checkout, con la
+tarifa plana existente (`computeShipping`) como **fallback** si Skydropx falla, tarda o algún
+producto del carrito no tiene dimensiones válidas. `src/services/skydropx.service.ts` maneja el
+OAuth2 (`client_credentials`, token cacheado ~2h), limita las llamadas salientes a 2 req/s (límite
+de la cuenta) y hace poll de la cotización hasta que las tarifas dejan de estar `pending`, se junten
+3 tarifas utilizables (`MIN_READY_RATES`, corte temprano para no esperar una paquetería colgada) o
+se agote un timeout de 8s. Las tarifas devueltas se filtran a las **utilizables** (resueltas,
+exitosas, con montos), se ordenan de más barata a más cara y se recortan a 5 (`MAX_RATES_RETURNED`).
+`SKYDROPX_CARRIERS` (env opcional) restringe de antemano qué paqueterías se cotizan, para respuestas
+más rápidas. Cada tarifa incluye `requiresDropoff` (`true` = el dueño debe llevar el paquete a la
+sucursal de la paquetería, no hay recolección a domicilio — dato operativo, el checkout no necesita
+mostrarlo). `src/services/packing.ts` arma una sola caja apilada por pedido a partir de las
+dimensiones/peso de cada producto. La ruta está limitada por `shippingRateLimiter` (20 req/min por
+IP) para no acaparar el presupuesto de 2 req/s compartido por toda la cuenta. `POST /api/orders`
+usa la cotización elegida como fuente autoritativa del costo de envío (ver la sección de checkout
+arriba).
+
+**Guía automática al pagar (Fase 8.5):** en cuanto el webhook de Stripe confirma el pago,
+`createShipmentForOrder` (`src/services/payment.service.ts`) crea la guía real contra Skydropx
+(`POST /api/v1/shipments`) usando el `rateId` guardado en la orden, y persiste
+`Order.skydropxShipmentId` — protegido por un guard de idempotencia con centinela para no generar
+dos guías (dinero real) ni con reintentos concurrentes. Si la cotización guardada ya venció, se
+re-cotiza sola antes de crear el envío (sin tocar el monto ya cobrado). La creación es **asíncrona**
+en Skydropx: `tracking_number`/`label_url` no llegan en la respuesta, así que
+`trackingNumber`/`trackingUrl`/`labelUrl` quedan en `null` hasta que el webhook de Skydropx
+(Fase 8.6) los reporte — ver `roadmap-skydropx.md` para el detalle completo.
+
+**Webhook de estado de envío (Fase 8.6):** `POST /api/webhooks/skydropx`
+(`src/routes/webhook.routes.ts` → `order.controller.ts`'s `skydropxWebhook`) se monta con el mismo
+`express.raw` que el de Stripe y verifica la firma **HMAC-SHA512** del header
+`Authorization: HMAC <firma>` contra `SKYDROPX_WEBHOOK_SECRET` (comparación en tiempo constante);
+firma ausente/inválida → `400`, evento verificado → `200` aunque no se maneje (sin reintentos en
+bucle). Del evento `packages` puebla por primera vez `trackingNumber`/`trackingUrl`/`labelUrl`,
+guarda el `shipmentStatus` crudo, avanza `Order.status` a `shipped`/`delivered` **solo hacia
+adelante** y dispara el correo "tu pedido va en camino" **exactamente una vez** (guard atómico
+`WHERE trackingNumber IS NULL`, reusando el template de confirmación con datos de rastreo) — ver
+`applyShipmentUpdateFromWebhook` en `src/services/payment.service.ts`.
+
 ### Pagos con Stripe (Fase 8 — solo test/sandbox)
 
-El cobro con Stripe está **activo** (solo Stripe; Skydropx sigue diferido). `src/config/stripe.ts`
+El cobro con Stripe está **activo** (llaves de test/sandbox). `src/config/stripe.ts`
 exige `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET` (el server no arranca sin ellas).
 
 - **PaymentIntent real:** `createPaymentIntentForOrder` (`src/services/payment.service.ts`) crea el
