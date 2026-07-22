@@ -128,3 +128,15 @@ export function startPendingOrderSweeper(): void {
     "Barrido de órdenes pending activo",
   );
 }
+
+/**
+ * Detiene el barrido periódico. Se llama en el apagado ordenado (SIGTERM/SIGINT,
+ * ver `app.ts`) para que el timer no dispare un nuevo ciclo mientras se cierra el
+ * pool de la BD. Idempotente: no-op si nunca arrancó o ya se detuvo.
+ */
+export function stopPendingOrderSweeper(): void {
+  if (timer) {
+    clearInterval(timer);
+    timer = null;
+  }
+}

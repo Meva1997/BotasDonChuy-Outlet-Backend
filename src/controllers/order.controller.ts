@@ -2,7 +2,8 @@ import type { Request, RequestHandler, Response } from "express";
 import Stripe from "stripe";
 import { Op, type WhereOptions } from "sequelize";
 import { asyncHandler } from "../middlewares/asyncHandler";
-import { createOrderSchema } from "../schemas/checkout";
+import { createOrderSchema, cancelOrderSchema } from "../schemas/checkout";
+import { parseId } from "../utils/parseId";
 import * as ordersService from "../services/orders.service";
 import * as paymentService from "../services/payment.service";
 import { stripe, STRIPE_WEBHOOK_SECRET } from "../config/stripe";
@@ -215,5 +216,21 @@ export const adminGetOrders: RequestHandler = asyncHandler(
     });
 
     res.json({ orders, total, page: pageClamped, perPage, totalPages });
+  },
+);
+
+/**
+ * POST /api/admin/orders/:id/cancel — cancelación/reembolso manual (admin).
+ * Restockea una orden `pending` o reembolsa+restockea una `paid`; 409 si ya está
+ * `shipped`/`delivered`/`cancelled`. Ver `cancelOrderByAdmin` en orders.service.ts.
+ */
+export const adminCancelOrder: RequestHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const id = parseId(req.params.id, "pedido");
+    const { reason } = cancelOrderSchema.parse(req.body ?? {});
+
+    const order = await ordersService.cancelOrderByAdmin(id, reason);
+
+    res.json({ order });
   },
 );

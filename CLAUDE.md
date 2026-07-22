@@ -27,8 +27,14 @@ for the "Botas Don Chuy Outlet" store (products of type `bota`, `sombrero`, or `
 comma-separated list of allowed origins, split/trimmed into an array before being passed to
 `cors()` — JSON and urlencoded body parsers) → mounts Swagger UI at `/api/docs` (+ raw spec
 at `/api/docs.json`) →
-mounts the routers → exposes `GET /health` → listens on `PORT` (default `4000`).
-The app `export default`s for testability.
+mounts the routers → exposes `GET /health` → listens on `PORT` (default `4000`, capturing the
+returned `http.Server` in `server`).
+The app `export default`s for testability. **Graceful shutdown** (Fase H.5): `SIGTERM`/`SIGINT`
+both call a shared `gracefulShutdown` that (1) `stopPendingOrderSweeper()`s the cron, (2)
+`server.close()`s to stop accepting new connections and drain in-flight requests, (3)
+`await sequelize.close()`s the pool — so a redeploy can't cut a checkout transaction mid-flight. A
+flag ignores repeated signals and a 10 s `unref()`ed timeout forces `process.exit(1)` if a hung
+connection stalls `server.close()`.
 
 **Database** (`src/config/database.ts`): a single shared `sequelize` instance built from
 `DATABASE_URL` (postgres dialect, connection pool max 5). `connectDB()` only authenticates —
@@ -450,6 +456,22 @@ envelope is `{ orders, total, page, perPage, totalPages }`; `total` comes from a
 `hasMany` include, and the `limit` + `items` include relies on Sequelize's subquery so the limit
 bounds orders (not joined rows) while items load in full.
 
+**Manual order cancel/refund** (Fase H.5 — `POST /api/admin/orders/:id/cancel` `[auth]`, in
+`order.controller.ts`'s `adminCancelOrder` → `orders.service.cancelOrderByAdmin(id, reason?)`): for a
+customer who asks to cancel outside the Stripe flow (WhatsApp, call). The body is optional
+(`cancelOrderSchema`, just an optional `reason` note for the log); `:id` goes through `parseId`.
+**Only `pending` and `paid` are cancellable** — `shipped`/`delivered` (already shipped with a guía,
+don't restock) and already-`cancelled` return `409`. A `pending` order reuses `releaseOrderStock`
+(restock + `cancelled`) plus a best-effort `stripe.paymentIntents.cancel` so the PI isn't orphaned.
+A `paid` order issues a **real full refund** (`stripe.refunds.create({ payment_intent }, {
+idempotencyKey: \`refund-order-${id}\` })`) **before** restocking — the idempotency key means two
+concurrent cancels never double-refund; the restock runs in a transaction that re-checks
+`status === "paid"` under `FOR UPDATE` (a second concurrent cancel finds it already closed and
+doesn't over-restock), then sets `status: "cancelled"` / `paymentStatus: "refunded"` +
+`refundId`/`refundedAt`. A **failed refund never restocks** (money didn't come back) — it logs,
+`Sentry.captureException`s, fires `sendAlertEmail`, and throws `502`. This is the first and only
+refund path in the code.
+
 **Reports** (`src/routes/adminReports.routes.ts`, `src/controllers/reports.controller.ts`,
 `src/services/reports.service.ts`): mounted at `/api/admin/reports` (`router.use(requireAuth)`).
 Both endpoints are computed **in memory** from a single shared fetch (`loadReportData`) of
@@ -675,8 +697,13 @@ order, `null` when it fell back to the flat rate — plus nullable `shippingRequ
 admin-only "no home pickup" flag from that same rate; plus nullable `skydropxShipmentId`/
 `trackingNumber`/`trackingUrl`/`labelUrl`/`shipmentStatus` from Fase 8.5 — the last four stay `null`
 until the Skydropx webhook (Fase 8.6, `POST /api/webhooks/skydropx`) reports them, since shipment
-creation is asynchronous — see the **Envío en vivo / Skydropx** and **Checkout** sections);
-`OrderItem` freezes per-unit prices (`unitOriginalPrice`, `unitSalePrice`, `unitCost`) so
+creation is asynchronous — see the **Envío en vivo / Skydropx** and **Checkout** sections; plus
+nullable `refundId`/`refundedAt` from Fase H.5 — the Stripe refund reference, populated only when a
+`paid` order is cancelled via `POST /api/admin/orders/:id/cancel`, alongside the new `refunded` value
+on the `paymentStatus` enum — see **Manual order cancel/refund**). Adding `refunded` needed a
+`ALTER TYPE ... ADD VALUE` migration (`src/migrations/20260722120600-order-refund-fields.ts`); its
+`down` recreates the enum without it and must drop+restore the column's `DEFAULT 'unpaid'` around the
+type swap (Postgres can't auto-cast a default across types). `OrderItem` freezes per-unit prices (`unitOriginalPrice`, `unitSalePrice`, `unitCost`) so
 historical orders aren't affected by later `Product` price changes. `AdminUser` and
 `BrandSettings` (singleton) round out the Fase 1 data model; `AdminUser` also gained three
 nullable password-reset columns in Fase 9 (`resetPasswordCodeHash`, `resetPasswordExpiresAt`,
@@ -774,3 +801,13 @@ server request-path code — out of scope for this phase).
   matching migration in `src/migrations/` (Architecture → **Migrations**) in the same commit —
   don't rely on `sync({ alter: true })` to replicate it anywhere, dev included (there is no
   fallback anymore).
+- **Whenever a change the frontend needs to consume lands** (a new/changed endpoint — path,
+  params, request body, or response shape — a new value/column that reaches a response the
+  storefront or admin panel reads, or an enum the frontend renders): add or update the matching
+  phase in `../frontend/ROADMAP-BACKEND-INTEGRATION.md` so the integration work is tracked. Add a
+  row to its "Mapa de endpoints ↔ consumidor" table and a new `### Fase N —` section (mark it 🔴
+  **Pendiente** until the frontend is wired), matching that file's existing style: a
+  "Lo que el backend ya hace (referencia — no tocar)" block and a "Trabajo del frontend" checklist.
+  Purely internal changes the frontend never sees (cron jobs, webhooks Stripe/Skydropx call, logging,
+  graceful shutdown, migrations with no response impact) don't need an entry. This is documentation
+  only — never write frontend code unless the user asks.

@@ -110,3 +110,16 @@ export const createOrderSchema = z
   });
 
 export type CreateOrderInput = z.infer<typeof createOrderSchema>;
+
+// Cancelación/reembolso manual de una orden desde el panel admin (Fase H.5).
+// `reason` es opcional (nota para el registro, p. ej. "el cliente pidió cancelar
+// por WhatsApp"); el `:id` del pedido viaja en la URL, no en el body.
+export const cancelOrderSchema = z.object({
+  reason: z
+    .string("El motivo debe ser texto")
+    .trim()
+    .max(200, "Máximo 200 caracteres")
+    .optional(),
+});
+
+export type CancelOrderInput = z.infer<typeof cancelOrderSchema>;
