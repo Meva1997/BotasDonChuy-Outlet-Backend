@@ -25,7 +25,7 @@ resolverse **antes** del primer deploy a producción real con clientes pagando.
 | Punto | Estado | Riesgo si no se atiende |
 |---|---|---|
 | Tests automatizados | ❌ `pnpm test` es un placeholder | Regresión silenciosa en stock atómico, webhooks, totales |
-| Migraciones de esquema | ❌ solo `sync({ alter: true })` en dev | Sin forma segura de versionar el esquema en producción |
+| Migraciones de esquema | ✅ `sequelize-cli` en `src/migrations/` (Fase H.2) | — |
 | Rate limit en `POST /api/orders` | ❌ ausente | Un bot puede crear PaymentIntents/órdenes `pending` sin límite |
 | Logging estructurado / monitoreo de errores | ❌ solo `console.*` (37 usos) | Un webhook que empieza a fallar pasa desapercibido |
 | Apagado ordenado (`SIGTERM`/`SIGINT`) | ❌ ausente | Redeploys pueden cortar conexiones de BD a medio transaction |
@@ -93,16 +93,16 @@ replicando el cambio "a mano" en producción (o nunca desplegando producción to
 más allá de un solo desarrollador con memoria perfecta.
 
 **Tareas:**
-- [ ] Adoptar `sequelize-cli` (ya viene con `sequelize` 6, cero dependencias nuevas) o `umzug`
+- [x] Adoptar `sequelize-cli` (ya viene con `sequelize` 6, cero dependencias nuevas) o `umzug`
   (más ligero, sin generador de código) — decidir según cuánto control fino se quiera sobre el SQL.
-- [ ] `src/migrations/` con una migración por cambio de esquema ya aplicado, reconstruyendo el
+- [x] `src/migrations/` con una migración por cambio de esquema ya aplicado, reconstruyendo el
   historial actual desde el primer modelo (`Product`) hasta la última columna de Skydropx —
   así el repo queda con un punto de partida limpio en vez de mezclar "migraciones nuevas" sobre
   un esquema que nunca pasó por una.
-- [ ] Script `pnpm migrate` (aplicar pendientes) y `pnpm migrate:undo` en `package.json`.
-- [ ] Documentar en `CLAUDE.md`: **"cuando agregues una columna/tabla, escribe la migración —
+- [x] Script `pnpm migrate` (aplicar pendientes) y `pnpm migrate:undo` en `package.json`.
+- [x] Documentar en `CLAUDE.md`: **"cuando agregues una columna/tabla, escribe la migración —
   no confíes en que `alter: true` la replique en producción."**
-- [ ] Decidir si `sync({ alter: true })` se apaga por completo en dev también (usar migraciones
+- [x] Decidir si `sync({ alter: true })` se apaga por completo en dev también (usar migraciones
   ahí igual, para que dev y prod compartan el mismo camino) o se deja como conveniencia de
   desarrollo rápido mientras las migraciones son la única vía hacia producción.
 
@@ -226,10 +226,10 @@ antes de que se pueda mergear.
 - [ ] Auth (login, reset code)
 
 **Fase H.2 — Migraciones**
-- [ ] Herramienta elegida (`sequelize-cli` / `umzug`)
-- [ ] Historial reconstruido en `src/migrations/`
-- [ ] Scripts `pnpm migrate`/`migrate:undo`
-- [ ] `CLAUDE.md` actualizado con la nueva convención
+- [x] Herramienta elegida (`sequelize-cli` / `umzug`)
+- [x] Historial reconstruido en `src/migrations/`
+- [x] Scripts `pnpm migrate`/`migrate:undo`
+- [x] `CLAUDE.md` actualizado con la nueva convención
 
 **Fase H.3 — Rate limit en checkout**
 - [x] `orderRateLimiter` en `POST /api/orders`

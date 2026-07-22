@@ -1,0 +1,12 @@
+const path = require("path");
+
+// Registered here (once, at CLI startup) so every migration file under
+// migrations-path can be authored in TypeScript like the rest of the repo.
+require("ts-node/register");
+
+module.exports = {
+  config: path.resolve(__dirname, "src", "config", "sequelize-cli.js"),
+  "migrations-path": path.resolve(__dirname, "src", "migrations"),
+  "seeders-path": path.resolve(__dirname, "src", "seeders"),
+  "models-path": path.resolve(__dirname, "src", "models"),
+};

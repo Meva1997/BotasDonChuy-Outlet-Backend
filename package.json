@@ -8,6 +8,10 @@
     "build": "tsc",
     "start": "node dist/app.js",
     "seed": "ts-node src/seed.ts",
+    "migrate": "sequelize-cli db:migrate",
+    "migrate:undo": "sequelize-cli db:migrate:undo",
+    "migrate:undo:all": "sequelize-cli db:migrate:undo:all",
+    "migrate:status": "sequelize-cli db:migrate:status",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [

@@ -10,6 +10,10 @@ This project uses **pnpm** (`packageManager: pnpm@11.8.0`).
 - `pnpm dev` — run the server in watch mode via `ts-node-dev` (entry: `src/app.ts`)
 - `pnpm build` — compile TypeScript to `dist/` via `tsc`
 - `pnpm start` — run the compiled build (`node dist/app.js`)
+- `pnpm migrate` — apply pending schema migrations (`sequelize-cli db:migrate`)
+- `pnpm migrate:undo` — revert the most recently applied migration (`sequelize-cli db:migrate:undo`)
+- `pnpm migrate:undo:all` / `pnpm migrate:status` — full rollback / list applied vs. pending
+  migrations (`sequelize-cli db:migrate:undo:all` / `db:migrate:status`)
 
 There is no test runner or linter configured yet (`pnpm test` is a placeholder that exits 1).
 
@@ -27,10 +31,30 @@ mounts the routers → exposes `GET /health` → listens on `PORT` (default `400
 The app `export default`s for testability.
 
 **Database** (`src/config/database.ts`): a single shared `sequelize` instance built from
-`DATABASE_URL` (postgres dialect, connection pool max 5). `connectDB()` authenticates and,
-**only when `NODE_ENV === "development"`**, runs `sequelize.sync({ alter: true })` to reshape
-tables to match the models without dropping data. SQL logging is also gated on development.
+`DATABASE_URL` (postgres dialect, connection pool max 5). `connectDB()` only authenticates —
+schema changes never happen at runtime, in any environment, dev included (see **Migrations**
+below; this used to run `sequelize.sync({ alter: true })` in development, removed in Fase H.2
+so dev and prod share the exact same schema-change path). SQL logging is gated on development.
 On any connection error the process exits with code 1.
+
+**Migrations** (`src/migrations/`, Fase H.2 — `roadmap-hardening.md`): the versioned,
+reproducible path to change schema, in dev and prod alike. `sequelize-cli` (already a
+devDependency before this phase, no new package added) is driven by `.sequelizerc` at the repo
+root, which registers `ts-node/register` (so migrations are authored in TypeScript like the
+rest of the codebase — this CLI version's file-glob already matches `.ts` natively) and points
+`migrations-path`/`seeders-path`/`models-path` at `src/migrations`/`src/seeders`/`src/models`.
+The CLI's own connection config lives in `src/config/sequelize-cli.js` (plain `.js`, not
+compiled by `tsc` — `sequelize-cli` never imports `app.ts`, so it bootstraps its own
+`dotenv.config()`, same reasoning as `stripe.ts`/`cloudinary.ts`) and resolves `DATABASE_URL`
+via Sequelize's `use_env_variable`. `src/migrations/` reconstructs the current schema as one
+`createTable` migration per table, in FK order (`products` → `product_sizes` → `orders` →
+`order_items` → `adminusers` → `brand_settings`) — a clean starting point rather than replaying
+every historical `alter: true` column-by-column. Each migration's `down` also drops the Postgres
+`ENUM` type(s) it implicitly created (`createTable`/`DataTypes.ENUM` auto-creates the type as
+`enum_<table>_<column>`, but `dropTable` does **not** drop it — that has to be explicit).
+**When you add a column or a table, write the migration under `src/migrations/` first — there
+is no `alter: true` fallback to replicate it anywhere, dev included.** Run `pnpm migrate` /
+`pnpm migrate:undo` (see Commands).
 
 **HTTP layer** (`src/routes/`, `src/controllers/`): routers are mounted in `src/app.ts`
 under a base path (e.g. `app.use("/api/products", productRoutes)`). Each route file builds an
@@ -692,6 +716,11 @@ nullable password-reset columns in Fase 9 (`resetPasswordCodeHash`, `resetPasswo
 - `pnpm-workspace.yaml` holds the pnpm `allowBuilds` map (decides which dependency lifecycle
   scripts may run, e.g. `bcrypt: true`, `@scarf/scarf: false`). pnpm v11 errors on undecided
   build scripts, so new deps with install scripts must be resolved via `pnpm approve-builds`.
+- `sequelize-cli` + `ts-node` (devDependencies) drive schema migrations (`src/migrations/`, Fase
+  H.2) via `.sequelizerc` / `src/config/sequelize-cli.js` — see Architecture → **Migrations**.
+  Both are devDependencies: a production deploy step that runs `pnpm migrate` needs them
+  installed at that point (`pnpm install` without `--prod`, or promote them to `dependencies` —
+  a decision for whenever the deploy pipeline is built).
 
 ## Workflow
 
@@ -702,3 +731,7 @@ nullable password-reset columns in Fase 9 (`resetPasswordCodeHash`, `resetPasswo
   or a changed path/params/response): the Swagger documentation MUST be written/updated first —
   add an `@openapi` JSDoc block for each new or changed endpoint (and any new
   `components.schemas` in `src/config/swagger.ts`) — before running the commit and push.
+- **Whenever a model gains, loses, or changes a column, or a new model is added**: write the
+  matching migration in `src/migrations/` (Architecture → **Migrations**) in the same commit —
+  don't rely on `sync({ alter: true })` to replicate it anywhere, dev included (there is no
+  fallback anymore).
