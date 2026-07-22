@@ -121,10 +121,10 @@ PaymentIntent real en Stripe y una fila `Order` (aunque el `pendingOrderSweeper`
 `PENDING_ORDER_TTL_MINUTES`, un flood sostenido satura la tabla y el rate limit de la cuenta Stripe).
 
 **Tareas:**
-- [ ] `orderRateLimiter` en `src/middlewares/rateLimit.ts` (mismo patrón que `shippingRateLimiter`) —
+- [x] `orderRateLimiter` en `src/middlewares/rateLimit.ts` (mismo patrón que `shippingRateLimiter`) —
   un límite generoso pero real, p. ej. 10 req/min por IP (un comprador legítimo no manda más de
   1-2 checkouts por minuto; ajustar según datos reales una vez que haya tráfico).
-- [ ] Aplicar en `src/routes/order.routes.ts` solo a la ruta pública `POST /`, no a las de
+- [x] Aplicar en `src/routes/order.routes.ts` solo a la ruta pública `POST /`, no a las de
   `adminOrder.routes.ts` (esas ya están detrás de `requireAuth`).
 - [ ] Evaluar si también aplica a `GET /api/products`/`GET /api/products/:id` (catálogo público sin
   límite hoy) — separar en su propia tarea si el volumen de tráfico lo justifica; no bloquea esta fase.
@@ -232,7 +232,7 @@ antes de que se pueda mergear.
 - [ ] `CLAUDE.md` actualizado con la nueva convención
 
 **Fase H.3 — Rate limit en checkout**
-- [ ] `orderRateLimiter` en `POST /api/orders`
+- [x] `orderRateLimiter` en `POST /api/orders`
 
 **Fase H.4 — Logging y monitoreo**
 - [ ] Logger estructurado (`pino`) reemplazando `console.*`
