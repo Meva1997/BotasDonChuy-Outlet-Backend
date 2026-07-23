@@ -73,9 +73,9 @@ por eso `DATABASE_URL` debe apuntar a una BD dedicada de pruebas).
 | **0** | Infra (jest, ts-jest, supertest, setup, smoke) | — | ✅ Hecho |
 | **0.5** | BD de test dedicada (crear el Postgres de pruebas) — prerequisito de 2-4 | — | ✅ Hecho |
 | **1** | Servicios puros (`cart`, `forecast`, `formatMoney`, `date`) | Unit | ✅ Hecho |
-| **2** | Auth (login anti-enumeración, reset code) | Integración | 🔴 Pendiente |
-| **3** | Checkout (stock atómico, totales, refine shipping) | Integración | 🔴 Pendiente |
-| **4** | Idempotencia de webhooks (pago, guía, estado de envío) | Servicio + mock | 🔴 Pendiente |
+| **2** | Auth (login anti-enumeración, reset code) | Integración | ✅ Hecho |
+| **3** | Checkout (stock atómico, totales, refine shipping) | Integración | ✅ Hecho |
+| **4** | Idempotencia de webhooks (pago, guía, estado de envío) | Servicio + mock | ✅ Hecho |
 | **5** | Cancelación/reembolso manual + release de stock (opcional) | Servicio + mock | 🔴 Pendiente |
 
 ---
@@ -166,11 +166,11 @@ completo (37 tests, 5 suites) y `pnpm build` siguen en verde.
 
 ---
 
-### Parte 2 — Auth (integración HTTP) — 🔴 Pendiente
+### Parte 2 — Auth (integración HTTP) — ✅ Hecho
 
-- [ ] `POST /api/auth/login`: password correcta → `{ token, user }`; **email desconocido y password
+- [x] `POST /api/auth/login`: password correcta → `{ token, user }`; **email desconocido y password
   incorrecta devuelven el MISMO `401` byte-idéntico** (anti-enumeración, `auth.controller.ts:40`).
-- [ ] `assertValidResetCode` (vía `POST /api/auth/verify-reset-code` y `reset-password`): código
+- [x] `assertValidResetCode` (vía `POST /api/auth/verify-reset-code` y `reset-password`): código
   válido pasa; agota `RESET_CODE_MAX_ATTEMPTS` (5) y bloquea (quema el código); mensaje **idéntico**
   en los casos missing-user / wrong-code / expired.
 
@@ -178,42 +178,111 @@ completo (37 tests, 5 suites) y `pnpm build` siguen en verde.
 `createAdminUser` (hash bcrypt real). Primera suite con BD → `beforeAll(setupTestDatabase)`,
 `afterEach(truncateAll)`, `afterAll(closeTestDatabase)`.
 
+**Verificado:** `tests/integration/auth.test.ts` (6 tests) — login con password correcta; login con
+email desconocido y password incorrecta comparados **byte a byte** (`toEqual` sobre el `body`
+completo, no solo el string del mensaje); `verify-reset-code` con código válido (y que no lo
+consume); mensaje idéntico entre correo inexistente / código incorrecto / código expirado; los
+`RESET_CODE_MAX_ATTEMPTS` (5) intentos fallidos queman el código (`resetPasswordCodeHash` vuelve a
+`null` en BD) y el código original ya quemado sigue devolviendo el mismo mensaje; `reset-password`
+con código válido actualiza la contraseña (login posterior con la nueva password) y la quema (un
+segundo uso del mismo código falla). Los códigos de prueba se fijan directo en la fila
+(`user.update({ resetPasswordCodeHash: hashResetCode(code), ... })`) en vez de pasar por
+`forgot-password` + Resend, para no depender del mock de email en esta parte. `authRateLimiter`
+(10 req/15 min, instancia única compartida por las 4 rutas de `auth.routes.ts`) se mockea con
+`jest.mock("express-rate-limit", ...)` — la suite hace bastantes más de 10 requests y el propio
+rate limiter la haría fallar con 429 antes de ejercitar la lógica real; probar el rate limit no es
+parte de esta entrega. Prueba negativa manual: reemplazar el 401 de "email desconocido" en
+`auth.controller.ts` por un mensaje distinto puso el test de anti-enumeración en rojo, confirmando
+que el `toEqual` sobre el body completo sí detecta la fuga (revertido después). De paso se corrigió
+un bug preexistente en `tests/setup/factories.ts` (Parte 1): importaba `Product`/`ProductSize`/
+`AdminUser`/`Order`/`OrderItem` como default export cuando los modelos solo exportan la clase con
+`export class` (named export) — nunca se había ejercitado porque la Parte 1 no toca la BD.
+`pnpm test` (43 tests, 6 suites) y `pnpm build` en verde.
+
 **Verifica:** `pnpm test auth` en verde.
 
 ---
 
-### Parte 3 — Checkout (integración HTTP, Stripe mockeado) — 🔴 Pendiente
+### Parte 3 — Checkout (integración HTTP, Stripe mockeado) — ✅ Hecho
 
-- [ ] **Descuento atómico de stock:** dos `POST /api/orders` **concurrentes** (`Promise.all`) por el
+- [x] **Descuento atómico de stock:** dos `POST /api/orders` **concurrentes** (`Promise.all`) por el
   último par talla/producto (stock 1) → **una `201` y una `409`** (el `literal('stock - N')` +
   `Op.gte` de `orders.service.ts:126`); el stock final queda en 0.
-- [ ] **Totales autoritativos:** un total/precio que mande el cliente en el body se **ignora**; la
+- [x] **Totales autoritativos:** un total/precio que mande el cliente en el body se **ignora**; la
   respuesta recalcula server-side desde el `cart` service.
-- [ ] **Refine `quotationId`/`rateId`:** ambos-o-ninguno — uno sin el otro → `400`
+- [x] **Refine `quotationId`/`rateId`:** ambos-o-ninguno — uno sin el otro → `400`
   (`createOrderSchema.refine()`, `schemas/checkout.ts:104`).
 
 **Ref:** `src/services/orders.service.ts` (`createOrder`), `src/controllers/order.controller.ts`.
 Mockear `createPaymentIntentForOrder` (`payment.service.ts:49`) para no llamar a Stripe.
+
+**Verificado:** `tests/integration/checkout.test.ts` (4 tests) — dos `POST /api/orders`
+concurrentes contra un producto con stock 1 en talla 25 dan exactamente una `201` y una `409`
+(mensaje "se agotó"), y el stock final en BD queda en `0`; un pedido con precios/totales
+falsificados en el body (`unitSalePrice`, `price`, `total`, `subtotal`, `savings` a nivel raíz —
+todos campos que el schema no reconoce y por tanto descarta) devuelve el `subtotal`/`savings`/
+`shipping`/`total` recalculados desde los precios reales del producto en BD; `quotationId` sin
+`rateId` (y viceversa) devuelven `400`. `payment.service.ts` se mockea **completo** (no solo
+`createPaymentIntentForOrder`) para que sus otros imports (Resend/Skydropx/Sentry) no se carguen
+en esta suite. Prueba negativa manual: quitar el `Op.gte` del `WHERE` del `UPDATE` atómico
+(`orders.service.ts`) hizo que las dos peticiones concurrentes devolvieran `201` — el test de
+stock atómico lo detectó y se puso en rojo (revertido después).
+
+**Hallazgo de infraestructura:** al sumar una segunda suite de integración, `pnpm test` sin
+`--runInBand` empezó a fallar de forma intermitente (`sync({ force: true })`/`TRUNCATE` de dos
+workers de Jest pisándose contra el mismo Postgres de test — errores tipo "el tipo ENUM ya
+existe"/"relation does not exist"). La Parte 2 nunca lo mostró por ser la única suite de
+integración hasta ahora. Se corrigió agregando `maxWorkers: 1` a `jest.config.ts`: serializa
+todas las suites (las unitarias son rápidas, el costo es mínimo) y elimina la carrera — necesario
+también de cara a las Partes 4 y 5, que suman más suites de integración. `pnpm test` (47 tests, 7
+suites) y `pnpm build` en verde.
 
 **Verifica:** `pnpm test checkout` en verde. Prueba negativa: quitar el `Op.gte` del `UPDATE` →
 el test de concurrencia debe ponerse en rojo (dos `201`).
 
 ---
 
-### Parte 4 — Idempotencia de webhooks (servicio directo + SDK mockeado) — 🔴 Pendiente
+### Parte 4 — Idempotencia de webhooks (servicio directo + SDK mockeado) — ✅ Hecho
 
-- [ ] `markOrderPaidFromWebhook`: **dos llamadas concurrentes** → un solo `affected === 1` y **un
+- [x] `markOrderPaidFromWebhook`: **dos llamadas concurrentes** → un solo `affected === 1` y **un
   solo correo** (`sendEmail` mockeado). Prueba negativa: comentar el `WHERE`/`Op.ne: "paid"`
   (`payment.service.ts:90`) → el test detecta el doble envío.
-- [ ] `createShipmentForOrder`: el **guard centinela `"creating"`** (`payment.service.ts:179`) — dos
+- [x] `createShipmentForOrder`: el **guard centinela `"creating"`** (`payment.service.ts:179`) — dos
   concurrentes → **una sola** llama a Skydropx (`createShipment`/`fetch` mockeado, no gastar saldo);
   si la creación falla, el centinela se libera a `null`.
-- [ ] `applyShipmentUpdateFromWebhook` (`payment.service.ts:498`): un evento **fuera de orden** no
+- [x] `applyShipmentUpdateFromWebhook` (`payment.service.ts:498`): un evento **fuera de orden** no
   retrocede `Order.status` (`advanceOrderStatus` avanza solo hacia adelante); una orden `cancelled`
   no se reactiva.
 
 **Ref:** `src/services/payment.service.ts`. Mockear `config/stripe`, `skydropx.service` (o `fetch`)
 y `email.service`. Requiere BD de test (los guards son `UPDATE` condicionales reales).
+
+**Verificado:** `tests/integration/webhooks.test.ts` (7 tests) — llama directo a las funciones de
+`payment.service.ts` (no vía HTTP) con `Promise.all` contra la BD de test real. Se mockean
+`email.service` (`sendEmail`) y `skydropx.service` (`getQuotationRate`/`createShipment`/
+`getShippingRates`, el resto vía `jest.requireActual` como documenta `tests/setup/mocks/skydropx.ts`)
+— ninguno de los dos debe costar saldo real ni mandar un correo real. `alert.service.ts` reusa
+`sendEmail` internamente, así que mockear `email.service` también cubre sus alertas sin un mock
+aparte. Los efectos fire-and-forget (correo, guía) no se pueden `await` desde el test porque el
+propio código no los espera (a propósito, para no bloquear el 200 del webhook) — se usa un
+`waitFor(predicate)` local que hace polling con timers reales (nunca fake timers: la recarga de la
+orden y los guards hacen I/O real contra Postgres) antes de aserta sobre `sendEmailMock`.
+`markOrderPaidFromWebhook`: dos llamadas concurrentes con el mismo `paymentIntentId` dejan la orden
+`paid` y disparan el correo de confirmación exactamente una vez; una orden `cancelled` que recibe un
+evento tardío se queda `cancelled` (no se reactiva) y no manda correo. `createShipmentForOrder`: dos
+llamadas concurrentes sobre la misma orden (con `skydropxQuotationId`/`skydropxRateId`) solo generan
+**una** guía (`createShipment` mockeado llamado una vez, `skydropxShipmentId` queda con el id
+devuelto); si `createShipment` rechaza, el centinela `"creating"` se libera a `null` (permite
+reintento). `applyShipmentUpdateFromWebhook`: un evento `in_transit` sobre una orden ya `delivered`
+no la retrocede a `shipped`; el mismo evento sobre una orden `cancelled` no la reactiva; dos eventos
+concurrentes que traen el mismo `trackingNumber` por primera vez avanzan la orden a `shipped` y
+disparan el correo "pedido enviado" una sola vez (guard `WHERE trackingNumber IS NULL`). Pruebas
+negativas manuales: quitar el `WHERE status: "pending" / Op.ne: "paid"` de `markOrderPaidFromWebhook`
+puso en rojo tanto el test de concurrencia (correo duplicado) como el de la orden cancelada (se
+resucitó a `paid`); quitar el `WHERE skydropxShipmentId: null` del claim de `createShipmentForOrder`
+puso en rojo el test del guard centinela (`createShipment` llamado dos veces) — ambas reversiones
+confirmadas, `git diff` limpio sobre `payment.service.ts`. `pnpm test` (54 tests, 8 suites) y `pnpm
+build` en verde.
 
 **Verifica:** `pnpm test webhooks` en verde + las pruebas negativas en rojo al romper cada guard.
 
@@ -256,7 +325,7 @@ branch protection en `main`.
 - [x] **Parte 0** — Infra (jest/ts-jest/supertest, setup, gate en app.ts, smoke verde)
 - [x] **Parte 0.5** — BD de test dedicada (crear el Postgres de pruebas; prerequisito de las Partes 2-4)
 - [x] **Parte 1** — Servicios puros (`cart`, `forecast`, `formatMoney`, `date`)
-- [ ] **Parte 2** — Auth (login anti-enumeración, reset code)
-- [ ] **Parte 3** — Checkout (stock atómico, totales, refine shipping)
-- [ ] **Parte 4** — Idempotencia de webhooks (pago, guía, estado de envío)
+- [x] **Parte 2** — Auth (login anti-enumeración, reset code)
+- [x] **Parte 3** — Checkout (stock atómico, totales, refine shipping)
+- [x] **Parte 4** — Idempotencia de webhooks (pago, guía, estado de envío)
 - [ ] **Parte 5** — Cancelación/reembolso manual + release de stock (opcional)

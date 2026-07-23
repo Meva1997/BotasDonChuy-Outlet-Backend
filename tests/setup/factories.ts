@@ -6,11 +6,11 @@
  *
  * Requieren una BD de test activa (ver tests/setup/db.ts) — no son puros.
  */
-import Product from "../../src/models/Product";
-import ProductSize from "../../src/models/ProductSize";
-import AdminUser from "../../src/models/AdminUser";
-import Order from "../../src/models/Order";
-import OrderItem from "../../src/models/OrderItem";
+import { Product } from "../../src/models/Product";
+import { ProductSize } from "../../src/models/ProductSize";
+import { AdminUser } from "../../src/models/AdminUser";
+import { Order } from "../../src/models/Order";
+import { OrderItem } from "../../src/models/OrderItem";
 import { hashPassword } from "../../src/utils/password";
 
 let emailCounter = 0;
