@@ -14,8 +14,10 @@ This project uses **pnpm** (`packageManager: pnpm@11.8.0`).
 - `pnpm migrate:undo` — revert the most recently applied migration (`sequelize-cli db:migrate:undo`)
 - `pnpm migrate:undo:all` / `pnpm migrate:status` — full rollback / list applied vs. pending
   migrations (`sequelize-cli db:migrate:undo:all` / `db:migrate:status`)
+- `pnpm test` — run the Jest test suite; `pnpm test:watch` — watch mode; `pnpm test <pattern>` — a
+  single part (see **Testing** below).
 
-There is no test runner or linter configured yet (`pnpm test` is a placeholder that exits 1).
+No linter is configured yet.
 
 ## Architecture
 
@@ -755,6 +757,42 @@ operational alert, not a correctness guarantee). `email.service.ts`'s own two fa
 same broken channel. `src/seed.ts`'s `console.log` calls are unchanged (a one-off CLI script, not
 server request-path code — out of scope for this phase).
 
+**Testing** (Fase H.1 — `roadmap-testing.md`): the suite runs on **`jest` + `ts-jest` +
+`supertest`** and lives in **`tests/`**, deliberately **outside `src/`** — `tsc` compiles `src/`→
+`dist/`, so a test under `src/` would ship to production; `ts-jest` transpiles the `tests/` files
+in-memory and `tsc` ignores them. `jest.config.ts` points `ts-jest` at **`tsconfig.jest.json`** (a
+separate file, not an inline object — an inline `tsconfig` **replaces** the base config instead of
+merging, dropping `@types` resolution; the file `extends` the base but moves `rootDir` to the repo
+root and adds `types: [jest, node]`). `roadmap-testing.md` breaks the work into **independent
+parts** (0 = infra, done; 0.5 = create the dedicated test DB; 1 = pure services; 2 = auth; 3 =
+checkout; 4 = webhook idempotency; 5 = manual cancel/refund) — add tests **part by part**, marking
+`[x]` there as each closes, and don't touch `src/` from a test part unless a test reveals a real bug.
+
+**Three levels, each behavior where it belongs:** (1) *pure unit*, no DB — import and call the
+function (`cart`, `forecast`, `formatMoney`, `date`); (2) *HTTP integration* — `request(app)...`
+against a **real test Postgres**, the full route→middleware→controller→service→DB flow (`auth`,
+`checkout`); (3) *service + mocked SDK* — call the service directly with `Promise.all` and a real DB
+for concurrency/idempotency (`webhooks`). Controllers are **not** tested in isolation with
+everything mocked — the logic lives in services (levels 1/3) and the HTTP flow is covered end-to-end
+by Supertest (level 2). **Stripe, Skydropx (`fetch`/service) and Resend (`sendEmail`) are ALWAYS
+mocked** (they cost money or send real emails); the **DB is never mocked** — a real Postgres,
+**never sqlite**, because the code depends on `ENUM`, `JSONB`, and `literal('stock - N')`.
+
+**The `NODE_ENV !== "test"` gate in `src/app.ts`** wraps `connectDB()`,
+`startPendingOrderSweeper()`, `app.listen(...)` and the graceful-shutdown wiring, so Supertest can
+`import app` without opening a port, connecting to the DB, or starting the cron; `export default
+app` sits outside the gate. `tests/setup/env.ts` (Jest `setupFiles`) sets `NODE_ENV=test` and loads
+**`.env.test`** (gitignored, dummy keys satisfying each `config/*` fail-fast + a `DATABASE_URL`
+pointing at a dedicated test DB) with `override: true` **before** any `config/*` runs its own
+`dotenv.config()` (which by default does **not** override existing keys). `tests/setup/db.ts` exposes
+`setupTestDatabase()` (`authenticate` + `sync({ force: true })`), `truncateAll()`, and
+`closeTestDatabase()` — integration suites call these in `beforeAll`/`afterEach`/`afterAll`.
+**Because `sync({ force: true })` DROPS and recreates every table, `.env.test`'s `DATABASE_URL` must
+point at a throwaway test database, never dev/prod.** `tests/setup/factories.ts` builds
+Product/AdminUser/Order/OrderItem rows; `tests/setup/mocks/{stripe,skydropx,resend}.ts` are the
+reusable SDK-mock builders. **When adding a test that needs the DB, use these helpers — don't spin up
+a second sequelize instance.**
+
 ## Conventions
 
 - TypeScript runs in `strict` mode with decorators enabled (`experimentalDecorators`,
@@ -794,6 +832,8 @@ server request-path code — out of scope for this phase).
 - `pnpm-workspace.yaml` holds the pnpm `allowBuilds` map (decides which dependency lifecycle
   scripts may run, e.g. `bcrypt: true`, `@scarf/scarf: false`). pnpm v11 errors on undecided
   build scripts, so new deps with install scripts must be resolved via `pnpm approve-builds`.
+- `jest` + `ts-jest` + `supertest` (+ `@types/jest`/`@types/supertest`) are devDependencies for the
+  test suite (Fase H.1, see Architecture → **Testing**); `pnpm test` runs `jest`.
 - `sequelize-cli` + `ts-node` (devDependencies) drive schema migrations (`src/migrations/`, Fase
   H.2) via `.sequelizerc` / `src/config/sequelize-cli.js` — see Architecture → **Migrations**.
   Both are devDependencies: a production deploy step that runs `pnpm migrate` needs them

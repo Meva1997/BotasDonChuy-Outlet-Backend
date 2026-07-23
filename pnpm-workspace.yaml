@@ -1,3 +1,6 @@
 allowBuilds:
   '@scarf/scarf': false
   bcrypt: true
+  # Resolver nativo transitivo (llega vía ts-jest → jest). Los tests no necesitan su
+  # build nativo — el fallback en JS basta — así que no se compila.
+  unrs-resolver: false
