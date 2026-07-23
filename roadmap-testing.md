@@ -7,7 +7,7 @@ stock, idempotencia de webhooks, recálculo de totales y auth — y se deja fuer
 cambia seguido o tiene bajo ROI de prueba.
 
 > **Cómo usarlo:** marca `[x]` cada tarea al completarla. Las partes tienen un orden recomendado
-> (0 → 5), pero salvo la Parte 0 (infra, prerequisito de todo) no están encadenadas: puedes hacer la
+> (0 → 10), pero salvo la Parte 0 (infra, prerequisito de todo) no están encadenadas: puedes hacer la
 > de auth antes que la de checkout si lo prefieres.
 
 ---
@@ -78,6 +78,11 @@ por eso `DATABASE_URL` debe apuntar a una BD dedicada de pruebas).
 | **3** | Checkout (stock atómico, totales, refine shipping) | Integración | ✅ Hecho |
 | **4** | Idempotencia de webhooks (pago, guía, estado de envío) | Servicio + mock | ✅ Hecho |
 | **5** | Cancelación/reembolso manual + release de stock (opcional) | Servicio + mock | ✅ Hecho |
+| **6** | Envío en vivo (`POST /api/shipping/rates`, fallback a tarifa plana) | Integración | 🔴 Pendiente |
+| **7** | Cliente HTTP de Skydropx (OAuth, throttle, poll de cotización) | Unit (fetch mock) | 🔴 Pendiente |
+| **8** | CRUD admin de productos + imágenes (Cloudinary mockeado) | Integración | 🔴 Pendiente |
+| **9** | Marca y usuarios admin (brand, logo, adminUser, account) | Integración | 🔴 Pendiente |
+| **10** | Agregaciones de dashboard y reports (invariantes, no cifras exactas) | Unit | 🔴 Pendiente |
 
 ---
 
@@ -328,16 +333,128 @@ build` en verde.
 
 ---
 
+### Parte 6 — Envío en vivo (integración HTTP, Skydropx mockeado) — 🔴 Pendiente
+
+- [ ] `POST /api/shipping/rates`: cuando `getShippingRates` (Skydropx) rechaza o tarda, la respuesta
+  sigue siendo `200` con la tarifa plana de `cart.ts`'s `computeShipping` como fallback — la tienda
+  nunca debe dejar de cotizar porque la paquetería esté caída.
+- [ ] Un producto en el carrito con `weightKg`/`lengthCm`/`widthCm`/`heightCm` en `0` (fila legado
+  previa a la validación `.positive()`) salta **directo** al fallback de tarifa plana sin llamar a
+  Skydropx (`buildParcel` armaría una caja subdimensionada pero "válida" si no se saltara).
+- [ ] `shippingRateLimiter` (20 req/min, `src/middlewares/rateLimit.ts`) — mismo patrón que
+  `authRateLimiter` en la Parte 2: mockear `express-rate-limit` para que la suite no choque con el
+  límite real al hacer varias requests.
+
+**Ref:** `src/controllers/shipping.controller.ts`, `src/services/cart.ts` (`computeShipping`),
+`src/services/packing.ts` (`buildParcel`). Mockear `skydropx.service` completo (`getShippingRates`)
+— no llamar a Skydropx real ni siquiera al sandbox.
+
+---
+
+### Parte 7 — Cliente HTTP de Skydropx (unit, `fetch` mockeado) — 🔴 Pendiente
+
+- [ ] OAuth `client_credentials`: el `access_token` se cachea en memoria y se renueva ~5 min antes de
+  expirar (`expires_in: 7200`).
+- [ ] Throttle compartido de 2 req/s a nivel de módulo (todas las llamadas salientes, incluida la de
+  token).
+- [ ] Poll de cotización (`pollQuotation`): corte temprano al juntar `MIN_READY_RATES` (3) tarifas
+  utilizables; timeout de `POLL_TIMEOUT_MS` (8s) si ninguna tarifa llega a completarse; un
+  `rates: []` en la primera lectura (cotización recién creada) se trata como "sigue pendiente", **no**
+  como resuelto (`.some()` sobre array vacío da `false` — el caso que motivó el chequeo explícito).
+- [ ] `isUsableRate` / normalización: `amount`/`total` llegan como **strings** y requieren
+  `parseFloat`; el resultado queda ordenado ascendente y recortado a `MAX_RATES_RETURNED` (5).
+- [ ] `requiresDropoff` combinado: `pickup === false` **o** el regex `/sin\s+recolecci[oó]n/i` sobre
+  `provider_service_name` (la señal estructurada sola no basta — sandbox tuvo casos con `pickup:
+  true` en un servicio literalmente llamado "Sin recolección").
+- [ ] `SkydropxRequestError` conserva el `status` HTTP, para distinguir un `4xx` (bug de integración
+  nuestro) de un `5xx`/falla de red (transitorio).
+
+**Ref:** `src/services/skydropx.service.ts`. Usar `buildFetchMock` (ya scaffolded en
+`tests/setup/mocks/skydropx.ts`) para encolar las respuestas JSON de OAuth/cotización en el orden
+que el cliente las pide — sin BD, sin HTTP real.
+
+---
+
+### Parte 8 — CRUD admin de productos + imágenes (integración HTTP, Cloudinary mockeado) — 🔴 Pendiente
+
+- [ ] `adminCreateProduct`/`adminUpdateProduct`: `sizes` acepta tanto un string `"25,25,26"` como un
+  array de números; las filas de `ProductSize` se escriben dentro de una `sequelize.transaction`.
+- [ ] `DELETE /api/admin/products/:id`: **soft-delete** (`deletedAt` + `visible:false`) cuando el
+  producto está referenciado por un `OrderItem`; **hard-delete** (con cascade de `ProductSize`) en
+  cualquier otro caso.
+- [ ] `POST /:id/images`: cap de 3 imágenes totales, re-verificado bajo row lock (`FOR UPDATE`) para
+  que dos adds concurrentes no pasen ambos una cuenta ya obsoleta; subida **todo-o-nada**
+  (`uploadAllOrCleanup` — si una falla, las que sí subieron se destruyen; si la transacción de BD
+  falla después, también se limpian los assets recién subidos).
+- [ ] `DELETE /:id/images`: persiste el cambio en BD **antes** de destruir el asset en Cloudinary
+  (best-effort) — nunca al revés, para no dejar una referencia colgante que rompa la imagen en la
+  tienda.
+- [ ] Lecturas públicas (`toPublicProduct`): cada imagen pierde el `publicId` (id interno de
+  Cloudinary) antes de salir en la respuesta.
+
+**Ref:** `src/controllers/product.controller.ts`, `src/services/image.service.ts`,
+`src/middlewares/upload.ts`. Mockear `cloudinary` (`uploader.upload_stream`/`destroy`) — nunca subir
+un asset real.
+
+---
+
+### Parte 9 — Marca y usuarios admin (integración HTTP, Cloudinary mockeado) — 🔴 Pendiente
+
+- [ ] `GET /api/admin/brand` es **público** (sin JWT); `PUT /api/admin/brand` exige `requireAuth`.
+- [ ] `POST`/`DELETE /api/admin/brand/logo`: el nuevo asset se persiste **antes** de destruir el
+  anterior (best-effort) — un `destroy` fallido nunca pierde el logo vigente.
+- [ ] `POST /api/admin/users`: email duplicado → `409` pre-chequeado (no depende solo del handler
+  genérico de `UniqueConstraintError`); `tempPassword` exige la misma complejidad que `loginSchema`.
+- [ ] `DELETE /api/admin/users/:id`: `400` si el caller se borra a sí mismo; `400` si el target es el
+  **último** `owner` restante — chequeado bajo `FOR UPDATE` sobre las filas `owner` (dos deletes
+  concurrentes a dos owners distintos no deben dejar el panel en cero).
+- [ ] `PUT /api/admin/account`: `currentPassword` siempre requerida y verificada (incluso en un
+  cambio solo de email); un email duplicado → `409` pre-chequeado.
+
+**Ref:** `src/controllers/brand.controller.ts`, `src/controllers/adminUser.controller.ts`. Mockear
+`cloudinary` para el logo — mismo patrón que la Parte 8.
+
+---
+
+### Parte 10 — Agregaciones de dashboard y reports (unit, funciones puras) — 🔴 Pendiente
+
+> A diferencia de las partes anteriores, aquí no se persiguen cifras exactas contra un dataset fijo
+> (la agregación cambia seguido y un snapshot de números se vuelve frágil/costoso de mantener) — se
+> prueban **invariantes estructurales y casos borde** con fixtures pequeños y deliberados de
+> `Order`/`OrderItem`/`Product`.
+
+- [ ] `dashboard.service.ts`: solo las órdenes `status: "paid"` cuentan como venta (no
+  `paymentStatus`, que el seed deja en `"unpaid"`); cada ventana (`"7"|"30"|"90"`) compara contra su
+  propia ventana previa de igual longitud; `GASTOS_FIJOS` se prorratea por `windowDays/30`.
+- [ ] `revenueByPeriod`: incluye días en `$0` (nunca se saltan); el day-bucketing (`isoDay`) queda
+  pinneado a UTC — un caso cerca de medianoche en un host al oeste de UTC no debe recorrer un día
+  (el bug real que motivó el pin, igual que en la Parte 1).
+- [ ] `reports.service.ts`'s `monthRange`: sin huecos entre el mes de la primera orden pagada y el
+  mes UTC actual; clamp al mes actual cuando `from` queda después de `to`.
+- [ ] `byProduct` de cada mes: incluye todo producto vivo (`unitsSold: 0` si no vendió ese mes) más
+  un producto descontinuado **solo** en los meses donde realmente vendió.
+- [ ] `replenishment`: la serie que alimenta `computeForecast` usa solo meses completos, excepto el
+  caso de **cero** meses completos (primer mes de la tienda), donde usa el mes parcial como único
+  dato; `effectiveForecast` actúa como piso cuando `forecastNextMonth` redondea a `0`; los meses en
+  `$0` **antes** de la primera venta del producto se recortan de la serie (los de después se
+  conservan).
+- [ ] `loadReportData`: cachea la promesa por `REPORT_CACHE_TTL_MS` (60s); un fetch que rechaza limpia
+  el cache de inmediato en vez de repetir el error hasta que expire el TTL.
+
+**Ref:** `src/services/dashboard.service.ts`, `src/services/reports.service.ts`. Sin BD real ni HTTP
+— se llaman las funciones directo con arrays de `Order`/`Product` construidos a mano (o con las
+factories de `tests/setup/factories.ts` sin persistirlas).
+
+---
+
 ## Fuera de alcance (documentado a propósito)
 
-No se cubren en este roadmap por bajo ROI / alta volatilidad; se pueden agregar después si el tráfico
-lo justifica:
+No se cubre en este roadmap por bajo ROI — es configuración declarativa sin lógica propia que
+probar:
 
-- **Dashboard / Reports** (`dashboard.service.ts`, `reports.service.ts`): agregación en memoria que
-  cambia seguido; probar cifras exactas es frágil.
-- **Swagger**, **CRUD admin trivial** (brand, users), **Cloudinary/multer** (subida de imágenes).
-- **El cliente HTTP de Skydropx en sí** (OAuth, throttle, poll): se puede añadir una suite dedicada
-  con `fetch` mockeado (`buildFetchMock`) si aparece un bug ahí, pero no es prioridad H.1.
+- **Swagger** (`swagger-jsdoc`/`swagger-ui-express`, `src/config/swagger.ts` + los bloques
+  `@openapi`): genera un spec OpenAPI a partir de anotaciones; no hay comportamiento en tiempo de
+  ejecución que valga la pena ejercitar con un test.
 
 ## Siguiente paso tras cerrar H.1
 
@@ -354,3 +471,8 @@ branch protection en `main`.
 - [x] **Parte 3** — Checkout (stock atómico, totales, refine shipping)
 - [x] **Parte 4** — Idempotencia de webhooks (pago, guía, estado de envío)
 - [x] **Parte 5** — Cancelación/reembolso manual + release de stock (opcional)
+- [ ] **Parte 6** — Envío en vivo (`POST /api/shipping/rates`, fallback a tarifa plana)
+- [ ] **Parte 7** — Cliente HTTP de Skydropx (OAuth, throttle, poll de cotización)
+- [ ] **Parte 8** — CRUD admin de productos + imágenes (Cloudinary mockeado)
+- [ ] **Parte 9** — Marca y usuarios admin (brand, logo, adminUser, account)
+- [ ] **Parte 10** — Agregaciones de dashboard y reports (invariantes, no cifras exactas)
