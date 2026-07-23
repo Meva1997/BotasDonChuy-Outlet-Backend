@@ -81,11 +81,43 @@ export async function markOrderPaidFromWebhook(
   // vez (el `idempotencyKey` de Resend es un segundo cinturón de seguridad). Un guard en
   // memoria (`if (order.paymentStatus === "paid")`) NO daría esta garantía: dos webhooks
   // podrían leer "processing" antes de que cualquiera escriba y ambos enviarían el correo.
+  // `status: "pending"` en el WHERE es igual de necesario: esta transición solo es válida
+  // pending → paid. Sin ella, una orden que un admin ya canceló/reembolsó (`status:
+  // "cancelled"`, con el stock ya repuesto) podría "resucitarse" a `paid` si este evento
+  // llega tarde o duplicado — p. ej. porque el intento best-effort de cancelar el
+  // PaymentIntent en `cancelOrderByAdmin` falló en silencio al ya haber tenido éxito el
+  // cobro en Stripe.
   const [affected] = await Order.update(
     { status: "paid", paymentStatus: "paid" },
-    { where: { id: order.id, paymentStatus: { [Op.ne]: "paid" } } },
+    {
+      where: {
+        id: order.id,
+        status: "pending",
+        paymentStatus: { [Op.ne]: "paid" },
+      },
+    },
   );
-  if (affected === 0) return; // ya estaba pagada (o perdimos la carrera): no reenviar
+  if (affected === 0) {
+    if (order.status === "cancelled") {
+      // El pago se capturó en Stripe para una orden que ya quedó cancelada (y su stock
+      // ya se devolvió a la tienda, quizás ya revendido). No se puede reactivar a ciegas
+      // ni reservar stock de nuevo aquí: se deja cancelada y se alerta para que alguien
+      // revise si corresponde un reembolso manual.
+      logger.error(
+        { orderId: order.id, paymentIntentId },
+        "[stripe] payment_intent.succeeded para una orden ya cancelada; revisar reembolso manual",
+      );
+      Sentry.captureException(
+        new Error("payment_intent.succeeded en orden ya cancelada"),
+        { extra: { orderId: order.id, paymentIntentId } },
+      );
+      void sendAlertEmail({
+        subject: `Pago capturado para la orden cancelada #${order.id}`,
+        context: { orderId: order.id, paymentIntentId },
+      });
+    }
+    return; // ya estaba pagada, o no está en pending: no reenviar
+  }
 
   // Fire-and-forget: NO se hace `await`. El correo no debe bloquear la respuesta 200 del
   // webhook — si Resend va lento, Stripe podría exceder su timeout y reintentar el evento

@@ -219,10 +219,22 @@ order to `paid` with an **atomic conditional UPDATE** — `Order.update({ status
 "paid" }, { where: { id, paymentStatus: { [Op.ne]: "paid" } } })` — and only sends the confirmation
 email when `affectedCount === 1`. This is the single funnel every order passes through (both the
 `payment_intent.succeeded` webhook and the `pendingOrderSweeper` recovery path call it), and the
-`WHERE paymentStatus != 'paid'` guard **serializes at the DB level** against concurrent webhook +
-sweeper runs: only one UPDATE affects the row, so the email fires exactly once. A plain in-memory
-guard (`if (order.paymentStatus === "paid")`) would **not** give this — two callers could both read
-`processing` before either writes and both send. A `idempotencyKey: order-confirmation/${order.id}`
+`WHERE status: "pending", paymentStatus: { [Op.ne]: "paid" }` guard **serializes at the DB level**
+against concurrent webhook + sweeper runs: only one UPDATE affects the row, so the email fires
+exactly once. A plain in-memory guard (`if (order.paymentStatus === "paid")`) would **not** give
+this — two callers could both read `processing` before either writes and both send. The `status:
+"pending"` half of the guard (Fase H.5 fix, `roadmap-hardening.md`) exists because this transition
+is only ever valid `pending → paid`: without it, a late/duplicate `payment_intent.succeeded` could
+"resurrect" an order a store admin already cancelled via `POST /api/admin/orders/:id/cancel` (its
+stock already restocked, possibly resold) back to `paid`, re-sending the confirmation email and
+creating a Skydropx label for a closed order — the exact failure mode `cancelOrderByAdmin`'s
+best-effort `stripe.paymentIntents.cancel` can trigger when the PaymentIntent had already succeeded
+before the admin's cancel request (that `cancel` call fails silently, logged as a warning, and the
+order is left `cancelled` while Stripe already captured the charge). When the guard's `affected ===
+0` and the order is already `status: "cancelled"`, `markOrderPaidFromWebhook` now logs an error,
+reports to Sentry, and calls `sendAlertEmail` — a payment captured against a cancelled order needs a
+human to decide whether a manual refund is owed, since the code can't safely reserve stock again or
+silently reactivate the order. A `idempotencyKey: order-confirmation/${order.id}`
 passed to Resend is a second 24h safety net. The send is a thin `sendOrderConfirmationEmail(order)`
 wrapper over a shared `sendOrderEmail(order, { subject, idempotencyKey, tracking? })` helper (Fase 8.6
 refactor) that `order.reload({ include: items excluding unitCost })` then templates + `sendEmail`, wrapped

@@ -272,6 +272,13 @@ guía generada, no se restockea) o ya `cancelled` responde `409`.
   `refundId`/`refundedAt` poblados.
 - Si el reembolso en Stripe **falla**, nunca se restockea (el dinero no volvió): se loguea, se
   reporta a Sentry, se dispara una alerta operativa por correo y responde `502`.
+- **Guard contra "resurrección" (Fase H.5):** el intento best-effort de cancelar el
+  `paymentIntentId` de una orden `pending` puede fallar en silencio si el pago ya se había capturado
+  en Stripe justo antes. `markOrderPaidFromWebhook` (el handler de `payment_intent.succeeded`) exige
+  `status: "pending"` en su `UPDATE` condicional, así que un evento tardío/duplicado ya no puede
+  reactivar una orden que un admin ya canceló (con su stock ya repuesto). Si eso ocurre, la orden
+  queda `cancelled` y se dispara una alerta operativa para revisar si corresponde un reembolso
+  manual — ver `CLAUDE.md`.
 
 ### `GET /api/admin/reports/monthly` y `/replenishment` (reportes)
 
@@ -354,10 +361,12 @@ exige `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET` (el server no arranca sin el
   PaymentIntent ya se pagó y se perdió el webhook).
 - **Correo de confirmación (Fase 9.3):** al pasar a `paid`, `markOrderPaidFromWebhook` dispara el
   correo de confirmación (Resend) con el resumen del pedido. La transición a `paid` es un **UPDATE
-  atómico condicional** (`WHERE paymentStatus != 'paid'`): garantiza que el correo se envíe **una sola
-  vez** aunque el webhook y el barrido lleguen a la vez (con un `idempotencyKey` de Resend como segundo
-  respaldo). El envío es **fire-and-forget** (no bloquea la respuesta `200` del webhook) y nunca tumba
-  el evento si Resend falla.
+  atómico condicional** (`WHERE status: "pending", paymentStatus != 'paid'`): garantiza que el correo
+  se envíe **una sola vez** aunque el webhook y el barrido lleguen a la vez (con un `idempotencyKey` de
+  Resend como segundo respaldo), y que un evento tardío/duplicado nunca reactive una orden que ya fue
+  cancelada manualmente (ver la nota de "resurrección" en la sección de cancelación manual, arriba). El
+  envío es **fire-and-forget** (no bloquea la respuesta `200` del webhook) y nunca tumba el evento si
+  Resend falla.
 
 #### Probar Stripe en local
 
