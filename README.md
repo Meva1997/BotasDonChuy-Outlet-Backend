@@ -98,6 +98,8 @@ ALERT_EMAIL_TO=tu_correo@ejemplo.com     # opcional: destino de las alertas oper
 | `pnpm dev`              | Servidor en desarrollo con recarga (`ts-node-dev`)   |
 | `pnpm build`            | Compila TypeScript a `dist/` (`tsc`)                 |
 | `pnpm start`            | Ejecuta la build de producción (`node dist/app.js`)  |
+| `pnpm test`             | Corre la suite de tests con Jest (ver [Testing](#testing)) |
+| `pnpm test:watch`       | Corre Jest en modo watch                             |
 | `pnpm seed`             | Llena la base de datos con productos, histórico de ventas, usuario admin semilla y configuración de marca (`src/seed.ts`) |
 | `pnpm migrate`          | Aplica las migraciones de esquema pendientes (`sequelize-cli db:migrate`) |
 | `pnpm migrate:undo`     | Revierte la última migración aplicada (`db:migrate:undo`) |
@@ -531,6 +533,35 @@ Reglas al agregar o tocar un endpoint:
 - **Body ilegible:** un JSON mal formado devuelve `400` ("El cuerpo de la petición no es un JSON
   válido"), no `500`.
 
+## Testing
+
+Suite automatizada con **Jest + ts-jest + supertest** (Fase H.1 — ver
+[`roadmap-testing.md`](roadmap-testing.md) para el desglose por partes). Los tests viven en
+`tests/` (fuera de `src/`, para que `tsc` no los incluya en el build de producción); `ts-jest` los
+transpila en memoria.
+
+```bash
+pnpm test              # toda la suite
+pnpm test:watch         # modo watch
+pnpm test <patrón>      # una parte (p. ej. pnpm test auth)
+```
+
+**Tres niveles de prueba:** (1) *unit puro* sin BD (`cart`, `forecast`, `formatMoney`, `date`);
+(2) *integración HTTP* con `request(app)...` contra un Postgres de test real (`auth`, `checkout`);
+(3) *servicio + SDK mockeado* para concurrencia/idempotencia (`webhooks`). **Stripe, Skydropx y
+Resend van SIEMPRE mockeados** (cuestan dinero o mandan correos reales); la **BD no se mockea**.
+
+Al importar `src/app.ts` con `NODE_ENV=test`, un gate salta el `connectDB()`, el
+`pendingOrderSweeper` y el `app.listen(...)`, así que Supertest levanta `app` sin abrir puerto ni
+conectar a la BD. La config de test (`.env.test`, gitignored) trae llaves dummy que satisfacen el
+fail-fast de cada `src/config/*` más el `DATABASE_URL` de pruebas.
+
+> ⚠️ **Base de datos de test dedicada.** Las suites de integración corren contra el Postgres
+> apuntado por `DATABASE_URL` en `.env.test`, que **hay que crear** (`createdb botasdonchuy_test`)
+> antes de correrlas — ver la **Parte 0.5** del roadmap de testing. Cada corrida hace
+> `sync({ force: true })`, que **BORRA y recrea las tablas**, así que debe ser una BD exclusiva de
+> pruebas, nunca la de desarrollo o producción. Las suites `unit/` y `smoke/` no necesitan BD.
+
 ## Documentación API (Swagger)
 
 Con el servidor en marcha, la documentación interactiva está disponible en:
@@ -550,6 +581,13 @@ anotaciones JSDoc `@openapi` sobre su router en `src/routes/*.ts`.
 
 ```
 .sequelizerc                     # Config de sequelize-cli (ts-node/register + rutas de migrations/seeders/models)
+jest.config.ts                   # Config de Jest (preset ts-jest, setupFiles, testMatch tests/**)
+tsconfig.jest.json               # tsconfig para tests (extiende el base; rootDir "." + types jest/node)
+tests/                           # Suite automatizada (fuera de src/ — tsc la ignora), ver Testing
+├── setup/                       # env.ts, db.ts, factories.ts, mocks/{stripe,skydropx,resend}.ts
+├── smoke/                       # import app + GET /health (valida el arranque en test)
+├── unit/                        # nivel 1 — servicios/utils puros, sin BD
+└── integration/                 # niveles 2/3 — Postgres de test (auth, checkout, webhooks)
 src/
 ├── app.ts                       # Punto de entrada: Express, middleware, arranque y apagado ordenado
 ├── seed.ts                      # Script de seed (productos, histórico, admin, marca)

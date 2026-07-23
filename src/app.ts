@@ -41,8 +41,10 @@ dotenv.config();
 const app: Express = express();
 const PORT = process.env.PORT || 4000;
 
-connectDB();
-startPendingOrderSweeper(); // libera stock de órdenes pending abandonadas (Stripe)
+// El arranque real (conexión a la BD, sweeper, servidor HTTP y apagado ordenado) vive
+// al final del archivo, gateado por `NODE_ENV !== "test"`: Supertest importa este `app`
+// directamente y no debe abrir un puerto, conectar a la BD ni correr el cron — los tests
+// gestionan la conexión y la limpieza de la BD por su cuenta (ver tests/setup/db.ts).
 
 //Global Middleware
 app.use(helmet());
@@ -105,55 +107,64 @@ app.get("/health", (req, res) => {
 
 app.use(errorHandler);
 
-const server = app.listen(PORT, () => {
-  logger.info(`Server running at http://localhost:${PORT}`);
-});
+// Arranque real del servidor. Se omite por completo en entorno de test
+// (`NODE_ENV === "test"`): Supertest importa el `app` de arriba sin abrir un puerto,
+// conectar a la BD ni arrancar el sweeper. Todo lo que tiene efectos de proceso
+// (listen, señales de apagado, pool de la BD) queda encapsulado aquí dentro.
+if (process.env.NODE_ENV !== "test") {
+  connectDB();
+  startPendingOrderSweeper(); // libera stock de órdenes pending abandonadas (Stripe)
 
-/**
- * Apagado ordenado (Fase H.5). Un redeploy envía `SIGTERM` (o `SIGINT` con Ctrl+C
- * en dev): en vez de morir de golpe a media transacción, se cierra en orden —
- *   1. detener el sweeper (deja de abrir trabajo nuevo),
- *   2. `server.close()` deja de aceptar conexiones y espera las requests en vuelo,
- *   3. cerrar el pool de Sequelize.
- * Un guard de timeout fuerza la salida si algo cuelga, para no dejar el proceso zombie.
- */
-let isShuttingDown = false;
-async function gracefulShutdown(signal: string): Promise<void> {
-  if (isShuttingDown) return; // ignora señales repetidas
-  isShuttingDown = true;
-  logger.info({ signal }, "Apagado ordenado iniciado");
+  const server = app.listen(PORT, () => {
+    logger.info(`Server running at http://localhost:${PORT}`);
+  });
 
-  // Red de seguridad: si el cierre se atora (una conexión colgada que impide que
-  // `server.close()` resuelva), salir con código de error tras 10s. `unref()` para
-  // que este timer no mantenga vivo el proceso por sí solo si todo cierra antes.
-  const forceExit = setTimeout(() => {
-    logger.error("Apagado ordenado excedió el tiempo límite; forzando salida");
-    process.exit(1);
-  }, 10_000);
-  forceExit.unref();
+  /**
+   * Apagado ordenado (Fase H.5). Un redeploy envía `SIGTERM` (o `SIGINT` con Ctrl+C
+   * en dev): en vez de morir de golpe a media transacción, se cierra en orden —
+   *   1. detener el sweeper (deja de abrir trabajo nuevo),
+   *   2. `server.close()` deja de aceptar conexiones y espera las requests en vuelo,
+   *   3. cerrar el pool de Sequelize.
+   * Un guard de timeout fuerza la salida si algo cuelga, para no dejar el proceso zombie.
+   */
+  let isShuttingDown = false;
+  const gracefulShutdown = async (signal: string): Promise<void> => {
+    if (isShuttingDown) return; // ignora señales repetidas
+    isShuttingDown = true;
+    logger.info({ signal }, "Apagado ordenado iniciado");
 
-  try {
-    stopPendingOrderSweeper();
-    logger.info("Sweeper de pendientes detenido");
+    // Red de seguridad: si el cierre se atora (una conexión colgada que impide que
+    // `server.close()` resuelva), salir con código de error tras 10s. `unref()` para
+    // que este timer no mantenga vivo el proceso por sí solo si todo cierra antes.
+    const forceExit = setTimeout(() => {
+      logger.error("Apagado ordenado excedió el tiempo límite; forzando salida");
+      process.exit(1);
+    }, 10_000);
+    forceExit.unref();
 
-    await new Promise<void>((resolve, reject) => {
-      server.close((err) => (err ? reject(err) : resolve()));
-    });
-    logger.info("Servidor HTTP cerrado (sin conexiones nuevas)");
+    try {
+      stopPendingOrderSweeper();
+      logger.info("Sweeper de pendientes detenido");
 
-    await sequelize.close();
-    logger.info("Pool de la base de datos cerrado");
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+      logger.info("Servidor HTTP cerrado (sin conexiones nuevas)");
 
-    clearTimeout(forceExit);
-    process.exit(0);
-  } catch (err) {
-    logger.error({ err }, "Error durante el apagado ordenado");
-    clearTimeout(forceExit);
-    process.exit(1);
-  }
+      await sequelize.close();
+      logger.info("Pool de la base de datos cerrado");
+
+      clearTimeout(forceExit);
+      process.exit(0);
+    } catch (err) {
+      logger.error({ err }, "Error durante el apagado ordenado");
+      clearTimeout(forceExit);
+      process.exit(1);
+    }
+  };
+
+  process.on("SIGTERM", () => void gracefulShutdown("SIGTERM"));
+  process.on("SIGINT", () => void gracefulShutdown("SIGINT"));
 }
-
-process.on("SIGTERM", () => void gracefulShutdown("SIGTERM"));
-process.on("SIGINT", () => void gracefulShutdown("SIGINT"));
 
 export default app;
