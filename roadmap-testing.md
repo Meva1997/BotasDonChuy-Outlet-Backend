@@ -71,8 +71,8 @@ por eso `DATABASE_URL` debe apuntar a una BD dedicada de pruebas).
 | Parte | Qué cubre | Nivel | Estado |
 |---|---|---|---|
 | **0** | Infra (jest, ts-jest, supertest, setup, smoke) | — | ✅ Hecho |
-| **0.5** | BD de test dedicada (crear el Postgres de pruebas) — prerequisito de 2-4 | — | 🔴 Pendiente |
-| **1** | Servicios puros (`cart`, `forecast`, `formatMoney`, `date`) | Unit | 🔴 Pendiente |
+| **0.5** | BD de test dedicada (crear el Postgres de pruebas) — prerequisito de 2-4 | — | ✅ Hecho |
+| **1** | Servicios puros (`cart`, `forecast`, `formatMoney`, `date`) | Unit | ✅ Hecho |
 | **2** | Auth (login anti-enumeración, reset code) | Integración | 🔴 Pendiente |
 | **3** | Checkout (stock atómico, totales, refine shipping) | Integración | 🔴 Pendiente |
 | **4** | Idempotencia de webhooks (pago, guía, estado de envío) | Servicio + mock | 🔴 Pendiente |
@@ -102,28 +102,39 @@ por eso `DATABASE_URL` debe apuntar a una BD dedicada de pruebas).
 
 ---
 
-### Parte 0.5 — Base de datos de test dedicada — 🔴 Pendiente (⚠️ prerequisito de las Partes 2-4)
+### Parte 0.5 — Base de datos de test dedicada — ✅ Hecho
 
 > **Recordatorio para no olvidarlo:** las suites de **integración** (Partes 2, 3 y 4) corren contra
 > un **Postgres real de pruebas**, no un mock — el código depende de features Postgres-específicas
 > (`ENUM`, `JSONB`, `literal('stock - N')`) que sqlite/mocks no reproducen. Antes de arrancar la
 > Parte 2 hay que **crear esa base de datos**, aún no existe.
 
-- [ ] Crear la BD de pruebas apuntada por `DATABASE_URL` en `.env.test`
+- [x] Crear la BD de pruebas apuntada por `DATABASE_URL` en `.env.test`
   (hoy `botasdonchuy_test` en el Postgres local):
 
   ```bash
   createdb botasdonchuy_test          # o: psql -c 'CREATE DATABASE botasdonchuy_test;'
   ```
 
-- [ ] Confirmar que `.env.test` tiene el `DATABASE_URL` correcto (usuario/password/host/puerto de tu
+- [x] Confirmar que `.env.test` tiene el `DATABASE_URL` correcto (usuario/password/host/puerto de tu
   Postgres local) apuntando a **esa** BD dedicada.
-- [ ] Verificar la conexión: la primera suite de integración (`beforeAll(setupTestDatabase)`) hace
+- [x] Verificar la conexión: la primera suite de integración (`beforeAll(setupTestDatabase)`) hace
   `authenticate()` + `sync({ force: true })`. Si conecta y crea las tablas, la BD está lista.
 
 > ⚠️ **Nunca apuntes `DATABASE_URL` de `.env.test` a la BD de desarrollo o producción.**
 > `setupTestDatabase()` corre `sync({ force: true })`, que **BORRA y recrea todas las tablas** en
 > cada corrida de suite. Debe ser una BD exclusiva para tests, desechable.
+
+**Verificado:** el Postgres local no tiene un rol `postgres` (solo `alexmedina`, superuser, sin
+password — igual que el `.env` de dev), así que `.env.test`'s `DATABASE_URL` se corrigió a
+`postgres://alexmedina@localhost:5432/botasdonchuy_test` tras crear la BD con `createdb`. Un script
+desechable ejercitando `setupTestDatabase()`/`closeTestDatabase()` (el mismo camino que usarán las
+suites de integración) confirmó `authenticate()` + `sync({ force: true })` en verde. Esa corrida
+reveló que `tests/setup/db.ts` solo importaba `models/associations` (que registra
+Product/ProductSize/Order/OrderItem, no AdminUser/BrandSettings) — `\dt` mostraba 4 tablas en vez de
+6. Se corrigió agregando el mismo set de imports de modelo que `src/app.ts` hace; una segunda corrida
+confirmó las 6 tablas (`products`, `product_sizes`, `orders`, `order_items`, `adminusers`,
+`brand_settings`). `pnpm test` (unit + smoke) sigue en verde.
 
 **Verifica:** con la BD creada, `pnpm test auth` (Parte 2) conecta y corre en verde. Sin la BD, las
 suites `unit/` y `smoke/` siguen pasando (no la necesitan), pero las de `integration/` fallan al
@@ -131,18 +142,25 @@ conectar — es la señal de que falta este paso.
 
 ---
 
-### Parte 1 — Servicios puros (sin BD) — 🔴 Pendiente
+### Parte 1 — Servicios puros (sin BD) — ✅ Hecho
 
-- [ ] `src/services/cart.ts`: `computeTotals` (subtotal / savings / total con precio de venta vs
+- [x] `src/services/cart.ts`: `computeTotals` (subtotal / savings / total con precio de venta vs
   original) y `computeShipping` (tarifa plana). Casos: carrito vacío, con descuento, sin descuento,
   varias líneas.
-- [ ] `src/services/forecast.ts`: `computeForecast` en sus **3 ramas** — 1-2 meses
+- [x] `src/services/forecast.ts`: `computeForecast` en sus **3 ramas** — 1-2 meses
   (`simpleAverage`, confianza baja), 3 (`weightedTrend` + dirección de tendencia, media), 4+
   (`exponentialSmoothing` de Holt, alta); serie vacía → `0` / "Sin datos".
-- [ ] `src/utils/formatMoney.ts`: es-MX, 2 decimales, separador de miles, negativos.
-- [ ] `src/utils/date.ts`: `isoDay` / `isoMonth` / `formatShortDate` / `formatMonthLabel` **pinados
+- [x] `src/utils/formatMoney.ts`: es-MX, 2 decimales, separador de miles, negativos.
+- [x] `src/utils/date.ts`: `isoDay` / `isoMonth` / `formatShortDate` / `formatMonthLabel` **pinados
   a UTC**. Probar con una fecha cercana a medianoche que, en un host al oeste de UTC, retrocedería un
   día si no estuviera el `timeZone: "UTC"` (el bug real que motivó el pin).
+
+**Verificado:** `pnpm test unit` → 4 suites / 36 tests en verde sin Postgres levantado
+(`tests/unit/services/cart.test.ts`, `tests/unit/services/forecast.test.ts`,
+`tests/unit/utils/formatMoney.test.ts` ampliado, `tests/unit/utils/date.test.ts` nuevo). Los casos de
+`forecast`'s ramas 2 y 3 (`weightedTrend`, `exponentialSmoothing`) se calcularon a mano contra series
+lineales/constantes para fijar el valor exacto esperado, no solo el signo de la tendencia. `pnpm test`
+completo (37 tests, 5 suites) y `pnpm build` siguen en verde.
 
 **Verifica:** `pnpm test unit` en verde sin Postgres levantado.
 
@@ -236,8 +254,8 @@ branch protection en `main`.
 ## Checklist maestro
 
 - [x] **Parte 0** — Infra (jest/ts-jest/supertest, setup, gate en app.ts, smoke verde)
-- [ ] **Parte 0.5** — BD de test dedicada (crear el Postgres de pruebas; prerequisito de las Partes 2-4)
-- [ ] **Parte 1** — Servicios puros (`cart`, `forecast`, `formatMoney`, `date`)
+- [x] **Parte 0.5** — BD de test dedicada (crear el Postgres de pruebas; prerequisito de las Partes 2-4)
+- [x] **Parte 1** — Servicios puros (`cart`, `forecast`, `formatMoney`, `date`)
 - [ ] **Parte 2** — Auth (login anti-enumeración, reset code)
 - [ ] **Parte 3** — Checkout (stock atómico, totales, refine shipping)
 - [ ] **Parte 4** — Idempotencia de webhooks (pago, guía, estado de envío)

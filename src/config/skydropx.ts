@@ -2,7 +2,7 @@ import dotenv from "dotenv";
 
 // Igual que src/config/stripe.ts / resend.ts: los imports de módulo se evalúan
 // ANTES del dotenv.config() de src/app.ts, así que cada config carga su propio .env aquí.
-dotenv.config();
+dotenv.config({ quiet: true });
 
 const clientId = process.env.SKYDROPX_CLIENT_ID;
 const clientSecret = process.env.SKYDROPX_CLIENT_SECRET;

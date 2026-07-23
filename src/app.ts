@@ -36,7 +36,7 @@ import "./models/OrderItem";
 import "./models/BrandSettings";
 import "./models/associations";
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 const app: Express = express();
 const PORT = process.env.PORT || 4000;
