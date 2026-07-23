@@ -56,7 +56,8 @@ backend/
 │  └─ integration/           niveles 2/3 — Postgres de test
 │     ├─ auth.test.ts
 │     ├─ checkout.test.ts
-│     └─ webhooks.test.ts
+│     ├─ webhooks.test.ts
+│     └─ cancelOrder.test.ts
 ```
 
 **Correr:** `pnpm test` (todo), `pnpm test:watch`, o `pnpm test <patrón>` (una parte). Las suites
@@ -76,7 +77,7 @@ por eso `DATABASE_URL` debe apuntar a una BD dedicada de pruebas).
 | **2** | Auth (login anti-enumeración, reset code) | Integración | ✅ Hecho |
 | **3** | Checkout (stock atómico, totales, refine shipping) | Integración | ✅ Hecho |
 | **4** | Idempotencia de webhooks (pago, guía, estado de envío) | Servicio + mock | ✅ Hecho |
-| **5** | Cancelación/reembolso manual + release de stock (opcional) | Servicio + mock | 🔴 Pendiente |
+| **5** | Cancelación/reembolso manual + release de stock (opcional) | Servicio + mock | ✅ Hecho |
 
 ---
 
@@ -288,18 +289,42 @@ build` en verde.
 
 ---
 
-### Parte 5 — Cancelación/reembolso manual + release de stock (opcional / stretch) — 🔴 Pendiente
+### Parte 5 — Cancelación/reembolso manual + release de stock (opcional / stretch) — ✅ Hecho
 
-- [ ] `releaseOrderStock` (`orders.service.ts:248`): idempotente — solo actúa mientras
+- [x] `releaseOrderStock` (`orders.service.ts:248`): idempotente — solo actúa mientras
   `status === "pending"`, **nunca** restockea una orden `paid` (el webhook `canceled` y el sweeper no
   pueden doble-restockear).
-- [ ] `cancelOrderByAdmin` (`orders.service.ts:299`): `pending` → restock; `paid` → **refund**
+- [x] `cancelOrderByAdmin` (`orders.service.ts:299`): `pending` → restock; `paid` → **refund**
   (Stripe mockeado) **antes** de restockear + `paymentStatus: "refunded"`; `shipped` / `delivered` /
   `cancelled` → `409`.
 
 **Ref:** `src/services/orders.service.ts`. Mockear `stripe.refunds.create` / `paymentIntents.cancel`.
 
-**Verifica:** `pnpm test` (o el patrón de la suite) en verde.
+**Verificado:** `tests/integration/cancelOrder.test.ts` (11 tests) — nivel 3 como la Parte 4: llama
+directo a `orders.service.ts` (no vía HTTP) contra la BD de test real, con `config/stripe` mockeado
+completo (`buildStripeMock`, el mismo builder ya usado en la Parte 3) para que ningún test toque
+Stripe de verdad; `sendAlertEmail` no necesitó mock propio — sin `ALERT_EMAIL_TO` en `.env.test` ya
+es un no-op que solo loguea, igual que en la Parte 4. `releaseOrderStock`: repone el stock y deja la
+orden `cancelled`/`failed` cuando estaba `pending`; una segunda llamada no repone doble (ya no está
+`pending`); una orden `paid` no se toca. `cancelOrderByAdmin` — `pending`: repone stock, cancela, y
+llama `paymentIntents.cancel` best-effort (un rechazo del mock no bloquea la cancelación). `paid`:
+llama `refunds.create` con `{ payment_intent }` + `idempotencyKey: refund-order-${id}` **antes** de
+restockear, y persiste `refundId`/`refundedAt`/`paymentStatus: "refunded"`; un `refunds.create`
+rechazado lanza `AppError` `502` **sin** restockear ni cambiar `status`/`paymentStatus` (siguen
+`paid`); dos `cancelOrderByAdmin` concurrentes sobre la misma orden `paid` (mock de
+`refunds.create` devolviendo el mismo `id` a ambas llamadas, simulando cómo respondería Stripe real
+ante la misma `idempotencyKey`) solo restockean **una vez** — lo protege el `FOR UPDATE` +
+recheck `status === "paid"` dentro de la transacción, no el mock en sí. `shipped` / `delivered` /
+`cancelled` (parametrizado con `it.each`) devuelven `409` y no tocan stock ni Stripe. Prueba
+negativa manual: reemplazar el recheck `if (!locked || locked.status !== "paid") return;` por
+`if (!locked) return;` (quitando el chequeo de `status`) hizo que el test de concurrencia
+restockeara 4 unidades en vez de 2 — se puso en rojo, confirmando que el guard es real; revertido
+después (`git diff` limpio sobre `orders.service.ts`). `pnpm test` (65 tests, 9 suites) y `pnpm
+build` en verde.
+
+**Verifica:** `pnpm test cancelOrder` en verde. Prueba negativa: quitar el recheck de `status` en el
+`FOR UPDATE` del branch `paid` de `cancelOrderByAdmin` → el test de concurrencia debe ponerse en rojo
+(stock restockeado más de una vez).
 
 ---
 
@@ -328,4 +353,4 @@ branch protection en `main`.
 - [x] **Parte 2** — Auth (login anti-enumeración, reset code)
 - [x] **Parte 3** — Checkout (stock atómico, totales, refine shipping)
 - [x] **Parte 4** — Idempotencia de webhooks (pago, guía, estado de envío)
-- [ ] **Parte 5** — Cancelación/reembolso manual + release de stock (opcional)
+- [x] **Parte 5** — Cancelación/reembolso manual + release de stock (opcional)
