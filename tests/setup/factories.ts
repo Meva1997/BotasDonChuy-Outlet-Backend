@@ -6,6 +6,7 @@
  *
  * Requieren una BD de test activa (ver tests/setup/db.ts) — no son puros.
  */
+import jsonwebtoken from "jsonwebtoken";
 import { Product } from "../../src/models/Product";
 import { ProductSize } from "../../src/models/ProductSize";
 import { AdminUser } from "../../src/models/AdminUser";
@@ -114,6 +115,19 @@ export async function createOrder(overrides: OrderOverrides = {}): Promise<Order
     paymentIntentId: overrides.paymentIntentId ?? null,
     paymentStatus: overrides.paymentStatus ?? "unpaid",
   } as any);
+}
+
+/**
+ * Firma un JWT igual al que emite `POST /api/auth/login` (mismo shape de payload
+ * que `auth.controller.ts`), para las suites de integración que ejercitan rutas
+ * `[auth]` por HTTP sin pasar por el login real.
+ */
+export function signToken(user: AdminUser): string {
+  return jsonwebtoken.sign(
+    { id: String(user.id), name: user.name, email: user.email, role: user.role },
+    process.env.JWT_SECRET!,
+    { expiresIn: "1h" },
+  );
 }
 
 /** Crea un OrderItem congelado para una orden y producto dados. */

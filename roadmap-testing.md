@@ -78,11 +78,11 @@ por eso `DATABASE_URL` debe apuntar a una BD dedicada de pruebas).
 | **3** | Checkout (stock atómico, totales, refine shipping) | Integración | ✅ Hecho |
 | **4** | Idempotencia de webhooks (pago, guía, estado de envío) | Servicio + mock | ✅ Hecho |
 | **5** | Cancelación/reembolso manual + release de stock (opcional) | Servicio + mock | ✅ Hecho |
-| **6** | Envío en vivo (`POST /api/shipping/rates`, fallback a tarifa plana) | Integración | 🔴 Pendiente |
-| **7** | Cliente HTTP de Skydropx (OAuth, throttle, poll de cotización) | Unit (fetch mock) | 🔴 Pendiente |
-| **8** | CRUD admin de productos + imágenes (Cloudinary mockeado) | Integración | 🔴 Pendiente |
-| **9** | Marca y usuarios admin (brand, logo, adminUser, account) | Integración | 🔴 Pendiente |
-| **10** | Agregaciones de dashboard y reports (invariantes, no cifras exactas) | Unit | 🔴 Pendiente |
+| **6** | Envío en vivo (`POST /api/shipping/rates`, fallback a tarifa plana) | Integración | ✅ Hecho |
+| **7** | Cliente HTTP de Skydropx (OAuth, throttle, poll de cotización) | Unit (fetch mock) | ✅ Hecho |
+| **8** | CRUD admin de productos + imágenes (Cloudinary mockeado) | Integración | ✅ Hecho |
+| **9** | Marca y usuarios admin (brand, logo, adminUser, account) | Integración | ✅ Hecho |
+| **10** | Agregaciones de dashboard y reports (invariantes, no cifras exactas) | Unit | ✅ Hecho |
 
 ---
 
@@ -333,15 +333,15 @@ build` en verde.
 
 ---
 
-### Parte 6 — Envío en vivo (integración HTTP, Skydropx mockeado) — 🔴 Pendiente
+### Parte 6 — Envío en vivo (integración HTTP, Skydropx mockeado) — ✅ Hecho
 
-- [ ] `POST /api/shipping/rates`: cuando `getShippingRates` (Skydropx) rechaza o tarda, la respuesta
+- [x] `POST /api/shipping/rates`: cuando `getShippingRates` (Skydropx) rechaza o tarda, la respuesta
   sigue siendo `200` con la tarifa plana de `cart.ts`'s `computeShipping` como fallback — la tienda
   nunca debe dejar de cotizar porque la paquetería esté caída.
-- [ ] Un producto en el carrito con `weightKg`/`lengthCm`/`widthCm`/`heightCm` en `0` (fila legado
+- [x] Un producto en el carrito con `weightKg`/`lengthCm`/`widthCm`/`heightCm` en `0` (fila legado
   previa a la validación `.positive()`) salta **directo** al fallback de tarifa plana sin llamar a
   Skydropx (`buildParcel` armaría una caja subdimensionada pero "válida" si no se saltara).
-- [ ] `shippingRateLimiter` (20 req/min, `src/middlewares/rateLimit.ts`) — mismo patrón que
+- [x] `shippingRateLimiter` (20 req/min, `src/middlewares/rateLimit.ts`) — mismo patrón que
   `authRateLimiter` en la Parte 2: mockear `express-rate-limit` para que la suite no choque con el
   límite real al hacer varias requests.
 
@@ -349,101 +349,245 @@ build` en verde.
 `src/services/packing.ts` (`buildParcel`). Mockear `skydropx.service` completo (`getShippingRates`)
 — no llamar a Skydropx real ni siquiera al sandbox.
 
+**Verificado:** `tests/integration/shippingRates.test.ts` (7 tests) — nivel 2 como la Parte 3:
+`request(app).post("/api/shipping/rates")` contra la BD de test real, con `skydropx.service`
+mockeado vía `jest.mock(..., () => ({ ...jest.requireActual(...), getShippingRates: jest.fn() }))`
+(mismo patrón documentado en `tests/setup/mocks/skydropx.ts`) — así `getOriginAddress`/
+`toSkydropxAddress` (funciones puras, sin red) siguen siendo las reales y solo la llamada de red se
+sustituye. `express-rate-limit` se mockea igual que en la Parte 2 (Auth). Casos cubiertos: un
+`getShippingRates` que rechaza con un `Error` genérico (red caída) y uno que rechaza con
+`SkydropxRequestError(status: 503)` (falla transitoria del lado de Skydropx) devuelven ambos `200`
+con `quotationId: null` y un único rate `rateId: null` / `carrier: "Estándar"`; una respuesta
+resuelta con `rates: []` (ninguna tarifa utilizable a tiempo) cae al mismo fallback; una respuesta
+con tarifas utilizables se devuelve tal cual (`quotationId` real, los rates normalizados intactos,
+sin pasar por el fallback) y `getShippingRates` se llama exactamente una vez. Un producto con
+`weightKg: 0` y, por separado, uno con `lengthCm`/`widthCm`/`heightCm` en `0` saltan al fallback
+**sin invocar** `getShippingRates` en absoluto (`toHaveBeenCalledTimes(0)`), confirmando que el
+chequeo de dimensiones corta antes de intentar cotizar en vivo. Un producto `visible: false` en el
+carrito devuelve `409` (`assertProductAvailable`) sin llegar a llamar a Skydropx. Los casos de `4xx`
+(`isClientError`, que además reporta a Sentry) no se probaron por separado — el fallback es
+idéntico al de un `5xx`/red y ya está cubierto por el caso `SkydropxRequestError`; lo que distingue
+esa rama es solo el nivel de log/Sentry, fuera del alcance de esta parte (comportamiento HTTP
+observable). `pnpm test` (72 tests, 10 suites) y `pnpm build` en verde.
+
+**Verifica:** `pnpm test shippingRates` en verde.
+
 ---
 
-### Parte 7 — Cliente HTTP de Skydropx (unit, `fetch` mockeado) — 🔴 Pendiente
+### Parte 7 — Cliente HTTP de Skydropx (unit, `fetch` mockeado) — ✅ Hecho
 
-- [ ] OAuth `client_credentials`: el `access_token` se cachea en memoria y se renueva ~5 min antes de
+- [x] OAuth `client_credentials`: el `access_token` se cachea en memoria y se renueva ~5 min antes de
   expirar (`expires_in: 7200`).
-- [ ] Throttle compartido de 2 req/s a nivel de módulo (todas las llamadas salientes, incluida la de
+- [x] Throttle compartido de 2 req/s a nivel de módulo (todas las llamadas salientes, incluida la de
   token).
-- [ ] Poll de cotización (`pollQuotation`): corte temprano al juntar `MIN_READY_RATES` (3) tarifas
+- [x] Poll de cotización (`pollQuotation`): corte temprano al juntar `MIN_READY_RATES` (3) tarifas
   utilizables; timeout de `POLL_TIMEOUT_MS` (8s) si ninguna tarifa llega a completarse; un
   `rates: []` en la primera lectura (cotización recién creada) se trata como "sigue pendiente", **no**
   como resuelto (`.some()` sobre array vacío da `false` — el caso que motivó el chequeo explícito).
-- [ ] `isUsableRate` / normalización: `amount`/`total` llegan como **strings** y requieren
+- [x] `isUsableRate` / normalización: `amount`/`total` llegan como **strings** y requieren
   `parseFloat`; el resultado queda ordenado ascendente y recortado a `MAX_RATES_RETURNED` (5).
-- [ ] `requiresDropoff` combinado: `pickup === false` **o** el regex `/sin\s+recolecci[oó]n/i` sobre
+- [x] `requiresDropoff` combinado: `pickup === false` **o** el regex `/sin\s+recolecci[oó]n/i` sobre
   `provider_service_name` (la señal estructurada sola no basta — sandbox tuvo casos con `pickup:
   true` en un servicio literalmente llamado "Sin recolección").
-- [ ] `SkydropxRequestError` conserva el `status` HTTP, para distinguir un `4xx` (bug de integración
+- [x] `SkydropxRequestError` conserva el `status` HTTP, para distinguir un `4xx` (bug de integración
   nuestro) de un `5xx`/falla de red (transitorio).
 
 **Ref:** `src/services/skydropx.service.ts`. Usar `buildFetchMock` (ya scaffolded en
 `tests/setup/mocks/skydropx.ts`) para encolar las respuestas JSON de OAuth/cotización en el orden
 que el cliente las pide — sin BD, sin HTTP real.
 
+**Verificado:** `tests/unit/services/skydropx.test.ts` (10 tests) — nivel 1 puro: sin BD, mockeando
+solo `global.fetch` (vía `buildFetchMock`) y usando **fake timers** de Jest (`jest.useFakeTimers()` +
+`jest.advanceTimersByTimeAsync`) para no esperar en tiempo real el throttle (500ms) ni el poll (hasta
+8s) — un helper local `resolveWithFakeTimers` avanza el reloj en pasos de 200ms hasta que la promesa
+se resuelve o rechaza. Como el token cacheado y la cola de throttle son estado **a nivel de módulo**,
+cada test hace `jest.resetModules()` + `require(...)` fresco en `beforeEach` para no arrastrar estado
+del test anterior. Casos cubiertos: una segunda llamada no repite el fetch de OAuth (token cacheado);
+justo antes del margen de 5 min de `TOKEN_REFRESH_MARGIN_MS` sigue usando el token cacheado, y justo
+después pide uno nuevo; dentro de una sola llamada de negocio (oauth + request) y entre dos llamadas
+consecutivas, el gap entre fetches consecutivos es siempre `>=500ms` (throttle). `getShippingRates`:
+corta el poll en cuanto junta 3 tarifas utilizables sin esperar `is_completed` (un solo GET de poll);
+un primer `rates: []` no se trata como resuelto y el poll continúa a un segundo GET; con una tarifa
+que nunca junta el mínimo, el poll reintenta varias veces y al agotar el presupuesto de 8s devuelve la
+única tarifa utilizable que sí resolvió, en vez de colgarse. Normalización: 6 tarifas con
+`amount`/`total` en string se parsean a `number`, quedan ordenadas ascendente por `total` y recortadas
+a las 5 más baratas (se descarta la más cara). `requiresDropoff`: `true` con `pickup: false`, `true`
+con `pickup: true` cuando el nombre del servicio matchea "sin recolección" (con y sin acento), `false`
+en un servicio normal. `SkydropxRequestError` conserva `status: 422` y `status: 503` en sendos casos.
+Prueba negativa manual: quitar el chequeo explícito `last.rates.length === 0 ||` de `stillPending`
+(`skydropx.service.ts`) puso en rojo el test del `rates: []` inicial (el poll cortaba después de un
+solo GET en vez de dos) — confirmado y revertido, `git diff` limpio sobre `skydropx.service.ts`.
+`pnpm test` (82 tests, 11 suites) y `pnpm build` en verde.
+
+**Verifica:** `pnpm test skydropx` en verde. Prueba negativa: quitar el chequeo `rates.length === 0`
+de `stillPending` en `pollQuotation` → el test del array vacío inicial debe ponerse en rojo.
+
 ---
 
-### Parte 8 — CRUD admin de productos + imágenes (integración HTTP, Cloudinary mockeado) — 🔴 Pendiente
+### Parte 8 — CRUD admin de productos + imágenes (integración HTTP, Cloudinary mockeado) — ✅ Hecho
 
-- [ ] `adminCreateProduct`/`adminUpdateProduct`: `sizes` acepta tanto un string `"25,25,26"` como un
+- [x] `adminCreateProduct`/`adminUpdateProduct`: `sizes` acepta tanto un string `"25,25,26"` como un
   array de números; las filas de `ProductSize` se escriben dentro de una `sequelize.transaction`.
-- [ ] `DELETE /api/admin/products/:id`: **soft-delete** (`deletedAt` + `visible:false`) cuando el
+- [x] `DELETE /api/admin/products/:id`: **soft-delete** (`deletedAt` + `visible:false`) cuando el
   producto está referenciado por un `OrderItem`; **hard-delete** (con cascade de `ProductSize`) en
   cualquier otro caso.
-- [ ] `POST /:id/images`: cap de 3 imágenes totales, re-verificado bajo row lock (`FOR UPDATE`) para
+- [x] `POST /:id/images`: cap de 3 imágenes totales, re-verificado bajo row lock (`FOR UPDATE`) para
   que dos adds concurrentes no pasen ambos una cuenta ya obsoleta; subida **todo-o-nada**
   (`uploadAllOrCleanup` — si una falla, las que sí subieron se destruyen; si la transacción de BD
   falla después, también se limpian los assets recién subidos).
-- [ ] `DELETE /:id/images`: persiste el cambio en BD **antes** de destruir el asset en Cloudinary
+- [x] `DELETE /:id/images`: persiste el cambio en BD **antes** de destruir el asset en Cloudinary
   (best-effort) — nunca al revés, para no dejar una referencia colgante que rompa la imagen en la
   tienda.
-- [ ] Lecturas públicas (`toPublicProduct`): cada imagen pierde el `publicId` (id interno de
+- [x] Lecturas públicas (`toPublicProduct`): cada imagen pierde el `publicId` (id interno de
   Cloudinary) antes de salir en la respuesta.
 
 **Ref:** `src/controllers/product.controller.ts`, `src/services/image.service.ts`,
 `src/middlewares/upload.ts`. Mockear `cloudinary` (`uploader.upload_stream`/`destroy`) — nunca subir
 un asset real.
 
+**Verificado:** `tests/integration/adminProducts.test.ts` (14 tests) — nivel 2 (HTTP real vía
+Supertest + Postgres de test), con `src/config/cloudinary` mockeado completo (`buildCloudinaryMock`/
+`resetCloudinaryMock`/`failNextUpload`, nuevo en `tests/setup/mocks/cloudinary.ts`, mismo patrón que
+`tests/setup/mocks/stripe.ts`): `uploader.upload_stream` devuelve un stream falso cuyo `.end()`
+invoca el callback síncronamente con un `public_id`/`secure_url` incrementales, y `uploader.destroy`
+resuelve `{ result: "ok" }` por defecto. Un JWT de prueba se firma con el nuevo helper
+`signToken(user)` (`tests/setup/factories.ts`, mismo payload que `auth.controller.ts`) en vez de
+pasar por `POST /api/auth/login`, reutilizable para la Parte 9. Casos cubiertos: `sizes` como string
+`"25,25,26"` y como array `[27,27,27]` agrupan repeticiones en filas `ProductSize` correctas;
+`adminUpdateProduct` con `sizes` reemplaza por completo las filas anteriores (no las mezcla). `DELETE
+/:id`: soft-delete cuando hay un `OrderItem` (conserva `images`, `destroy` no se llama) vs.
+hard-delete sin referencias (fila y `ProductSize` desaparecen, `destroy` se llama una vez por
+imagen). `POST /:id/images`: sube y agrega una imagen; rechaza con `400` sin llamar a Cloudinary
+cuando el total excedería el tope (chequeo temprano); **dos adds concurrentes** que juntos exceden el
+tope (producto con 2 imágenes, cada request sube 1 más) dan exactamente un `201` (3 imágenes finales)
+y un `400`, con `destroy` llamado una vez para limpiar el asset del que perdió la carrera — el mismo
+patrón de concurrencia que la Parte 3, pero sobre el row lock de imágenes en vez del stock atómico;
+subida **todo-o-nada** con `failNextUpload` simulando que la 2ª de 2 imágenes falla → `502`, la que sí
+subió se destruye y la BD no cambia. `DELETE /:id/images`: persiste el borrado y solo después llama
+`destroy` con el `publicId` correcto; un `publicId` que ya no está en la galería → `404` sin llamar a
+`destroy`; un `destroy` que rechaza (Cloudinary caído) no revierte el cambio ya persistido (sigue
+siendo best-effort). Lecturas públicas (`GET /api/products` y `GET /api/products/:id`): cada imagen
+sale como `{ url }`, nunca con `publicId`. Prueba negativa manual: forzar `false &&` en el recheck
+bajo `FOR UPDATE` de `adminAddProductImages` (`current.length + uploaded.length > MAX_IMAGES_PER_PRODUCT`)
+puso en rojo el test de concurrencia (`[201, 201]` en vez de `[201, 400]`) — confirmado y revertido,
+`git diff` limpio sobre `product.controller.ts`. `pnpm test` (96 tests, 12 suites) y `pnpm build` en
+verde.
+
+**Verifica:** `pnpm test adminProducts` en verde. Prueba negativa: neutralizar el recheck de tope bajo
+`FOR UPDATE` en `adminAddProductImages` → el test de concurrencia debe ponerse en rojo (dos `201`).
+
 ---
 
-### Parte 9 — Marca y usuarios admin (integración HTTP, Cloudinary mockeado) — 🔴 Pendiente
+### Parte 9 — Marca y usuarios admin (integración HTTP, Cloudinary mockeado) — ✅ Hecho
 
-- [ ] `GET /api/admin/brand` es **público** (sin JWT); `PUT /api/admin/brand` exige `requireAuth`.
-- [ ] `POST`/`DELETE /api/admin/brand/logo`: el nuevo asset se persiste **antes** de destruir el
+- [x] `GET /api/admin/brand` es **público** (sin JWT); `PUT /api/admin/brand` exige `requireAuth`.
+- [x] `POST`/`DELETE /api/admin/brand/logo`: el nuevo asset se persiste **antes** de destruir el
   anterior (best-effort) — un `destroy` fallido nunca pierde el logo vigente.
-- [ ] `POST /api/admin/users`: email duplicado → `409` pre-chequeado (no depende solo del handler
+- [x] `POST /api/admin/users`: email duplicado → `409` pre-chequeado (no depende solo del handler
   genérico de `UniqueConstraintError`); `tempPassword` exige la misma complejidad que `loginSchema`.
-- [ ] `DELETE /api/admin/users/:id`: `400` si el caller se borra a sí mismo; `400` si el target es el
+- [x] `DELETE /api/admin/users/:id`: `400` si el caller se borra a sí mismo; `400` si el target es el
   **último** `owner` restante — chequeado bajo `FOR UPDATE` sobre las filas `owner` (dos deletes
   concurrentes a dos owners distintos no deben dejar el panel en cero).
-- [ ] `PUT /api/admin/account`: `currentPassword` siempre requerida y verificada (incluso en un
+- [x] `PUT /api/admin/account`: `currentPassword` siempre requerida y verificada (incluso en un
   cambio solo de email); un email duplicado → `409` pre-chequeado.
 
 **Ref:** `src/controllers/brand.controller.ts`, `src/controllers/adminUser.controller.ts`. Mockear
 `cloudinary` para el logo — mismo patrón que la Parte 8.
 
+**Verificado:** `tests/integration/adminBrandUsers.test.ts` (15 tests) — nivel 2 (HTTP real vía
+Supertest + Postgres de test), con `src/config/cloudinary` mockeado igual que la Parte 8
+(`buildCloudinaryMock`/`resetCloudinaryMock`, sin necesitar `failNextUpload` aquí). `GET
+/api/admin/brand`: responde sin JWT y crea la fila `id: 1` con los defaults si no existía; `PUT` sin
+JWT → `401`, con JWT actualiza el campo enviado. `POST /api/admin/brand/logo`: una segunda subida
+persiste el `logoUrl`/`logoPublicId` nuevos y llama `destroy` con el `publicId` **anterior**; un
+`destroy` que rechaza (Cloudinary caído) no revierte el logo nuevo ya persistido (best-effort real,
+no solo documentado). `DELETE /api/admin/brand/logo` deja `logoUrl`/`logoPublicId` en `null` y
+llama `destroy` con el `publicId` que tenía. `POST /api/admin/users`: email duplicado → `409`; una
+`tempPassword` sin la complejidad de `loginSchema` → `400`; una creación válida no expone
+`passwordHash` en la respuesta y el usuario puede loguearse de inmediato con esa misma
+`tempPassword` (prueba end-to-end de que ambos schemas comparten la regla, no solo por lectura del
+código). `DELETE /api/admin/users/:id`: `400` al intentar borrarse a sí mismo; `400` al intentar
+borrar al único `owner` restante (no se borra la fila); un `admin` normal se borra sin problema;
+**dos deletes concurrentes a dos owners distintos** (`Promise.all`) dejan exactamente un `200` y un
+`400`, con `1` owner restante — nunca `[200, 200]` (que dejaría el panel en cero). `PUT
+/api/admin/account`: un `currentPassword` incorrecto → `401` incluso en un cambio solo de email; el
+correcto actualiza el email; un email ya usado por otro admin → `409`. Prueba negativa manual:
+quitar `lock: t.LOCK.UPDATE` del `findAll` de owners en `deleteAdminUser`
+(`adminUser.controller.ts`) puso el test de concurrencia en rojo (`[200, 200]` en vez de
+`[200, 400]`, 0 owners restantes) — confirmado y revertido, `git diff` limpio sobre
+`adminUser.controller.ts`. `pnpm test` (111 tests, 13 suites) y `pnpm build` en verde.
+
+**Verifica:** `pnpm test adminBrandUsers` en verde. Prueba negativa: quitar el `lock: t.LOCK.UPDATE`
+del `findAll` de owners en `deleteAdminUser` → el test de concurrencia debe ponerse en rojo
+(`[200, 200]`, 0 owners restantes).
+
 ---
 
-### Parte 10 — Agregaciones de dashboard y reports (unit, funciones puras) — 🔴 Pendiente
+### Parte 10 — Agregaciones de dashboard y reports (unit, funciones puras) — ✅ Hecho
 
 > A diferencia de las partes anteriores, aquí no se persiguen cifras exactas contra un dataset fijo
 > (la agregación cambia seguido y un snapshot de números se vuelve frágil/costoso de mantener) — se
 > prueban **invariantes estructurales y casos borde** con fixtures pequeños y deliberados de
 > `Order`/`OrderItem`/`Product`.
 
-- [ ] `dashboard.service.ts`: solo las órdenes `status: "paid"` cuentan como venta (no
+- [x] `dashboard.service.ts`: solo las órdenes `status: "paid"` cuentan como venta (no
   `paymentStatus`, que el seed deja en `"unpaid"`); cada ventana (`"7"|"30"|"90"`) compara contra su
   propia ventana previa de igual longitud; `GASTOS_FIJOS` se prorratea por `windowDays/30`.
-- [ ] `revenueByPeriod`: incluye días en `$0` (nunca se saltan); el day-bucketing (`isoDay`) queda
+- [x] `revenueByPeriod`: incluye días en `$0` (nunca se saltan); el day-bucketing (`isoDay`) queda
   pinneado a UTC — un caso cerca de medianoche en un host al oeste de UTC no debe recorrer un día
   (el bug real que motivó el pin, igual que en la Parte 1).
-- [ ] `reports.service.ts`'s `monthRange`: sin huecos entre el mes de la primera orden pagada y el
+- [x] `reports.service.ts`'s `monthRange`: sin huecos entre el mes de la primera orden pagada y el
   mes UTC actual; clamp al mes actual cuando `from` queda después de `to`.
-- [ ] `byProduct` de cada mes: incluye todo producto vivo (`unitsSold: 0` si no vendió ese mes) más
+- [x] `byProduct` de cada mes: incluye todo producto vivo (`unitsSold: 0` si no vendió ese mes) más
   un producto descontinuado **solo** en los meses donde realmente vendió.
-- [ ] `replenishment`: la serie que alimenta `computeForecast` usa solo meses completos, excepto el
+- [x] `replenishment`: la serie que alimenta `computeForecast` usa solo meses completos, excepto el
   caso de **cero** meses completos (primer mes de la tienda), donde usa el mes parcial como único
   dato; `effectiveForecast` actúa como piso cuando `forecastNextMonth` redondea a `0`; los meses en
   `$0` **antes** de la primera venta del producto se recortan de la serie (los de después se
   conservan).
-- [ ] `loadReportData`: cachea la promesa por `REPORT_CACHE_TTL_MS` (60s); un fetch que rechaza limpia
+- [x] `loadReportData`: cachea la promesa por `REPORT_CACHE_TTL_MS` (60s); un fetch que rechaza limpia
   el cache de inmediato en vez de repetir el error hasta que expire el TTL.
 
 **Ref:** `src/services/dashboard.service.ts`, `src/services/reports.service.ts`. Sin BD real ni HTTP
 — se llaman las funciones directo con arrays de `Order`/`Product` construidos a mano (o con las
 factories de `tests/setup/factories.ts` sin persistirlas).
+
+**Verificado:** `tests/unit/services/dashboard.test.ts` (6 tests) + `tests/unit/services/reports.test.ts`
+(10 tests) — nivel 1 puro: sin BD (`Order.build`/`Product.build`/`OrderItem.build`/`ProductSize.build`
+en vez de `.create()`, nunca tocan Postgres) y sin HTTP, mockeando solo `Order.findAll`/`Product.findAll`
+(`jest.spyOn`) para interceptar las dos únicas queries que hace cada servicio. `getDashboardData` llama
+`Order.findAll` dos veces dentro del mismo `Promise.all` (historial + recientes); como `Promise.all`
+evalúa el array en orden, `mockResolvedValueOnce` encolado dos veces basta para diferenciarlas sin
+inspeccionar los argumentos de la llamada — excepto en el primer test, que si inspecciona
+`mock.calls[n][0].where.status` para confirmar el invariante "solo cuentan las `paid`" (mockear la
+query completa no puede probar el filtrado real de Postgres, así que se prueba que la query SE
+CONSTRUYE con ese filtro, no que Postgres lo aplique — eso ya lo cubren las suites de integración).
+`jest.useFakeTimers().setSystemTime(...)` fija `new Date()` para que el cálculo de ventanas/meses sea
+determinista. El invariante de ventanas independientes se probó con una sola orden 10 días atrás: cae
+en la ventana PREVIA de `"7"` (trend `-100%`) pero en la ventana ACTUAL de `"30"` (sin trend, ventana
+previa vacía) — la misma orden clasificada distinto según el ancho de ventana es lo que demuestra que
+cada una usa su propio corte, no uno compartido. Para reports, `loadReportData`'s cache es estado a
+**nivel de módulo** (`cachedReportData`/`cacheExpiresAt`), así que cada `it` hace
+`jest.resetModules()` + `require(...)` fresco de los modelos y del servicio en `beforeEach` (mismo
+patrón que la Parte 7 usa para el token/throttle cacheados de Skydropx) — si no, el cache de un test
+contaminaría el siguiente. El caso de "cero meses completos" y el de "recorte de ceros iniciales"
+distinguen sus ramas por el **método de pronóstico** devuelto (`promedio-simple` vs
+`suavizacion-exponencial`) en vez de solo el valor numérico, porque un cambio de rama es una señal más
+dura de que la serie de entrada tenía el tamaño esperado; el caso de recorte necesita una orden de OTRO
+producto en un mes más antiguo para fijar el inicio del rango de meses (`monthRange` arranca en la
+orden pagada más antigua de TODA la tienda, no por producto) — sin eso, el propio producto bajo prueba
+ya no arrastraría ceros iniciales que recortar. Pruebas negativas manuales: quitar
+`.slice(firstSale)` en `reports.service.ts` (usar la serie sin recortar) puso en rojo el test de
+recorte (`forecastMethod` pasó de `promedio-simple` a `suavizacion-exponencial`, la serie de 4 puntos
+sin recortar activa la rama de suavización); forzar `previousWindowStart` a un offset fijo de 30 días
+(ignorando `windowDays`) en `dashboard.service.ts` puso en rojo el test de ventanas independientes
+(el trend de `"7"` esperado en `-100%` desapareció) — ambas confirmadas y revertidas,
+`git diff` limpio sobre `src/`. `pnpm test` (127 tests, 15 suites) y `pnpm build` en verde.
+
+**Verifica:** `pnpm test dashboard reports` en verde. Pruebas negativas: quitar `.slice(firstSale)` en
+`getReplenishmentReport` (`reports.service.ts`) → el test de recorte de ceros iniciales debe ponerse en
+rojo (cambia de método de pronóstico); fijar `previousWindowStart` a un offset constante de 30 días en
+`buildKpisForWindow` (`dashboard.service.ts`) → el test de ventanas independientes debe ponerse en rojo.
 
 ---
 
@@ -471,8 +615,8 @@ branch protection en `main`.
 - [x] **Parte 3** — Checkout (stock atómico, totales, refine shipping)
 - [x] **Parte 4** — Idempotencia de webhooks (pago, guía, estado de envío)
 - [x] **Parte 5** — Cancelación/reembolso manual + release de stock (opcional)
-- [ ] **Parte 6** — Envío en vivo (`POST /api/shipping/rates`, fallback a tarifa plana)
-- [ ] **Parte 7** — Cliente HTTP de Skydropx (OAuth, throttle, poll de cotización)
-- [ ] **Parte 8** — CRUD admin de productos + imágenes (Cloudinary mockeado)
-- [ ] **Parte 9** — Marca y usuarios admin (brand, logo, adminUser, account)
-- [ ] **Parte 10** — Agregaciones de dashboard y reports (invariantes, no cifras exactas)
+- [x] **Parte 6** — Envío en vivo (`POST /api/shipping/rates`, fallback a tarifa plana)
+- [x] **Parte 7** — Cliente HTTP de Skydropx (OAuth, throttle, poll de cotización)
+- [x] **Parte 8** — CRUD admin de productos + imágenes (Cloudinary mockeado)
+- [x] **Parte 9** — Marca y usuarios admin (brand, logo, adminUser, account)
+- [x] **Parte 10** — Agregaciones de dashboard y reports (invariantes, no cifras exactas)
