@@ -427,10 +427,10 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 - [ ] Dominio verificado en Resend (manual, fuera del código) antes de enviar a clientes reales
 
 **Pendiente manual (fuera de código)**
-- [ ] Branch protection en `main` (ver [roadmap-hardening.md](roadmap-hardening.md) Fase H.6): después
-  de que el workflow de CI (`.github/workflows/ci.yml`) corra al menos una vez, ir a
-  `Settings → Branches` en el repo de GitHub, agregar/editar una regla de protección para `main`,
-  activar **"Require status checks to pass before merging"** y seleccionar el check **`Build & Test`**.
+- [x] Branch protection en `main` (ver [roadmap-hardening.md](roadmap-hardening.md) Fase H.6): el
+  check **`Build & Test`** (`.github/workflows/ci.yml`) es obligatorio antes de mergear a `main`
+  (`required_status_checks.strict: true`), con force-push y borrado de la rama bloqueados. Requirió
+  hacer el repo **público** — GitHub Free no permite branch protection en repos privados.
 
 **Ya hecho ✅**
 - [x] Express + Sequelize + PostgreSQL + `/health`

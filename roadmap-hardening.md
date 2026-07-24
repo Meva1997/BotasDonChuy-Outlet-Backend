@@ -210,8 +210,13 @@ correrlo local.
 **Tareas:**
 - [x] GitHub Actions: workflow que en cada PR levanta un contenedor Postgres de servicio,
   corre `pnpm install`, `pnpm build` (`tsc --noEmit` ya detecta errores de tipos) y `pnpm test`.
-- [ ] Bloquear merge a `main` si el workflow falla (branch protection — paso manual en GitHub, no
-  de código).
+- [x] Bloquear merge a `main` si el workflow falla (branch protection — paso manual en GitHub, no
+  de código). Configurado vía `gh api .../branches/main/protection`: check `Build & Test`
+  obligatorio (`strict: true`), force-push y borrado de rama bloqueados. **Requirió hacer el repo
+  público** — GitHub Free no ofrece branch protection ni rulesets en repos privados (confirmado
+  contra la API: `403 Upgrade to GitHub Pro or make this repository public`); no había secretos
+  comprometidos en el historial (`.env`/`.env.test` siempre gitignored, nunca commiteados), así
+  que se optó por repo público en vez de pagar Pro.
 
 **Cómo verificar:** abrir un PR con un test roto a propósito → el check de GitHub lo marca en rojo
 antes de que se pueda mergear.
@@ -257,4 +262,4 @@ antes de que se pueda mergear.
 
 **Fase H.6 — CI**
 - [x] Workflow de GitHub Actions con Postgres de servicio + `pnpm test`
-- [ ] Branch protection en `main`
+- [x] Branch protection en `main`
