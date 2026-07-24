@@ -426,6 +426,12 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 - [x] Email de confirmación de pedido al pasar a `paid`
 - [ ] Dominio verificado en Resend (manual, fuera del código) antes de enviar a clientes reales
 
+**Pendiente manual (fuera de código)**
+- [ ] Branch protection en `main` (ver [roadmap-hardening.md](roadmap-hardening.md) Fase H.6): después
+  de que el workflow de CI (`.github/workflows/ci.yml`) corra al menos una vez, ir a
+  `Settings → Branches` en el repo de GitHub, agregar/editar una regla de protección para `main`,
+  activar **"Require status checks to pass before merging"** y seleccionar el check **`Build & Test`**.
+
 **Ya hecho ✅**
 - [x] Express + Sequelize + PostgreSQL + `/health`
 - [x] Modelo `Product`

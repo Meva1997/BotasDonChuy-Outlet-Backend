@@ -777,6 +777,8 @@ idempotency; 5 = manual cancel/refund/release; 6 = live shipping rates; 7 = Skyd
 **all twelve are done** as of this phase (17 suites / 135 tests). Keep adding
 new tests **part by part** (one behavior area at a time), marking `[x]` in `roadmap-testing.md` as
 each closes, and don't touch `src/` from a test change unless a test reveals a real bug.
+`pnpm test` also runs automatically on every PR and on pushes to `main` via GitHub Actions
+(`.github/workflows/ci.yml`, Fase H.6 — Postgres service container, `pnpm build`, then `pnpm test`).
 
 **Three levels, each behavior where it belongs:** (1) *pure unit*, no DB — import and call the
 function (`cart`, `forecast`, `formatMoney`, `date`, `dashboard`/`reports` aggregation, `skydropx`

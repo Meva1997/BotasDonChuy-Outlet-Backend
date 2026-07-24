@@ -24,7 +24,7 @@ resolverse **antes** del primer deploy a producción real con clientes pagando.
 
 | Punto | Estado | Riesgo si no se atiende |
 |---|---|---|
-| Tests automatizados | ❌ `pnpm test` es un placeholder | Regresión silenciosa en stock atómico, webhooks, totales |
+| Tests automatizados | ✅ Jest + ts-jest + Supertest, 17 suites / 135 tests (Fase H.1) | — |
 | Migraciones de esquema | ✅ `sequelize-cli` en `src/migrations/` (Fase H.2) | — |
 | Rate limit en `POST /api/orders` | ❌ ausente | Un bot puede crear PaymentIntents/órdenes `pending` sin límite |
 | Logging estructurado / monitoreo de errores | ✅ `pino` + Sentry opcional + alertas por correo (Fase H.4) | — |
@@ -52,30 +52,30 @@ es casi el estándar de facto para probar rutas HTTP en Express). Se prioriza la
 sobre la fricción extra de configurar `ts-jest` con `strict` mode.
 
 **Tareas:**
-- [ ] Instalar `jest` + `ts-jest` + `@types/jest` + `supertest` + `@types/supertest`. Reemplazar el
+- [x] Instalar `jest` + `ts-jest` + `@types/jest` + `supertest` + `@types/supertest`. Reemplazar el
   placeholder de `pnpm test` (`jest.config.ts` con el preset `ts-jest`).
-- [ ] Setup de BD de pruebas: un `DATABASE_URL` de test separado (Postgres real, no sqlite — el
+- [x] Setup de BD de pruebas: un `DATABASE_URL` de test separado (Postgres real, no sqlite — el
   código depende de features Postgres-específicas: `ENUM`, `JSONB`, `literal('stock - N')`) +
   helper (`globalSetup`/`beforeEach` de Jest) que corre `sequelize.sync({ force: true })` antes de
   cada suite y limpia entre tests.
-- [ ] **Servicios puros primero** (sin BD, el ROI más alto):
-  - [ ] `src/services/cart.ts` — `computeTotals`, `computeShipping`.
-  - [ ] `src/services/forecast.ts` — los 3 modos (1-2 meses, 3, 4+).
-  - [ ] `src/utils/formatMoney.ts`, `src/utils/date.ts` (`isoDay`/`isoMonth`/formatters UTC).
-- [ ] **Integración de checkout** (con `supertest` contra el `app` exportado de `src/app.ts`, BD real
+- [x] **Servicios puros primero** (sin BD, el ROI más alto):
+  - [x] `src/services/cart.ts` — `computeTotals`, `computeShipping`.
+  - [x] `src/services/forecast.ts` — los 3 modos (1-2 meses, 3, 4+).
+  - [x] `src/utils/formatMoney.ts`, `src/utils/date.ts` (`isoDay`/`isoMonth`/formatters UTC).
+- [x] **Integración de checkout** (con `supertest` contra el `app` exportado de `src/app.ts`, BD real
   de test):
-  - [ ] Descuento atómico de stock: dos requests concurrentes por el último par → una `201`, una `409`.
-  - [ ] Totales recalculados ignoran montos que mande el cliente.
-  - [ ] `quotationId`/`rateId` ambos-o-ninguno (el `.refine()` de `createOrderSchema`).
-- [ ] **Idempotencia de webhooks** (el punto más frágil del código, por diseño):
-  - [ ] `markOrderPaidFromWebhook`: dos llamadas concurrentes → un solo `affectedCount === 1`, un
+  - [x] Descuento atómico de stock: dos requests concurrentes por el último par → una `201`, una `409`.
+  - [x] Totales recalculados ignoran montos que mande el cliente.
+  - [x] `quotationId`/`rateId` ambos-o-ninguno (el `.refine()` de `createOrderSchema`).
+- [x] **Idempotencia de webhooks** (el punto más frágil del código, por diseño):
+  - [x] `markOrderPaidFromWebhook`: dos llamadas concurrentes → un solo `affectedCount === 1`, un
     solo correo (mock de `sendEmail`, no llamar a Resend real).
-  - [ ] `createShipmentForOrder`: el guard de centinela `"creating"` — dos llamadas concurrentes →
+  - [x] `createShipmentForOrder`: el guard de centinela `"creating"` — dos llamadas concurrentes →
     una sola llega a llamar a Skydropx (mock del `fetch`, no gastar saldo real).
-  - [ ] `applyShipmentUpdateFromWebhook`: un evento fuera de orden no retrocede `Order.status`.
-- [ ] **Auth**: login con password correcta/incorrecta devuelven el mismo mensaje; `assertValidResetCode`
+  - [x] `applyShipmentUpdateFromWebhook`: un evento fuera de orden no retrocede `Order.status`.
+- [x] **Auth**: login con password correcta/incorrecta devuelven el mismo mensaje; `assertValidResetCode`
   agota intentos y bloquea.
-- [ ] Wire a CI (ver Fase H.6) para que corran en cada PR, no solo localmente.
+- [x] Wire a CI (ver Fase H.6) para que corran en cada PR, no solo localmente.
 
 **Cómo verificar:** `pnpm test` corre una suite real y falla si alguien rompe el descuento atómico
 de stock o la idempotencia de un webhook (probarlo a propósito: comentar el `WHERE` del `UPDATE`
@@ -208,7 +208,7 @@ reembolso en el dashboard de Stripe test y el stock se restablece.
 correrlo local.
 
 **Tareas:**
-- [ ] GitHub Actions: workflow que en cada PR levanta un contenedor Postgres de servicio,
+- [x] GitHub Actions: workflow que en cada PR levanta un contenedor Postgres de servicio,
   corre `pnpm install`, `pnpm build` (`tsc --noEmit` ya detecta errores de tipos) y `pnpm test`.
 - [ ] Bloquear merge a `main` si el workflow falla (branch protection — paso manual en GitHub, no
   de código).
@@ -231,11 +231,11 @@ antes de que se pueda mergear.
 ## Checklist maestro
 
 **Fase H.1 — Tests**
-- [ ] Jest + ts-jest + Supertest instalados + BD de test
-- [ ] Servicios puros (`cart`, `forecast`, `formatMoney`, `date`)
-- [ ] Integración de checkout (stock atómico, totales, refine de shipping)
-- [ ] Idempotencia de webhooks (pago, guía, estado de envío)
-- [ ] Auth (login, reset code)
+- [x] Jest + ts-jest + Supertest instalados + BD de test
+- [x] Servicios puros (`cart`, `forecast`, `formatMoney`, `date`)
+- [x] Integración de checkout (stock atómico, totales, refine de shipping)
+- [x] Idempotencia de webhooks (pago, guía, estado de envío)
+- [x] Auth (login, reset code)
 
 **Fase H.2 — Migraciones**
 - [x] Herramienta elegida (`sequelize-cli` / `umzug`)
@@ -256,5 +256,5 @@ antes de que se pueda mergear.
 - [x] `POST /api/admin/orders/:id/cancel` con reembolso Stripe
 
 **Fase H.6 — CI**
-- [ ] Workflow de GitHub Actions con Postgres de servicio + `pnpm test`
+- [x] Workflow de GitHub Actions con Postgres de servicio + `pnpm test`
 - [ ] Branch protection en `main`
