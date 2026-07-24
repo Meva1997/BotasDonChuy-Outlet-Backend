@@ -336,7 +336,7 @@ dos guías (dinero real) ni con reintentos concurrentes. Si la cotización guard
 re-cotiza sola antes de crear el envío (sin tocar el monto ya cobrado). La creación es **asíncrona**
 en Skydropx: `tracking_number`/`label_url` no llegan en la respuesta, así que
 `trackingNumber`/`trackingUrl`/`labelUrl` quedan en `null` hasta que el webhook de Skydropx
-(Fase 8.6) los reporte — ver `roadmap-skydropx.md` para el detalle completo.
+(Fase 8.6) los reporte — ver `roadmaps-completados/roadmap-skydropx.md` para el detalle completo.
 
 **Webhook de estado de envío (Fase 8.6):** `POST /api/webhooks/skydropx`
 (`src/routes/webhook.routes.ts` → `order.controller.ts`'s `skydropxWebhook`) se monta con el mismo
@@ -542,10 +542,10 @@ Reglas al agregar o tocar un endpoint:
 ## Testing
 
 Suite automatizada con **Jest + ts-jest + supertest** (Fase H.1 — ver
-[`roadmap-testing.md`](roadmap-testing.md) para el desglose por partes; las **12 partes** — infra,
+[`roadmaps-completados/roadmap-testing.md`](roadmaps-completados/roadmap-testing.md) para el desglose por partes; las **12 partes** — infra,
 BD de test, servicios puros, auth, checkout, idempotencia de webhooks, cancelación/reembolso manual,
 envío en vivo, cliente Skydropx, CRUD admin de productos/imágenes, marca/usuarios admin y
-agregaciones de dashboard/reports — están **completas**: 17 suites / 135 tests en verde). Los tests
+agregaciones de dashboard/reports — están **completas**: 18 suites / 142 tests en verde). Los tests
 viven en `tests/` (fuera de `src/`, para que `tsc` no los incluya en el build de producción);
 `ts-jest` los transpila en memoria.
 
@@ -558,7 +558,7 @@ pnpm test <patrón>      # una parte (p. ej. pnpm test auth)
 **Tres niveles de prueba:** (1) *unit puro* sin BD (`cart`, `forecast`, `formatMoney`, `date`,
 `skydropx` con `fetch` mockeado, `dashboard`/`reports`, `sentry`, `errorHandler`);
 (2) *integración HTTP* con `request(app)...` contra un Postgres de test real (`auth`, `checkout`,
-`shippingRates`, `adminProducts`, `adminBrandUsers`); (3) *servicio + SDK mockeado* para
+`products`, `shippingRates`, `adminProducts`, `adminBrandUsers`); (3) *servicio + SDK mockeado* para
 concurrencia/idempotencia (`webhooks`, `cancelOrder`). **Stripe,
 Skydropx y Resend van SIEMPRE mockeados** (cuestan dinero o mandan correos reales); la **BD no se
 mockea**. `jest.config.ts` fuerza `maxWorkers: 1`: varias suites de integración comparten el mismo
@@ -603,8 +603,8 @@ tests/                           # Suite automatizada (fuera de src/ — tsc la 
 ├── setup/                       # env.ts, db.ts, factories.ts, mocks/{stripe,skydropx,resend}.ts
 ├── smoke/                       # import app + GET /health (valida el arranque en test)
 ├── unit/                        # nivel 1 — servicios/utils/config/middlewares puros, sin BD
-└── integration/                 # niveles 2/3 — Postgres de test (auth, checkout, webhooks, cancelOrder,
-                                  # shippingRates, adminProducts, adminBrandUsers)
+└── integration/                 # niveles 2/3 — Postgres de test (auth, checkout, products, webhooks,
+                                  # cancelOrder, shippingRates, adminProducts, adminBrandUsers)
 src/
 ├── app.ts                       # Punto de entrada: Express, middleware, arranque y apagado ordenado
 ├── seed.ts                      # Script de seed (productos, histórico, admin, marca)

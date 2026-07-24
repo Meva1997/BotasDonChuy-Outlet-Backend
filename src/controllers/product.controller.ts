@@ -1,5 +1,5 @@
 import type { Request, RequestHandler, Response } from "express";
-import { Op, type WhereOptions } from "sequelize";
+import { Op, QueryTypes, type WhereOptions } from "sequelize";
 import { Product, type ProductAttributes, type ProductImage } from "../models/Product";
 import { ProductSize } from "../models/ProductSize";
 import { productSizesInclude } from "../utils/productSizesInclude";
@@ -34,35 +34,64 @@ function toPublicProduct(product: Product): Record<string, unknown> {
 
 export const getProducts: RequestHandler = asyncHandler(async (req: Request, res: Response) => {
   const categoria = req.query.categoria as string | undefined;
-  const talla = req.query.talla ? Number(req.query.talla) : undefined;
-  const page = Number(req.query.page) || 1;
-  const perPage = Number(req.query.perPage) || 9;
+  // Talla inválida (no numérica/entera) se ignora en vez de colarse cruda a un
+  // literal SQL: antes un valor basura solo dejaba `filtrados` vacío en memoria,
+  // ahora rompería la subquery si no se descarta aquí.
+  const tallaRaw = req.query.talla !== undefined ? Number(req.query.talla) : undefined;
+  const talla = tallaRaw !== undefined && Number.isInteger(tallaRaw) ? tallaRaw : undefined;
+  const page = Math.max(1, Math.floor(Number(req.query.page)) || 1);
+  const perPage = Math.max(1, Math.floor(Number(req.query.perPage)) || 9);
+
   const where: WhereOptions<ProductAttributes> = { visible: true, deletedAt: { [Op.is]: null } };
   if (categoria) where.type = categoria;
+
+  // "¿Tiene talla X con stock?" no es una columna de Product, así que se resuelve
+  // como subquery contra product_sizes en vez de traer todo el catálogo a Node
+  // para filtrar con `sizes.includes(talla)` (ver CLAUDE.md — paginación en SQL).
+  // `talla` ya se validó como entero arriba, así que interpolarla directo en el
+  // literal es seguro (Product.count no soporta `replacements`, a diferencia de
+  // findAll/sequelize.query).
+  if (talla !== undefined) {
+    where.id = {
+      [Op.in]: sequelize.literal(
+        `(SELECT "productId" FROM product_sizes WHERE size = ${talla} AND stock > 0)`,
+      ),
+    };
+  }
+
+  // availableSizes refleja las tallas disponibles para la categoría completa
+  // (no la talla ya elegida) para que el selector siga mostrando el resto de
+  // opciones — igual que antes, se calcula aparte del filtro por talla.
+  const availableSizesRows = await sequelize.query<{ size: number }>(
+    `SELECT DISTINCT ps.size AS size
+     FROM product_sizes ps
+     INNER JOIN products p ON p.id = ps."productId"
+     WHERE ps.stock > 0
+       AND p.visible = true
+       AND p."deletedAt" IS NULL
+       ${categoria ? `AND p.type = :categoria` : ""}
+     ORDER BY ps.size ASC`,
+    {
+      type: QueryTypes.SELECT,
+      replacements: categoria ? { categoria } : undefined,
+    },
+  );
+  const availableSizes = availableSizesRows.map((r) => r.size);
+
+  const total = await Product.count({ where });
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
+  const pageClamped = Math.min(Math.max(page, 1), totalPages); // clamp a [1, totalPages]
+  const offset = (pageClamped - 1) * perPage;
 
   const productos = await Product.findAll({
     where,
     attributes: { exclude: ["unitCost"] },
     include: [productSizesInclude],
+    order: [["id", "ASC"]],
+    limit: perPage,
+    offset,
   });
-
-  const availableSizes = [
-    ...new Set(
-      productos.flatMap(
-        (p) => p.productSizes?.filter((ps) => ps.stock > 0).map((ps) => ps.size) ?? [],
-      ),
-    ),
-  ].sort((a, b) => a - b);
-
-  const filtrados = talla
-    ? productos.filter((p) => p.sizes.includes(talla))
-    : productos;
-
-  const total = filtrados.length;
-  const totalPages = Math.max(1, Math.ceil(total / perPage));
-  const pageClamped = Math.min(Math.max(page, 1), totalPages); // clamp a [1, totalPages]
-  const inicio = (pageClamped - 1) * perPage;
-  const products = filtrados.slice(inicio, inicio + perPage).map(toPublicProduct);
+  const products = productos.map(toPublicProduct);
 
   res.json({
     products,

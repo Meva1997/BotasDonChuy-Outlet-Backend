@@ -424,7 +424,9 @@ Son funciones que **reciben números y devuelven números** — cópialas para q
 - [x] Cimientos: `src/config/resend.ts`, `src/services/email.service.ts`, plantillas
 - [x] `POST /api/auth/forgot-password` real (deja de ser stub) + `POST /api/auth/verify-reset-code` + `POST /api/auth/reset-password` (código de 5 dígitos, ver desviación en Fase 9.2)
 - [x] Email de confirmación de pedido al pasar a `paid`
-- [ ] Dominio verificado en Resend (manual, fuera del código) antes de enviar a clientes reales
+- [ ] 🗓️ **Diferido a futuro** — Dominio verificado en Resend (manual, fuera del código) antes de
+  enviar a clientes reales. Lanzamiento planeado para el 1 de octubre; hacerlo cerca de esa fecha,
+  no bloquea el desarrollo actual.
 
 **Pendiente manual (fuera de código)**
 - [x] Branch protection en `main` (ver [roadmap-hardening.md](roadmap-hardening.md) Fase H.6): el

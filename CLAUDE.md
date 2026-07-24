@@ -46,7 +46,7 @@ below; this used to run `sequelize.sync({ alter: true })` in development, remove
 so dev and prod share the exact same schema-change path). SQL logging is gated on development.
 On any connection error the process exits with code 1.
 
-**Migrations** (`src/migrations/`, Fase H.2 — `roadmap-hardening.md`): the versioned,
+**Migrations** (`src/migrations/`, Fase H.2 — `roadmaps-completados/roadmap-hardening.md`): the versioned,
 reproducible path to change schema, in dev and prod alike. `sequelize-cli` (already a
 devDependency before this phase, no new package added) is driven by `.sequelizerc` at the repo
 root, which registers `ts-node/register` (so migrations are authored in TypeScript like the
@@ -69,9 +69,16 @@ is no `alter: true` fallback to replicate it anywhere, dev included.** Run `pnpm
 under a base path (e.g. `app.use("/api/products", productRoutes)`). Each route file builds an
 Express `Router` and delegates to handlers in the matching `*.controller.ts`. Product reads
 only expose rows with `visible: true` and exclude the `unitCost` field via Sequelize
-`attributes: { exclude: [...] }`. `GET /api/products` does filtering (`categoria` → `type`,
-`talla` → membership in `sizes`) and pagination (`page`/`perPage`, page clamped to
-`[1, totalPages]`) in memory after the query, and also returns `availableSizes`.
+`attributes: { exclude: [...] }`. `GET /api/products` filters (`categoria` → `type`; `talla` →
+a `WHERE id IN (SELECT "productId" FROM product_sizes WHERE size = N AND stock > 0)` subquery,
+since "has this size in stock" isn't a plain column) and paginates (`page`/`perPage`, page clamped
+to `[1, totalPages]`) **in SQL**: `total` comes from a separate `Product.count({ where })`, and the
+page itself from `Product.findAll({ where, limit, offset, order: [["id","ASC"]] })` — Postgres only
+ever returns the rows for the requested page, not the full matching set (`talla` is validated with
+`Number.isInteger` before being interpolated into the subquery — it's never a raw client string).
+`availableSizes` (all sizes with stock > 0 for the `categoria`, independent of the `talla` already
+chosen) is a separate raw `sequelize.query` aggregate over `product_sizes` joined to `products`,
+since it needs to scan the whole category rather than just one page.
 The admin CRUD lives in `src/routes/adminProduct.routes.ts` (mounted at `/api/admin/products`,
 `router.use(requireAuth)` so every route needs a JWT) and reuses `product.controller.ts`
 (`adminGetProducts`/`adminCreateProduct`/`adminUpdateProduct`/`adminDeleteProduct`). Unlike the
@@ -232,7 +239,7 @@ email when `affectedCount === 1`. This is the single funnel every order passes t
 against concurrent webhook + sweeper runs: only one UPDATE affects the row, so the email fires
 exactly once. A plain in-memory guard (`if (order.paymentStatus === "paid")`) would **not** give
 this — two callers could both read `processing` before either writes and both send. The `status:
-"pending"` half of the guard (Fase H.5 fix, `roadmap-hardening.md`) exists because this transition
+"pending"` half of the guard (Fase H.5 fix, `roadmaps-completados/roadmap-hardening.md`) exists because this transition
 is only ever valid `pending → paid`: without it, a late/duplicate `payment_intent.succeeded` could
 "resurrect" an order a store admin already cancelled via `POST /api/admin/orders/:id/cancel` (its
 stock already restocked, possibly resold) back to `paid`, re-sending the confirmation email and
@@ -279,9 +286,9 @@ double-restock. `src/services/pendingOrderSweeper.ts` (`startPendingOrderSweeper
 (`retrieve`): if the PaymentIntent is `succeeded` it marks the order `paid` (recovers a missed
 webhook), otherwise it cancels the PaymentIntent and calls `releaseOrderStock`.
 
-**Envío en vivo / Skydropx** (Fase 8.1–8.6, activo — cotización en vivo, órdenes con tarifa real,
-guía automática al pagar y webhook de estado de envío; Fase 8.7 — Swagger de los endpoints nuevos —
-pendiente, ver `roadmap-skydropx.md`):
+**Envío en vivo / Skydropx** (Fase 8.1–8.7, activo — cotización en vivo, órdenes con tarifa real,
+guía automática al pagar, webhook de estado de envío y Swagger de los endpoints nuevos, ver
+`roadmaps-completados/roadmap-skydropx.md`):
 `POST /api/shipping/rates` `[público]` (`src/routes/shipping.routes.ts` →
 `shipping.controller.ts`'s `getShippingRates`) cotiza el envío en vivo contra Skydropx Pro para el
 checkout, con la tarifa plana existente (`cart.ts`'s `computeShipping`) como **fallback** — la
@@ -306,7 +313,7 @@ armados) de una falla transitoria de red/5xx.
 
 `getShippingRates(addressFrom, addressTo, parcel)` crea la cotización (`POST /api/v1/quotations`,
 shape `{ quotation: { address_from, address_to, parcels } }` — confirmado contra sandbox real, ver
-`roadmap-skydropx.md` §Fase 8.3; incluye `requested_carriers` solo si `SKYDROPX_CARRIERS` está
+`roadmaps-completados/roadmap-skydropx.md` §Fase 8.3; incluye `requested_carriers` solo si `SKYDROPX_CARRIERS` está
 definido, ver más abajo) y hace poll (`GET /api/v1/quotations/{id}`) cada segundo hasta que
 ninguna tarifa quede `pending`, se junten **`MIN_READY_RATES` (3)** tarifas utilizables, o se agote
 el timeout (`POLL_TIMEOUT_MS`, **8s**) — `is_completed` puede no llegar nunca a
@@ -368,7 +375,7 @@ enviar con un 400 desde un campo no relacionado.
 después del guard `affected === 1` que también dispara `sendOrderConfirmationEmail`, ver
 **Payments / Stripe**): crea la guía real contra Skydropx (`POST /api/v1/shipments`, shape
 `{ shipment: { rate_id, address_from, address_to, packages } }` — confirmado contra sandbox real
-igual que `quotations`, ver `roadmap-skydropx.md` §Fase 8.5) a partir del `skydropxRateId` guardado
+igual que `quotations`, ver `roadmaps-completados/roadmap-skydropx.md` §Fase 8.5) a partir del `skydropxRateId` guardado
 en la orden. Si la orden no tiene cotización de Skydropx (cayó al fallback de tarifa plana en el
 checkout), no hay `rate_id` que convertir en guía: se loguea y se omite, el dueño la genera
 manualmente. Dos hallazgos no documentados por Skydropx, confirmados por prueba y error contra
@@ -731,7 +738,7 @@ nullable password-reset columns in Fase 9 (`resetPasswordCodeHash`, `resetPasswo
 `resetPasswordAttempts` — see the **Password reset via 5-digit code** section). `src/seed.ts`
 (`pnpm seed`) populates all of the above from the frontend's mock data.
 
-**Logging y monitoreo** (Fase H.4 — `roadmap-hardening.md`): `src/config/logger.ts` exports a
+**Logging y monitoreo** (Fase H.4 — `roadmaps-completados/roadmap-hardening.md`): `src/config/logger.ts` exports a
 shared `pino` instance (`logger`) used everywhere a background job, webhook handler, or
 fire-and-forget side effect used to `console.*` — level defaults to `info` in production (one
 JSON line per record) / `debug` in dev (pretty-printed via `pino-pretty`), overridable with
@@ -764,18 +771,19 @@ operational alert, not a correctness guarantee). `email.service.ts`'s own two fa
 same broken channel. `src/seed.ts`'s `console.log` calls are unchanged (a one-off CLI script, not
 server request-path code — out of scope for this phase).
 
-**Testing** (Fase H.1 — `roadmap-testing.md`): the suite runs on **`jest` + `ts-jest` +
+**Testing** (Fase H.1 — `roadmaps-completados/roadmap-testing.md`): the suite runs on **`jest` + `ts-jest` +
 `supertest`** and lives in **`tests/`**, deliberately **outside `src/`** — `tsc` compiles `src/`→
 `dist/`, so a test under `src/` would ship to production; `ts-jest` transpiles the `tests/` files
 in-memory and `tsc` ignores them. `jest.config.ts` points `ts-jest` at **`tsconfig.jest.json`** (a
 separate file, not an inline object — an inline `tsconfig` **replaces** the base config instead of
 merging, dropping `@types` resolution; the file `extends` the base but moves `rootDir` to the repo
-root and adds `types: [jest, node]`). `roadmap-testing.md` breaks the work into **independent
+root and adds `types: [jest, node]`). `roadmaps-completados/roadmap-testing.md` breaks the work into **independent
 parts** (0 = infra; 0.5 = dedicated test DB; 1 = pure services; 2 = auth; 3 = checkout; 4 = webhook
 idempotency; 5 = manual cancel/refund/release; 6 = live shipping rates; 7 = Skydropx HTTP client;
 8 = admin product CRUD + images; 9 = brand/admin users; 10 = dashboard/reports aggregations) —
-**all twelve are done** as of this phase (17 suites / 135 tests). Keep adding
-new tests **part by part** (one behavior area at a time), marking `[x]` in `roadmap-testing.md` as
+**all twelve are done** as of this phase (18 suites / 142 tests, latest count — grows as tests are
+added part by part). Keep adding
+new tests **part by part** (one behavior area at a time), marking `[x]` in `roadmaps-completados/roadmap-testing.md` as
 each closes, and don't touch `src/` from a test change unless a test reveals a real bug.
 `pnpm test` also runs automatically on every PR and on pushes to `main` via GitHub Actions
 (`.github/workflows/ci.yml`, Fase H.6 — Postgres service container, `pnpm build`, then `pnpm test`).
@@ -784,7 +792,7 @@ each closes, and don't touch `src/` from a test change unless a test reveals a r
 function (`cart`, `forecast`, `formatMoney`, `date`, `dashboard`/`reports` aggregation, `skydropx`
 service with `fetch` mocked, `sentry` config, `errorHandler` middleware); (2) *HTTP integration* —
 `request(app)...` against a **real test Postgres**, the full route→middleware→controller→service→DB
-flow (`auth`, `checkout`, `shippingRates`, `adminProducts`, `adminBrandUsers`); (3) *service + mocked
+flow (`auth`, `checkout`, `products`, `shippingRates`, `adminProducts`, `adminBrandUsers`); (3) *service + mocked
 SDK* — call the service directly with `Promise.all` and a real DB for concurrency/idempotency
 (`webhooks`, `cancelOrder`). Controllers are **not** tested in isolation with
 everything mocked — the logic lives in services (levels 1/3) and the HTTP flow is covered end-to-end
@@ -835,7 +843,7 @@ contention.
   logger's level, defaults to `info` in production / `debug` otherwise). `.env` is gitignored —
   never commit it (the Stripe/Resend keys are
   test/sandbox; Skydropx currently points at its own separate sandbox account too — see
-  `roadmap-skydropx.md` §1).
+  `roadmaps-completados/roadmap-skydropx.md` §1).
 - Dependencies wired in: `jsonwebtoken` + `bcrypt` (auth), `zod` (validation),
   `express-rate-limit` (auth routes, and now `POST /api/shipping/rates`),
   `swagger-jsdoc` + `swagger-ui-express` (API docs),

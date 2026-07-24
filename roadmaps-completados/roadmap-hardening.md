@@ -30,7 +30,7 @@ resolverse **antes** del primer deploy a producción real con clientes pagando.
 | Logging estructurado / monitoreo de errores | ✅ `pino` + Sentry opcional + alertas por correo (Fase H.4) | — |
 | Apagado ordenado (`SIGTERM`/`SIGINT`) | ✅ `gracefulShutdown` en `src/app.ts` (Fase H.5) | — |
 | Cancelación/reembolso manual de orden (admin) | ✅ `POST /api/admin/orders/:id/cancel` (Fase H.5) | — |
-| Dominio verificado en Resend | ⏳ pendiente (manual, ya en `ROADMAP.md` §9) | Emails a clientes reales siguen bloqueados (403 fuera de la cuenta) |
+| Dominio verificado en Resend | 🗓️ diferido a futuro (manual, ya en `ROADMAP.md` §9) — antes del lanzamiento (1 oct) | Emails a clientes reales siguen bloqueados (403 fuera de la cuenta) |
 
 ---
 
@@ -126,8 +126,10 @@ PaymentIntent real en Stripe y una fila `Order` (aunque el `pendingOrderSweeper`
   1-2 checkouts por minuto; ajustar según datos reales una vez que haya tráfico).
 - [x] Aplicar en `src/routes/order.routes.ts` solo a la ruta pública `POST /`, no a las de
   `adminOrder.routes.ts` (esas ya están detrás de `requireAuth`).
-- [ ] Evaluar si también aplica a `GET /api/products`/`GET /api/products/:id` (catálogo público sin
-  límite hoy) — separar en su propia tarea si el volumen de tráfico lo justifica; no bloquea esta fase.
+- [ ] 🗓️ **Diferido a futuro** — Evaluar si también aplica a `GET /api/products`/
+  `GET /api/products/:id` (catálogo público sin límite hoy) — separar en su propia tarea si el
+  volumen de tráfico lo justifica; revisar cerca del lanzamiento (1 de octubre) con datos reales
+  de tráfico, no bloquea esta fase ni el desarrollo actual.
 
 **Cómo verificar:** 11 requests en un minuto contra `POST /api/orders` desde la misma IP → la 11
 recibe `429`, no `201`/`400`.
