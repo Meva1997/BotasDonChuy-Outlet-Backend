@@ -772,15 +772,19 @@ separate file, not an inline object — an inline `tsconfig` **replaces** the ba
 merging, dropping `@types` resolution; the file `extends` the base but moves `rootDir` to the repo
 root and adds `types: [jest, node]`). `roadmap-testing.md` breaks the work into **independent
 parts** (0 = infra; 0.5 = dedicated test DB; 1 = pure services; 2 = auth; 3 = checkout; 4 = webhook
-idempotency; 5 = manual cancel/refund/release) — **all six are done** as of this phase. Keep adding
+idempotency; 5 = manual cancel/refund/release; 6 = live shipping rates; 7 = Skydropx HTTP client;
+8 = admin product CRUD + images; 9 = brand/admin users; 10 = dashboard/reports aggregations) —
+**all twelve are done** as of this phase (17 suites / 135 tests). Keep adding
 new tests **part by part** (one behavior area at a time), marking `[x]` in `roadmap-testing.md` as
 each closes, and don't touch `src/` from a test change unless a test reveals a real bug.
 
 **Three levels, each behavior where it belongs:** (1) *pure unit*, no DB — import and call the
-function (`cart`, `forecast`, `formatMoney`, `date`); (2) *HTTP integration* — `request(app)...`
-against a **real test Postgres**, the full route→middleware→controller→service→DB flow (`auth`,
-`checkout`); (3) *service + mocked SDK* — call the service directly with `Promise.all` and a real DB
-for concurrency/idempotency (`webhooks`). Controllers are **not** tested in isolation with
+function (`cart`, `forecast`, `formatMoney`, `date`, `dashboard`/`reports` aggregation, `skydropx`
+service with `fetch` mocked, `sentry` config, `errorHandler` middleware); (2) *HTTP integration* —
+`request(app)...` against a **real test Postgres**, the full route→middleware→controller→service→DB
+flow (`auth`, `checkout`, `shippingRates`, `adminProducts`, `adminBrandUsers`); (3) *service + mocked
+SDK* — call the service directly with `Promise.all` and a real DB for concurrency/idempotency
+(`webhooks`, `cancelOrder`). Controllers are **not** tested in isolation with
 everything mocked — the logic lives in services (levels 1/3) and the HTTP flow is covered end-to-end
 by Supertest (level 2). **Stripe, Skydropx (`fetch`/service) and Resend (`sendEmail`) are ALWAYS
 mocked** (they cost money or send real emails); the **DB is never mocked** — a real Postgres,

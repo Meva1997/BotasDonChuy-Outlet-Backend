@@ -65,7 +65,7 @@ FRONTEND_URL=http://localhost:3000       # opcional: base para links dentro de l
 SKYDROPX_CLIENT_ID=...
 SKYDROPX_CLIENT_SECRET=...
 SKYDROPX_WEBHOOK_SECRET=...             # secreto HMAC del webhook de estado de envío (Fase 8.6); el server no arranca sin él
-SKYDROPX_BASE_URL=https://sandbox-api.skydropx.com  # opcional (default: sandbox)
+SKYDROPX_BASE_URL=https://sb-pro.skydropx.com   # opcional (default: sandbox; producción es pro.skydropx.com)
 SKYDROPX_CARRIERS=dhl,paquetexpress    # opcional: slugs provider_name separados por coma, restringe qué paqueterías cotizar
 SHIP_FROM_POSTAL_CODE=38000
 SHIP_FROM_STATE=Guanajuato
@@ -542,11 +542,12 @@ Reglas al agregar o tocar un endpoint:
 ## Testing
 
 Suite automatizada con **Jest + ts-jest + supertest** (Fase H.1 — ver
-[`roadmap-testing.md`](roadmap-testing.md) para el desglose por partes; las **6 partes** — infra,
-BD de test, servicios puros, auth, checkout, idempotencia de webhooks y cancelación/reembolso manual
-— están **completas**: 9 suites / 65 tests en verde). Los tests viven en
-`tests/` (fuera de `src/`, para que `tsc` no los incluya en el build de producción); `ts-jest` los
-transpila en memoria.
+[`roadmap-testing.md`](roadmap-testing.md) para el desglose por partes; las **12 partes** — infra,
+BD de test, servicios puros, auth, checkout, idempotencia de webhooks, cancelación/reembolso manual,
+envío en vivo, cliente Skydropx, CRUD admin de productos/imágenes, marca/usuarios admin y
+agregaciones de dashboard/reports — están **completas**: 17 suites / 135 tests en verde). Los tests
+viven en `tests/` (fuera de `src/`, para que `tsc` no los incluya en el build de producción);
+`ts-jest` los transpila en memoria.
 
 ```bash
 pnpm test              # toda la suite
@@ -554,9 +555,11 @@ pnpm test:watch         # modo watch
 pnpm test <patrón>      # una parte (p. ej. pnpm test auth)
 ```
 
-**Tres niveles de prueba:** (1) *unit puro* sin BD (`cart`, `forecast`, `formatMoney`, `date`);
-(2) *integración HTTP* con `request(app)...` contra un Postgres de test real (`auth`, `checkout`);
-(3) *servicio + SDK mockeado* para concurrencia/idempotencia (`webhooks`, `cancelOrder`). **Stripe,
+**Tres niveles de prueba:** (1) *unit puro* sin BD (`cart`, `forecast`, `formatMoney`, `date`,
+`skydropx` con `fetch` mockeado, `dashboard`/`reports`, `sentry`, `errorHandler`);
+(2) *integración HTTP* con `request(app)...` contra un Postgres de test real (`auth`, `checkout`,
+`shippingRates`, `adminProducts`, `adminBrandUsers`); (3) *servicio + SDK mockeado* para
+concurrencia/idempotencia (`webhooks`, `cancelOrder`). **Stripe,
 Skydropx y Resend van SIEMPRE mockeados** (cuestan dinero o mandan correos reales); la **BD no se
 mockea**. `jest.config.ts` fuerza `maxWorkers: 1`: varias suites de integración comparten el mismo
 Postgres de test y cada una dropea/recrea las tablas en su `beforeAll` (`sync({ force: true })`), así
@@ -599,8 +602,9 @@ tests/                           # Suite automatizada (fuera de src/ — tsc la 
 ├── tsconfig.json                # Extiende ../tsconfig.jest.json (tsconfig local para el editor)
 ├── setup/                       # env.ts, db.ts, factories.ts, mocks/{stripe,skydropx,resend}.ts
 ├── smoke/                       # import app + GET /health (valida el arranque en test)
-├── unit/                        # nivel 1 — servicios/utils puros, sin BD
-└── integration/                 # niveles 2/3 — Postgres de test (auth, checkout, webhooks, cancelOrder)
+├── unit/                        # nivel 1 — servicios/utils/config/middlewares puros, sin BD
+└── integration/                 # niveles 2/3 — Postgres de test (auth, checkout, webhooks, cancelOrder,
+                                  # shippingRates, adminProducts, adminBrandUsers)
 src/
 ├── app.ts                       # Punto de entrada: Express, middleware, arranque y apagado ordenado
 ├── seed.ts                      # Script de seed (productos, histórico, admin, marca)
