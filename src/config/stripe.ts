@@ -3,7 +3,7 @@ import dotenv from "dotenv";
 
 // Igual que src/config/database.ts: los imports de módulo se evalúan ANTES del
 // dotenv.config() de src/app.ts, así que cada config carga su propio .env aquí.
-dotenv.config();
+dotenv.config({ quiet: true });
 
 const secretKey = process.env.STRIPE_SECRET_KEY;
 const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;

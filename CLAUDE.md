@@ -24,19 +24,20 @@ No linter is configured yet.
 Express 5 + TypeScript REST API backed by PostgreSQL through Sequelize 6. It is the backend
 for the "Botas Don Chuy Outlet" store (products of type `bota`, `sombrero`, or `ropa`).
 
-**Startup flow** (`src/app.ts`): loads env via `dotenv` → creates the Express app → calls
-`connectDB()` → registers global middleware (`helmet`, `cors` with `CORS_ORIGIN` — a
-comma-separated list of allowed origins, split/trimmed into an array before being passed to
-`cors()` — JSON and urlencoded body parsers) → mounts Swagger UI at `/api/docs` (+ raw spec
-at `/api/docs.json`) →
-mounts the routers → exposes `GET /health` → listens on `PORT` (default `4000`, capturing the
-returned `http.Server` in `server`).
-The app `export default`s for testability. **Graceful shutdown** (Fase H.5): `SIGTERM`/`SIGINT`
-both call a shared `gracefulShutdown` that (1) `stopPendingOrderSweeper()`s the cron, (2)
-`server.close()`s to stop accepting new connections and drain in-flight requests, (3)
-`await sequelize.close()`s the pool — so a redeploy can't cut a checkout transaction mid-flight. A
-flag ignores repeated signals and a 10 s `unref()`ed timeout forces `process.exit(1)` if a hung
-connection stalls `server.close()`.
+**Startup flow** (`src/app.ts`): loads env via `dotenv` → creates the Express app → registers
+global middleware (`helmet`, `cors` with `CORS_ORIGIN` — a comma-separated list of allowed origins,
+split/trimmed into an array before being passed to `cors()` — JSON and urlencoded body parsers) →
+mounts Swagger UI at `/api/docs` (+ raw spec at `/api/docs.json`) → mounts the routers → exposes
+`GET /health`. Everything with a **process-level side effect** — `connectDB()`,
+`startPendingOrderSweeper()`, `app.listen(PORT)` (default `4000`, capturing the returned
+`http.Server` in `server`), and the graceful-shutdown signal wiring — sits **after** `export default
+app` inside `if (process.env.NODE_ENV !== "test")` (Fase H.1, see **Testing**): Supertest imports
+`app` directly in tests and must not open a port, connect to the DB, or start the cron. **Graceful
+shutdown** (Fase H.5): `SIGTERM`/`SIGINT` both call a shared `gracefulShutdown` that (1)
+`stopPendingOrderSweeper()`s the cron, (2) `server.close()`s to stop accepting new connections and
+drain in-flight requests, (3) `await sequelize.close()`s the pool — so a redeploy can't cut a
+checkout transaction mid-flight. A flag ignores repeated signals and a 10 s `unref()`ed timeout
+forces `process.exit(1)` if a hung connection stalls `server.close()`.
 
 **Database** (`src/config/database.ts`): a single shared `sequelize` instance built from
 `DATABASE_URL` (postgres dialect, connection pool max 5). `connectDB()` only authenticates —
@@ -197,7 +198,13 @@ caps `quantity` at 99/item and `items` at 50/order (the real per-size limit is e
 atomic decrement → `409`). `unitCost` is frozen in the row but **excluded from the public response**
 (the order is reloaded with `attributes: { exclude: ['unitCost'] }` on `items`), matching the rule
 that cost fields only appear on authenticated admin routes. Orders are created with
-`status: "pending"` / `paymentStatus: "unpaid"`; the response is `{ order, clientSecret }`.
+`status: "pending"` / `paymentStatus: "unpaid"`; the response is `{ order, clientSecret }`. The route
+is gated by `orderRateLimiter` (Fase H.3, `src/middlewares/rateLimit.ts`, 10 req/min per IP,
+same pattern as `authRateLimiter`/`shippingRateLimiter`) — every successful request creates a real
+Stripe PaymentIntent and an `Order` row, so a sustained flood on this public route would burn Stripe's
+account-level rate limit and bloat the orders table even though `pendingOrderSweeper` eventually
+releases the unpaid ones. Only mounted on the public `POST /` in `order.routes.ts`, not on
+`adminOrder.routes.ts` (already behind `requireAuth`).
 
 **Payments / Stripe** (Fase 8, activo): the `stripe`
 package is installed and configured in `src/config/stripe.ts` (its own `dotenv.config()` at module
@@ -764,9 +771,10 @@ in-memory and `tsc` ignores them. `jest.config.ts` points `ts-jest` at **`tsconf
 separate file, not an inline object — an inline `tsconfig` **replaces** the base config instead of
 merging, dropping `@types` resolution; the file `extends` the base but moves `rootDir` to the repo
 root and adds `types: [jest, node]`). `roadmap-testing.md` breaks the work into **independent
-parts** (0 = infra, done; 0.5 = create the dedicated test DB; 1 = pure services; 2 = auth; 3 =
-checkout; 4 = webhook idempotency; 5 = manual cancel/refund) — add tests **part by part**, marking
-`[x]` there as each closes, and don't touch `src/` from a test part unless a test reveals a real bug.
+parts** (0 = infra; 0.5 = dedicated test DB; 1 = pure services; 2 = auth; 3 = checkout; 4 = webhook
+idempotency; 5 = manual cancel/refund/release) — **all six are done** as of this phase. Keep adding
+new tests **part by part** (one behavior area at a time), marking `[x]` in `roadmap-testing.md` as
+each closes, and don't touch `src/` from a test change unless a test reveals a real bug.
 
 **Three levels, each behavior where it belongs:** (1) *pure unit*, no DB — import and call the
 function (`cart`, `forecast`, `formatMoney`, `date`); (2) *HTTP integration* — `request(app)...`
@@ -791,7 +799,12 @@ pointing at a dedicated test DB) with `override: true` **before** any `config/*`
 point at a throwaway test database, never dev/prod.** `tests/setup/factories.ts` builds
 Product/AdminUser/Order/OrderItem rows; `tests/setup/mocks/{stripe,skydropx,resend}.ts` are the
 reusable SDK-mock builders. **When adding a test that needs the DB, use these helpers — don't spin up
-a second sequelize instance.**
+a second sequelize instance.** `jest.config.ts` sets **`maxWorkers: 1`**: every integration suite's
+`beforeAll` runs `sync({ force: true })` against the same test Postgres, and Jest's default parallel
+workers stomping on that drop/recreate concurrently produces intermittent `ENUM already exists` /
+`relation does not exist` errors — forcing a single worker serializes all suites (unit included,
+already fast) and removes the race. Don't re-parallelize workers without also fixing that shared-DB
+contention.
 
 ## Conventions
 

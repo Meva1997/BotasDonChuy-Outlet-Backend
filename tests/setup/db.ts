@@ -14,10 +14,18 @@
  * pruebas, porque esto BORRA todas las tablas. `truncateAll` limpia entre tests para que
  * cada uno arranque de un estado conocido sin pagar un `sync` completo cada vez.
  *
- * Importante: importamos `src/models/associations` (efecto de lado) para registrar todos
- * los modelos y sus relaciones antes del `sync`, igual que hace `src/app.ts`.
+ * Importante: importamos cada modelo (efecto de lado) antes del `sync`, igual que hace
+ * `src/app.ts` — `associations.ts` solo registra Product/ProductSize/Order/OrderItem (los
+ * que tienen relaciones); AdminUser y BrandSettings no se sincronizan si no se importan
+ * también aquí explícitamente.
  */
 import { sequelize } from "../../src/config/database";
+import "../../src/models/Product";
+import "../../src/models/ProductSize";
+import "../../src/models/AdminUser";
+import "../../src/models/Order";
+import "../../src/models/OrderItem";
+import "../../src/models/BrandSettings";
 import "../../src/models/associations";
 
 /** Recrea el esquema completo. Llamar en `beforeAll` de cada suite de integración. */

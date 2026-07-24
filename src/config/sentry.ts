@@ -5,7 +5,7 @@ import { logger } from "./logger";
 // Se importa antes que cualquier otro módulo en app.ts (incluido cloudinary/resend/skydropx,
 // cuyo fail-fast podría lanzar durante el arranque) para que Sentry ya esté armado si algo
 // truena temprano. Dotenv propio: este módulo se importa antes del dotenv.config() de app.ts.
-dotenv.config();
+dotenv.config({ quiet: true });
 
 const dsn = process.env.SENTRY_DSN;
 

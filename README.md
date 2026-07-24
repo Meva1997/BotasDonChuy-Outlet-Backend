@@ -226,6 +226,12 @@ validado con `createOrderSchema` (zod). El backend es la **autoridad de precios,
   si se exceden). El límite **real** de existencias por talla lo impone el descuento atómico: pedir
   más unidades de las que hay en esa talla (o una talla inexistente) devuelve `409`.
 
+La ruta está limitada por `orderRateLimiter` (Fase H.3, mismo patrón que `authRateLimiter` /
+`shippingRateLimiter`, `10` req/min por IP): cada request exitoso crea un PaymentIntent real de
+Stripe y una fila `Order`, así que sin este límite un flood sostenido saturaría el rate limit de la
+cuenta de Stripe y la tabla de órdenes (aunque `pendingOrderSweeper` libere después las `pending` sin
+pagar). Solo aplica a la ruta pública `POST /`, no a `adminOrder.routes.ts` (ya protegida con JWT).
+
 La orden nace en `status: "pending"` / `paymentStatus: "unpaid"`, se le crea un **PaymentIntent real
 de Stripe** y se guarda su `paymentIntentId` (`paymentStatus: "processing"`). Respuesta `201`:
 `{ order, clientSecret }` — el `clientSecret` sirve para que el cliente confirme el pago. Errores:
@@ -536,7 +542,9 @@ Reglas al agregar o tocar un endpoint:
 ## Testing
 
 Suite automatizada con **Jest + ts-jest + supertest** (Fase H.1 — ver
-[`roadmap-testing.md`](roadmap-testing.md) para el desglose por partes). Los tests viven en
+[`roadmap-testing.md`](roadmap-testing.md) para el desglose por partes; las **6 partes** — infra,
+BD de test, servicios puros, auth, checkout, idempotencia de webhooks y cancelación/reembolso manual
+— están **completas**: 9 suites / 65 tests en verde). Los tests viven en
 `tests/` (fuera de `src/`, para que `tsc` no los incluya en el build de producción); `ts-jest` los
 transpila en memoria.
 
@@ -548,8 +556,12 @@ pnpm test <patrón>      # una parte (p. ej. pnpm test auth)
 
 **Tres niveles de prueba:** (1) *unit puro* sin BD (`cart`, `forecast`, `formatMoney`, `date`);
 (2) *integración HTTP* con `request(app)...` contra un Postgres de test real (`auth`, `checkout`);
-(3) *servicio + SDK mockeado* para concurrencia/idempotencia (`webhooks`). **Stripe, Skydropx y
-Resend van SIEMPRE mockeados** (cuestan dinero o mandan correos reales); la **BD no se mockea**.
+(3) *servicio + SDK mockeado* para concurrencia/idempotencia (`webhooks`, `cancelOrder`). **Stripe,
+Skydropx y Resend van SIEMPRE mockeados** (cuestan dinero o mandan correos reales); la **BD no se
+mockea**. `jest.config.ts` fuerza `maxWorkers: 1`: varias suites de integración comparten el mismo
+Postgres de test y cada una dropea/recrea las tablas en su `beforeAll` (`sync({ force: true })`), así
+que correrlas en paralelo produce errores intermitentes de tipo `ENUM ya existe`; un solo worker
+serializa todo y elimina la carrera.
 
 Al importar `src/app.ts` con `NODE_ENV=test`, un gate salta el `connectDB()`, el
 `pendingOrderSweeper` y el `app.listen(...)`, así que Supertest levanta `app` sin abrir puerto ni
@@ -584,10 +596,11 @@ anotaciones JSDoc `@openapi` sobre su router en `src/routes/*.ts`.
 jest.config.ts                   # Config de Jest (preset ts-jest, setupFiles, testMatch tests/**)
 tsconfig.jest.json               # tsconfig para tests (extiende el base; rootDir "." + types jest/node)
 tests/                           # Suite automatizada (fuera de src/ — tsc la ignora), ver Testing
+├── tsconfig.json                # Extiende ../tsconfig.jest.json (tsconfig local para el editor)
 ├── setup/                       # env.ts, db.ts, factories.ts, mocks/{stripe,skydropx,resend}.ts
 ├── smoke/                       # import app + GET /health (valida el arranque en test)
 ├── unit/                        # nivel 1 — servicios/utils puros, sin BD
-└── integration/                 # niveles 2/3 — Postgres de test (auth, checkout, webhooks)
+└── integration/                 # niveles 2/3 — Postgres de test (auth, checkout, webhooks, cancelOrder)
 src/
 ├── app.ts                       # Punto de entrada: Express, middleware, arranque y apagado ordenado
 ├── seed.ts                      # Script de seed (productos, histórico, admin, marca)

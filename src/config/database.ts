@@ -2,7 +2,7 @@ import { Sequelize } from "sequelize";
 import dotenv from "dotenv";
 import { logger } from "./logger";
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 const DATABASE_URL = process.env.DATABASE_URL!;
 

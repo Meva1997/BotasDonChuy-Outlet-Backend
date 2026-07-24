@@ -12,11 +12,19 @@ import type { Config } from "jest";
  *   utils) corren sin Postgres. Solo las suites de integración llaman a los helpers de
  *   `tests/setup/db.ts` en su `beforeAll`, así que `pnpm test` de la parte unitaria pasa
  *   aunque no haya una BD de test levantada.
+ * - `maxWorkers: 1`: Jest por defecto corre cada archivo de test en un worker separado
+ *   en paralelo. Cada suite de integración apunta al MISMO Postgres de test y su
+ *   `beforeAll` corre `sync({ force: true })` (dropea y recrea todas las tablas) —
+ *   con más de una suite de integración (desde la Parte 3) dos workers paralelos
+ *   pisándose ese `sync`/`TRUNCATE` provocan errores de tipo `ENUM ya existe` o
+ *   `relation does not exist` intermitentes. Forzar un solo worker serializa todas las
+ *   suites (incluidas las unitarias, ya rápidas) y elimina la carrera.
  */
 const config: Config = {
   testEnvironment: "node",
   roots: ["<rootDir>/tests"],
   setupFiles: ["<rootDir>/tests/setup/env.ts"],
+  maxWorkers: 1,
   transform: {
     "^.+\\.ts$": [
       "ts-jest",
