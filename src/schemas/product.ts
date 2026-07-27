@@ -8,7 +8,7 @@ import { z } from "zod";
  * agrupando ocurrencias repetidas; `Product.sizes`/`Product.stock` son derivados
  * (VIRTUAL) de esa tabla, no columnas propias.
  */
-const sizesFromString = z
+export const sizesFromString = z
   .string()
   .transform((value) =>
     value
@@ -23,7 +23,7 @@ const sizesFromString = z
 // al usuario, porque errorHandler promueve el mensaje del campo a la respuesta y
 // el front lo pinta. Cada campo del ProductForm lleva su propio texto para que un
 // campo vacío diga qué falta en vez de describir el tipo que se esperaba.
-const productBaseSchema = z.object({
+export const productBaseSchema = z.object({
   name: z
     .string("El nombre es requerido")
     .trim()
@@ -78,7 +78,7 @@ const productBaseSchema = z.object({
   visible: z.boolean().default(true),
 });
 
-function salePriceNotAboveOriginal(data: {
+export function salePriceNotAboveOriginal(data: {
   salePrice?: number;
   originalPrice?: number;
 }) {
@@ -96,8 +96,21 @@ export const productSchema = productBaseSchema.refine(salePriceNotAboveOriginal,
 
 export type ProductInput = z.infer<typeof productSchema>;
 
+/**
+ * Update parcial: solo se tocan las columnas presentes en el body.
+ *
+ * `.extend()` va DESPUÉS de `.partial()` a propósito. En zod 4 `.partial()` NO quita los
+ * `.default()`, así que `productBaseSchema.partial().parse({})` devuelve `{ visible: true,
+ * stock: 0 }`: un PUT que solo cambiaba el nombre reactivaba un producto oculto sin que nadie
+ * lo pidiera. Re-declarar ambos campos como opcionales puros los deja fuera del objeto parseado
+ * cuando el body no los menciona.
+ */
 export const productUpdateSchema = productBaseSchema
   .partial()
+  .extend({
+    visible: z.boolean().optional(),
+    stock: z.number().int("El stock debe ser un número entero").nonnegative("El stock no puede ser negativo").optional(),
+  })
   .refine(salePriceNotAboveOriginal, {
     message: "El precio de oferta no puede ser mayor al precio original",
     path: ["salePrice"],
