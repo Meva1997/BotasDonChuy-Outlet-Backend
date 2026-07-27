@@ -55,7 +55,10 @@ app.use(cors({ origin: corsOrigins }));
 // monta con express.raw ANTES del express.json() global (que solo parsea el resto).
 app.use("/api/webhooks", express.raw({ type: "application/json" }), webhookRoutes);
 
-app.use(express.json());
+// El límite por defecto de express.json() son 100 kb, y la confirmación de la importación
+// masiva (POST /api/admin/products/import) manda hasta 500 filas de producto en un solo body.
+// Un cuerpo mayor lo rechaza body-parser y errorHandler lo traduce a un 400 en español.
+app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 // API docs (Swagger UI + raw OpenAPI JSON)

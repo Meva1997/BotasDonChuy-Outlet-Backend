@@ -16,6 +16,9 @@ import { parseId } from "../utils/parseId";
 import { formatMoney } from "../utils/formatMoney";
 import { CLOUDINARY_PRODUCTS_FOLDER } from "../config/cloudinary";
 import { uploadImageBuffer, destroyImage } from "../services/image.service";
+import { sizesToRows } from "../utils/sizesToRows";
+import { parseImportWorkbook, previewImport, commitImport } from "../services/productImport.service";
+import { productImportCommitSchema } from "../schemas/productImport";
 
 const MAX_IMAGES_PER_PRODUCT = 3;
 
@@ -122,12 +125,6 @@ export const getProductById: RequestHandler = asyncHandler(async (req: Request, 
 // ── Admin handlers ────────────────────────────────────────────────────────────
 
 /** Agrupa un array de tallas repetidas en filas { size, stock }. */
-function sizesToRows(sizes: number[]): { size: number; stock: number }[] {
-  const map = new Map<number, number>();
-  for (const s of sizes) map.set(s, (map.get(s) ?? 0) + 1);
-  return Array.from(map.entries()).map(([size, stock]) => ({ size, stock }));
-}
-
 export const adminGetProducts: RequestHandler = asyncHandler(async (_req: Request, res: Response) => {
   const products = await Product.findAll({
     include: [productSizesInclude],
@@ -380,3 +377,40 @@ export const adminDeleteProductImage: RequestHandler = asyncHandler(
     res.json(product);
   },
 );
+
+/**
+ * Paso 1 de la importación masiva: POST /api/admin/products/import/preview (campo `file`).
+ *
+ * Lee el .xlsx y devuelve, fila por fila, con qué producto empareja, qué campos cambian
+ * (`before`/`after`/`changes`) y cómo queda el stock por talla — SIN escribir nada. El panel
+ * pinta ese diff, el dueño corrige lo que haga falta y confirma con `POST /import` mandando de
+ * vuelta los `input` ya editados.
+ *
+ * El paso de revisión no es cosmético: el restock SUMA stock y no hay forma de deshacerlo desde
+ * la app, así que aplicar un archivo a ciegas (con una fórmula que no se leyó, una columna mal
+ * escrita o un nombre que empareja con el producto equivocado) sale caro.
+ */
+export const adminPreviewProductImport: RequestHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    if (!req.file) {
+      throw new AppError('No se recibió ningún archivo. Adjunta un .xlsx en el campo "file".', 400);
+    }
+
+    const parsed = await parseImportWorkbook(req.file.buffer);
+    const { summary, rows } = await previewImport(parsed.rows);
+    res.status(200).json({ summary, warnings: parsed.warnings, rows });
+  },
+);
+
+/**
+ * Paso 2 de la importación masiva: POST /api/admin/products/import (JSON).
+ *
+ * Recibe `{ rows: [...] }` — los `input` que devolvió el preview, con las ediciones del dueño
+ * aplicadas — y los aplica. Es JSON y no el .xlsx original precisamente para que lo que se
+ * escribe sea lo que el dueño revisó y corrigió en pantalla, no lo que traía el archivo.
+ */
+export const adminImportProducts: RequestHandler = asyncHandler(async (req: Request, res: Response) => {
+  const { rows } = productImportCommitSchema.parse(req.body);
+  const result = await commitImport(rows);
+  res.status(200).json(result);
+});

@@ -252,6 +252,192 @@ const options: Options = {
             visible: { type: "boolean", default: true },
           },
         },
+        ProductImportSummary: {
+          type: "object",
+          properties: {
+            total: { type: "integer" },
+            created: { type: "integer" },
+            updated: { type: "integer" },
+            unchanged: {
+              type: "integer",
+              description: "Filas que emparejan con un producto pero no cambian ningún valor.",
+            },
+            failed: { type: "integer" },
+          },
+        },
+        ProductImportRowInput: {
+          type: "object",
+          description:
+            "Una fila de la importación. Todos los campos son opcionales y sin valor por defecto: " +
+            "una clave AUSENTE significa \"no toques esa columna del producto\". Enviar `null` " +
+            "equivale a omitirla. No se aceptan claves desconocidas (400).",
+          properties: {
+            row: { type: "integer", description: "Número de fila en la hoja, solo para los mensajes.", example: 2 },
+            code: { type: "string", maxLength: 40, example: "BTA-100" },
+            name: { type: "string", example: "Bota vaquera de cuero" },
+            description: { type: "string" },
+            type: { type: "string", enum: ["bota", "sombrero", "ropa"] },
+            originalPrice: { type: "number", example: 2400 },
+            salePrice: { type: "number", example: 1920 },
+            unitCost: { type: "number", example: 950 },
+            sizes: {
+              oneOf: [{ type: "string" }, { type: "array", items: { type: "integer" } }],
+              description:
+                'Tallas a SUMAR al stock. "25, 26, 26" (una ocurrencia = una unidad) o ' +
+                '"26x20" (20 piezas de la 26); ambas notaciones se pueden mezclar.',
+              example: "25x3, 26x5, 27",
+            },
+            weightKg: { type: "number", example: 1.5 },
+            lengthCm: { type: "number", example: 34 },
+            widthCm: { type: "number", example: 22 },
+            heightCm: { type: "number", example: 14 },
+            visible: { type: "boolean" },
+          },
+        },
+        ProductImportCommitInput: {
+          type: "object",
+          required: ["rows"],
+          properties: {
+            rows: {
+              type: "array",
+              minItems: 1,
+              maxItems: 500,
+              description: "Los `input` devueltos por /import/preview, con las ediciones del dueño.",
+              items: { $ref: "#/components/schemas/ProductImportRowInput" },
+            },
+          },
+        },
+        ProductImportSnapshot: {
+          type: "object",
+          description: "Foto de un producto: su estado actual (`before`) o cómo quedaría (`after`).",
+          properties: {
+            id: { type: "integer", nullable: true, description: "`null` cuando el producto aún no existe." },
+            code: { type: "string", nullable: true },
+            name: { type: "string" },
+            type: { type: "string", enum: ["bota", "sombrero", "ropa"] },
+            description: { type: "string", nullable: true },
+            originalPrice: { type: "number" },
+            salePrice: { type: "number" },
+            unitCost: { type: "number" },
+            weightKg: { type: "number" },
+            lengthCm: { type: "number" },
+            widthCm: { type: "number" },
+            heightCm: { type: "number" },
+            visible: { type: "boolean" },
+            discontinued: { type: "boolean", description: "Producto con soft-delete (`deletedAt`)." },
+            sizes: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: { size: { type: "integer" }, stock: { type: "integer" } },
+              },
+            },
+            stock: { type: "integer", description: "Suma del stock de todas las tallas." },
+          },
+        },
+        ProductImportRowPlan: {
+          type: "object",
+          properties: {
+            row: { type: "integer", description: "Número de fila en la hoja (1 = encabezado).", example: 2 },
+            action: {
+              type: "string",
+              enum: ["create", "update", "unchanged", "error"],
+              description: "`unchanged`: la fila empareja pero no cambia ningún valor.",
+            },
+            code: { type: "string", nullable: true },
+            name: { type: "string", nullable: true },
+            productId: { type: "integer", nullable: true },
+            before: {
+              allOf: [{ $ref: "#/components/schemas/ProductImportSnapshot" }],
+              nullable: true,
+              description: "Estado actual. `null` si la fila va a crear el producto.",
+            },
+            after: {
+              allOf: [{ $ref: "#/components/schemas/ProductImportSnapshot" }],
+              nullable: true,
+              description: "Cómo quedaría al confirmar. `null` en las filas con error.",
+            },
+            changes: {
+              type: "array",
+              description: "Solo los campos escalares que realmente cambian.",
+              items: {
+                type: "object",
+                properties: {
+                  field: { type: "string", example: "salePrice" },
+                  label: { type: "string", example: "Precio oferta" },
+                  before: {},
+                  after: {},
+                },
+              },
+            },
+            sizeChanges: {
+              type: "array",
+              description: "Stock por talla: `added` se SUMA a `before`.",
+              items: {
+                type: "object",
+                properties: {
+                  size: { type: "integer", example: 26 },
+                  before: { type: "integer", example: 3 },
+                  added: { type: "integer", example: 5 },
+                  after: { type: "integer", example: 8 },
+                },
+              },
+            },
+            reactivated: {
+              type: "boolean",
+              description: "La fila reactivará un producto descontinuado.",
+            },
+            warnings: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                "Interpretaciones que conviene confirmar (coma decimal, celda con formato de " +
+                "fecha, código que solo difiere en mayúsculas) o aviso de que la fila no cambia nada.",
+            },
+            message: { type: "string", example: 'Fila 2: se actualizará "Bota vaquera de cuero".' },
+            input: {
+              allOf: [{ $ref: "#/components/schemas/ProductImportRowInput" }],
+              description: "La fila a devolver (editada si hace falta) en POST /api/admin/products/import.",
+            },
+          },
+        },
+        ProductImportPreviewResponse: {
+          type: "object",
+          properties: {
+            summary: { $ref: "#/components/schemas/ProductImportSummary" },
+            warnings: {
+              type: "array",
+              items: { type: "string" },
+              description: "Avisos del archivo completo, p. ej. columnas no reconocidas.",
+              example: ['Estas columnas no se reconocieron y NO se van a importar: "Proveedor".'],
+            },
+            rows: {
+              type: "array",
+              items: { $ref: "#/components/schemas/ProductImportRowPlan" },
+            },
+          },
+        },
+        ProductImportRowResult: {
+          type: "object",
+          properties: {
+            row: { type: "integer", description: "Número de fila en la hoja (1 = encabezado).", example: 2 },
+            status: { type: "string", enum: ["created", "updated", "unchanged", "error"] },
+            code: { type: "string", nullable: true },
+            name: { type: "string", nullable: true },
+            productId: { type: "integer", nullable: true },
+            message: { type: "string", example: 'Fila 2: producto "Bota vaquera de cuero" actualizado.' },
+          },
+        },
+        ProductImportResponse: {
+          type: "object",
+          properties: {
+            summary: { $ref: "#/components/schemas/ProductImportSummary" },
+            rows: {
+              type: "array",
+              items: { $ref: "#/components/schemas/ProductImportRowResult" },
+            },
+          },
+        },
         CreateOrderInput: {
           type: "object",
           required: ["items", "customer"],

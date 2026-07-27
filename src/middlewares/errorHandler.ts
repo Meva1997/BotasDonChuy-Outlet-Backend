@@ -114,6 +114,17 @@ export const errorHandler = (
   // Errores de multer al parsear multipart/form-data (subida de imágenes): sin
   // esta rama caerían al 500 genérico. Los mapeamos a 400 con mensaje claro.
   if (err instanceof MulterError) {
+    // El importador masivo (POST /api/admin/products/import, campo "file") usa un límite y un
+    // tipo de archivo (.xlsx) distintos a las imágenes/logo — sin esta rama, un archivo >2MB
+    // mostraría el mensaje de "5 MB" pensado para imágenes.
+    if (err.field === "file") {
+      const message =
+        err.code === "LIMIT_FILE_SIZE"
+          ? "El archivo es demasiado grande (máximo 2 MB)."
+          : 'Error al subir el archivo. Sube un Excel (.xlsx) en el campo "file".';
+      res.status(400).json({ message });
+      return;
+    }
     const message =
       err.code === "LIMIT_FILE_SIZE"
         ? "La imagen es demasiado grande (máximo 5 MB)."

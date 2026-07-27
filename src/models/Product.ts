@@ -1,4 +1,4 @@
-import { DataTypes, Model, Optional } from "sequelize";
+import { DataTypes, Model, Op, Optional } from "sequelize";
 import { sequelize } from "../config/database";
 import type { ProductSize } from "./ProductSize";
 
@@ -196,5 +196,17 @@ Product.init(
     sequelize,
     tableName: "products",
     timestamps: true,
+    indexes: [
+      {
+        unique: true,
+        name: "products_code_unique",
+        fields: ["code"],
+        // Índice único parcial: `code` puede estar en blanco (v. migración
+        // 20260727120000-products-code-unique-index.ts). Declarado también aquí porque
+        // tests/setup/db.ts construye el esquema con sequelize.sync({ force: true }), no con
+        // migraciones.
+        where: { [Op.and]: [{ code: { [Op.ne]: null } }, { code: { [Op.ne]: "" } }] },
+      },
+    ],
   },
 );

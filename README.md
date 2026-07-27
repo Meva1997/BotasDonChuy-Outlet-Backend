@@ -12,6 +12,7 @@ Construido con Express 5, TypeScript y Sequelize sobre PostgreSQL.
 - **Validación:** Zod
 - **Documentación API:** Swagger UI (OpenAPI 3.0) vía swagger-jsdoc + swagger-ui-express
 - **Imágenes:** Cloudinary + multer (subida en memoria → `upload_stream`)
+- **Hojas de cálculo:** exceljs (importación/restock masivo de productos desde `.xlsx`)
 - **Pagos:** Stripe (PaymentIntents + webhook firmado, test/sandbox)
 - **Envíos:** Skydropx Pro (cotización en vivo, guía automática, webhook de estado)
 - **Emails transaccionales:** Resend
@@ -147,6 +148,8 @@ pnpm migrate:status   # verifica qué quedó aplicado
 | `DELETE` | `/api/admin/products/:id`     | ✅   | Elimina un producto (soft-delete si tiene pedidos) |
 | `POST`   | `/api/admin/products/:id/images` | ✅ | Sube de 1 a 3 imágenes del producto a Cloudinary |
 | `DELETE` | `/api/admin/products/:id/images` | ✅ | Borra una imagen del producto (por `publicId`) de Cloudinary |
+| `POST`   | `/api/admin/products/import/preview` | ✅ | Previsualiza un `.xlsx` de alta/restock masivo (no escribe nada) |
+| `POST`   | `/api/admin/products/import` | ✅ | Aplica las filas revisadas en el preview (JSON) |
 | `POST`   | `/api/orders`                 | —    | Checkout: crea un pedido desde el carrito          |
 | `POST`   | `/api/shipping/rates`         | —    | Cotiza tarifas de envío en vivo (Skydropx) para el carrito, con fallback a tarifa plana |
 | `GET`    | `/api/admin/dashboard`        | ✅   | Métricas agregadas del panel (KPIs, ingresos, ventas recientes, inventario) |
@@ -192,6 +195,60 @@ hace **soft-delete** (`deletedAt` + `visible: false`) si el producto está refer
 pedido — sus imágenes permanecen en Cloudinary para conservar el histórico —, o **hard-delete**
 (con sus `ProductSize` por CASCADE y borrando sus imágenes de Cloudinary) si no lo está — la
 respuesta indica `{ ok, softDeleted }`.
+
+### Importación/restock masivo de productos (Excel)
+
+El dueño da de alta mercancía nueva y restockea la existente subiendo una hoja de cálculo, en vez
+de editar producto por producto. Son **dos pasos**, y esa separación es la decisión central del
+diseño: el restock **SUMA** stock y no hay forma de deshacerlo desde la app, así que aplicar un
+archivo a ciegas (una fórmula que no se leyó, una columna mal escrita, un nombre que empareja con
+el producto equivocado) sale caro.
+
+1. **`POST /api/admin/products/import/preview`** `[auth]` — recibe el `.xlsx` por
+   `multipart/form-data` (campo `file`, máximo **2 MB** y **500 filas**) y devuelve el plan **sin
+   escribir nada**: por fila, su `action` (`create` · `update` · `unchanged` · `error`), el
+   producto con el que empareja (`before`, `null` si se creará), cómo quedaría (`after`), los
+   campos que cambian (`changes`) y el stock por talla (`sizeChanges`, con `before`/`added`/`after`).
+2. **`POST /api/admin/products/import`** `[auth]` — recibe **JSON** `{ rows }` (los `input` que
+   devolvió el preview, con las ediciones que el dueño haya hecho en pantalla) y los aplica. Es
+   JSON y no el `.xlsx` original a propósito: lo que se escribe es lo que se revisó y corrigió, no
+   lo que traía el archivo.
+
+**Columnas** (encabezado canónico en español, insensible a acentos y mayúsculas, con alias comunes
+como `sku`→código o `tipo`→categoría):
+
+```
+Código | Nombre | Categoría | Descripción | Precio original | Precio oferta | Costo unitario |
+Tallas | Peso (kg) | Largo (cm) | Ancho (cm) | Alto (cm) | Visible
+```
+
+Una columna **no reconocida** no se descarta en silencio: sale en el `warnings` a nivel archivo del
+preview ("estas columnas NO se van a importar"). Dos columnas que normalizan al **mismo** campo son
+un `400`.
+
+**Tallas**: además de la notación del formulario (`"25, 26, 26"`, una ocurrencia = una unidad) se
+acepta **`"26x20"`** (20 piezas de la talla 26), mezclables: `"25x3, 26, 27x2"`. La notación `x`
+existe porque el caso de uso central es el restock, y repetir `"26,"` veinte veces en una hoja de
+cálculo es inviable.
+
+**Emparejamiento**: por `Código` (insensible a mayúsculas) y, si la fila no lo trae, por `Nombre`
+exacto insensible a mayúsculas. Un valor que empareja con **más de un producto** es ambiguo y la
+fila falla pidiendo un código. Sin match se crea un producto nuevo (mismos campos requeridos que
+`POST /api/admin/products`); con match se actualizan **solo** los campos presentes en la fila y que
+realmente cambian —una columna ausente nunca borra un valor guardado— y las tallas se **suman** al
+stock ya guardado. Un producto descontinuado (soft-deleted) que hace match se **reactiva**:
+restockear implica que vuelve a venderse.
+
+En la confirmación cada fila corre **independiente** (éxito parcial) y **en su propia transacción**,
+con el match hecho bajo `FOR UPDATE`. Reenviar el mismo lote antes de 60 s responde `409` (doble
+clic / reintento del navegador). Respuestas:
+`{ summary: { total, created, updated, unchanged, failed }, warnings, rows }` en el preview y
+`{ summary, rows }` al confirmar.
+
+Para que el emparejamiento por código sea confiable, `products.code` ganó un **índice único
+parcial** (`WHERE code IS NOT NULL AND code != ''`) — la migración
+`20260727120000-products-code-unique-index.ts` **falla si ya existen códigos duplicados** en los
+datos actuales, a propósito: no se deduplica en silencio.
 
 ### `POST /api/orders` (checkout público)
 
@@ -545,7 +602,7 @@ Suite automatizada con **Jest + ts-jest + supertest** (Fase H.1 — ver
 [`roadmaps-completados/roadmap-testing.md`](roadmaps-completados/roadmap-testing.md) para el desglose por partes; las **12 partes** — infra,
 BD de test, servicios puros, auth, checkout, idempotencia de webhooks, cancelación/reembolso manual,
 envío en vivo, cliente Skydropx, CRUD admin de productos/imágenes, marca/usuarios admin y
-agregaciones de dashboard/reports — están **completas**: 18 suites / 142 tests en verde). Los tests
+agregaciones de dashboard/reports — están **completas**: 19 suites / 183 tests en verde). Los tests
 viven en `tests/` (fuera de `src/`, para que `tsc` no los incluya en el build de producción);
 `ts-jest` los transpila en memoria.
 
@@ -558,7 +615,8 @@ pnpm test <patrón>      # una parte (p. ej. pnpm test auth)
 **Tres niveles de prueba:** (1) *unit puro* sin BD (`cart`, `forecast`, `formatMoney`, `date`,
 `skydropx` con `fetch` mockeado, `dashboard`/`reports`, `sentry`, `errorHandler`);
 (2) *integración HTTP* con `request(app)...` contra un Postgres de test real (`auth`, `checkout`,
-`products`, `shippingRates`, `adminProducts`, `adminBrandUsers`); (3) *servicio + SDK mockeado* para
+`products`, `shippingRates`, `adminProducts`, `adminProductImport`, `adminBrandUsers`); (3)
+*servicio + SDK mockeado* para
 concurrencia/idempotencia (`webhooks`, `cancelOrder`). **Stripe,
 Skydropx y Resend van SIEMPRE mockeados** (cuestan dinero o mandan correos reales); la **BD no se
 mockea**. `jest.config.ts` fuerza `maxWorkers: 1`: varias suites de integración comparten el mismo
@@ -604,7 +662,8 @@ tests/                           # Suite automatizada (fuera de src/ — tsc la 
 ├── smoke/                       # import app + GET /health (valida el arranque en test)
 ├── unit/                        # nivel 1 — servicios/utils/config/middlewares puros, sin BD
 └── integration/                 # niveles 2/3 — Postgres de test (auth, checkout, products, webhooks,
-                                  # cancelOrder, shippingRates, adminProducts, adminBrandUsers)
+                                  # cancelOrder, shippingRates, adminProducts, adminProductImport,
+                                  # adminBrandUsers)
 src/
 ├── app.ts                       # Punto de entrada: Express, middleware, arranque y apagado ordenado
 ├── seed.ts                      # Script de seed (productos, histórico, admin, marca)
@@ -620,7 +679,7 @@ src/
 │   ├── zod.ts                   # z.config(z.locales.es()) — mensajes por defecto de zod en español
 │   └── swagger.ts               # Spec OpenAPI base (swagger-jsdoc) servida en /api/docs
 ├── controllers/
-│   ├── product.controller.ts    # Lógica de productos (listar, obtener por id, CRUD admin)
+│   ├── product.controller.ts    # Lógica de productos (listar, obtener por id, CRUD admin, import masivo)
 │   ├── auth.controller.ts       # Login, forgot-password, verify-reset-code, reset-password, me
 │   ├── order.controller.ts      # Checkout, admin orders, cancelación manual, webhooks de Stripe/Skydropx
 │   ├── shipping.controller.ts   # POST /api/shipping/rates (cotización en vivo)
@@ -634,10 +693,10 @@ src/
 │   ├── errorHandler.ts            # Middleware centralizado de manejo de errores
 │   ├── rateLimit.ts               # authRateLimiter / shippingRateLimiter / orderRateLimiter
 │   ├── requireAuth.ts             # Verifica JWT Bearer, adjunta req.user; requireRole helper
-│   └── upload.ts                  # multer en memoria (uploadProductImages / uploadLogo)
+│   └── upload.ts                  # multer en memoria (uploadProductImages / uploadLogo / uploadProductImportFile)
 ├── routes/
 │   ├── product.routes.ts        # Rutas /api/products
-│   ├── adminProduct.routes.ts   # Rutas /api/admin/products (CRUD admin + imágenes, requireAuth)
+│   ├── adminProduct.routes.ts   # Rutas /api/admin/products (CRUD admin + imágenes + import masivo, requireAuth)
 │   ├── auth.routes.ts           # Rutas /api/auth
 │   ├── order.routes.ts          # Ruta /api/orders (checkout público)
 │   ├── adminOrder.routes.ts     # Rutas /api/admin/orders (listado + cancelación manual, requireAuth)
@@ -653,6 +712,7 @@ src/
 │   ├── checkout.ts                # Esquema zod de envío/checkout
 │   ├── shipping.ts                # Esquema zod de cotización de envío
 │   ├── product.ts                 # Esquema zod de producto
+│   ├── productImport.ts           # Esquemas zod de fila/lote de la importación masiva
 │   ├── brand.ts                   # Esquema zod de update parcial de BrandSettings
 │   └── adminUser.ts               # Esquemas zod de alta de usuario y update de cuenta propia
 ├── services/
@@ -665,6 +725,7 @@ src/
 │   ├── productAvailability.ts     # assertProductAvailable: guardia compartida checkout/cotización
 │   ├── alert.service.ts           # sendAlertEmail: avisos operativos (guía fallida, sweeper con fallas repetidas)
 │   ├── image.service.ts           # Cloudinary: sube buffer (upload_stream) y borra asset (destroy)
+│   ├── productImport.service.ts   # Importación/restock masivo: parsea el .xlsx, previsualiza y aplica
 │   ├── email.service.ts           # sendEmail(...) sobre Resend; loguea pero nunca lanza
 │   ├── email/templates/           # Plantillas HTML como funciones (passwordResetCode.ts, orderConfirmation.ts)
 │   ├── dashboard.service.ts       # Agregación en memoria para GET /api/admin/dashboard
@@ -677,6 +738,9 @@ src/
 │   ├── parseId.ts                 # Valida :id numérico antes de tocar Sequelize (evita 500 por NaN)
 │   ├── constantTimeEqual.ts       # Comparación en tiempo constante (firma HMAC de Skydropx y código de reset)
 │   ├── productSizesInclude.ts     # Include reusado para resolver los VIRTUAL stock/sizes de Product
+│   ├── excelCell.ts               # Lee celdas de exceljs (fórmulas, richText, hyperlink) sin "[object Object]"
+│   ├── sizesSpec.ts               # Parsea la notación de tallas del Excel ("25x3, 26, 27x2")
+│   ├── sizesToRows.ts             # Agrupa tallas repetidas en filas { size, stock }
 │   └── resetCode.ts               # Genera/hashea el código de recuperación de 5 dígitos
 ├── migrations/                  # Migraciones versionadas (sequelize-cli), una por tabla + incrementales
 ├── seeders/                     # Reservado para sequelize-cli (vacío; el seed real vive en seed.ts)
