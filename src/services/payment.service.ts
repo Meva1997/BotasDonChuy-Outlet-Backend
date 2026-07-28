@@ -402,8 +402,14 @@ function sendOrderConfirmationEmail(order: Order): Promise<void> {
   });
 }
 
-/** Correo "tu pedido va en camino" (Fase 8.6), con el número de guía ya disponible. */
-function sendShipmentEmail(
+/**
+ * Correo "tu pedido va en camino" (Fase 8.6), con el número de guía ya disponible.
+ * Exportado porque el avance manual de estado (`updateOrderStatusByAdmin`, Fase O.1) manda
+ * exactamente el mismo correo cuando el dueño captura la guía a mano: los dos caminos
+ * (webhook de Skydropx y panel) comparten template, asunto e `idempotencyKey`, así que el
+ * correo sale una sola vez por pedido sin importar cuál de los dos lo dispare.
+ */
+export function sendShipmentEmail(
   order: Order,
   tracking: { number: string; url?: string; carrier?: string },
 ): Promise<void> {
@@ -419,8 +425,13 @@ function sendShipmentEmail(
  * Skydropx SOLO hacia adelante: un evento tardío o fuera de orden (p. ej. un `in_transit` que
  * llega después de un `delivered`) nunca debe retroceder la orden. Una orden `cancelled` no se
  * reactiva desde este webhook (no está en el rango, así que queda excluida del avance).
+ *
+ * Exportado (junto con `statusesBelow`) porque el avance manual desde el panel
+ * (`updateOrderStatusByAdmin`, Fase O.1) usa exactamente el mismo rango: si el dueño y un
+ * webhook tardío se pelean por el estado del mismo pedido, la regla "solo hacia adelante" tiene
+ * que ser la misma en los dos caminos o el ganador dependería de quién escribió al último.
  */
-const ORDER_STATUS_RANK: Record<string, number> = {
+export const ORDER_STATUS_RANK: Record<string, number> = {
   pending: 0,
   paid: 1,
   shipped: 2,
@@ -446,7 +457,7 @@ function targetOrderStatus(packageStatus: string | null): "shipped" | "delivered
  * el avance sea atómico a nivel de BD — dos eventos concurrentes/fuera de orden no pueden retroceder
  * la orden. `cancelled` no está en el rango, así que nunca aparece aquí (no se reactiva).
  */
-function statusesBelow(target: "shipped" | "delivered"): string[] {
+export function statusesBelow(target: "shipped" | "delivered"): string[] {
   const targetRank = ORDER_STATUS_RANK[target];
   return Object.keys(ORDER_STATUS_RANK).filter((s) => ORDER_STATUS_RANK[s] < targetRank);
 }

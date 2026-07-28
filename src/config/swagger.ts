@@ -641,6 +641,40 @@ const options: Options = {
             },
           },
         },
+        OrderStatusUpdateInput: {
+          type: "object",
+          required: ["status"],
+          properties: {
+            status: {
+              type: "string",
+              enum: ["shipped", "delivered"],
+              description:
+                "Estado destino. Solo hacia adelante: `cancelled` no se maneja aquí (usa POST /api/admin/orders/{id}/cancel, el único camino que reembolsa y restockea) y `pending`/`paid` los fija el flujo de pago.",
+              example: "shipped",
+            },
+            trackingNumber: {
+              type: "string",
+              maxLength: 100,
+              description:
+                "Número de guía capturado a mano. Al registrarse por primera vez dispara el correo \"tu pedido va en camino\" (una sola vez por pedido, compartido con el webhook de Skydropx). Opcional: marcar `delivered` sin guía es válido (entrega en mano o local).",
+              example: "7891234567",
+            },
+            trackingUrl: {
+              type: "string",
+              format: "uri",
+              maxLength: 500,
+              description: "Enlace de rastreo de la paquetería, si lo hay.",
+              example: "https://rastreo.paqueteria.mx/7891234567",
+            },
+            shippingCarrier: {
+              type: "string",
+              maxLength: 80,
+              description:
+                "Paquetería con la que se envió. Sobrescribe la guardada en el pedido (útil cuando se envió por una distinta a la cotizada).",
+              example: "Estafeta",
+            },
+          },
+        },
         ShippingRatesInput: {
           type: "object",
           required: ["customer", "items"],

@@ -9,10 +9,17 @@ import { computeTotals, type CartLineItem } from "./cart";
 import { assertProductAvailable } from "./productAvailability";
 import { getQuotationRate, toSkydropxAddress, SkydropxRequestError } from "./skydropx.service";
 import { sendAlertEmail } from "./alert.service";
+// El avance manual de estado (Fase O.1) reusa el rango y el correo del camino automático:
+// misma regla "solo hacia adelante" y mismo `idempotencyKey`, así los dos no se duplican.
+import {
+  ORDER_STATUS_RANK,
+  statusesBelow,
+  sendShipmentEmail,
+} from "./payment.service";
 import { stripe } from "../config/stripe";
 import { logger } from "../config/logger";
 import { Sentry } from "../config/sentry";
-import type { CreateOrderInput } from "../schemas/checkout";
+import type { CreateOrderInput, OrderStatusUpdateInput } from "../schemas/checkout";
 
 const RATE_UNAVAILABLE_MESSAGE =
   "La tarifa de envío que elegiste ya no está disponible (las cotizaciones expiran a las 24 h). Vuelve a calcular el envío para continuar.";
@@ -403,5 +410,121 @@ export async function cancelOrderByAdmin(
   const full = await Order.findByPk(orderId, {
     include: [{ model: OrderItem, as: "items" }],
   });
+  return full!;
+}
+
+/**
+ * Avance manual del estado de envío desde el panel admin (Fase O.1), con la guía capturada
+ * a mano si la hay.
+ *
+ * Existe porque `Order.status` solo llegaba a `shipped`/`delivered` desde
+ * `applyShipmentUpdateFromWebhook`, o sea únicamente cuando Skydropx reporta un envío que
+ * Skydropx creó. Un pedido que cayó al fallback de tarifa plana en el checkout nace sin
+ * `skydropxRateId` → nunca se genera guía → nunca llega webhook → se quedaba en `paid` para
+ * siempre, sin correo de "va en camino" y contando como pendiente en el dashboard.
+ *
+ * Reglas:
+ *  - **Solo hacia adelante**, con el MISMO `ORDER_STATUS_RANK` que usa el webhook: un intento
+ *    de retroceder (`delivered` → `shipped`) responde 409. Repetir el estado actual sí se
+ *    permite — es como el dueño agrega una guía a un pedido que ya marcó enviado sin ella.
+ *  - **`cancelled` no se toca aquí** (ni como origen ni como destino): cancelar es exclusivo de
+ *    `cancelOrderByAdmin`, el único camino que reembolsa y restockea.
+ *  - **Un pedido `pending` no se puede enviar**: todavía no hay cobro capturado y su stock sigue
+ *    reservado a expensas del barrido de órdenes vencidas. Marcarlo enviado despacharía mercancía
+ *    no pagada y dejaría a `pendingOrderSweeper` cancelando el PaymentIntent de un pedido ya en
+ *    camino.
+ *  - El correo "tu pedido va en camino" se reclama con el MISMO guard atómico del webhook
+ *    (`WHERE trackingNumber IS NULL`), así que sale **exactamente una vez** por pedido sin
+ *    importar si la guía la puso Skydropx o el dueño, y los dos caminos no pueden duplicarlo.
+ */
+export async function updateOrderStatusByAdmin(
+  orderId: number,
+  input: OrderStatusUpdateInput,
+): Promise<Order> {
+  const order = await Order.findByPk(orderId);
+  if (!order) {
+    throw new AppError("No se encontró el pedido que quieres actualizar.", 404);
+  }
+
+  if (order.status === "cancelled") {
+    throw new AppError(
+      "Este pedido está cancelado y ya no puede marcarse como enviado o entregado.",
+      409,
+    );
+  }
+  if (order.status === "pending") {
+    throw new AppError(
+      "Este pedido todavía no está pagado. Espera a que se confirme el pago para marcarlo como enviado.",
+      409,
+    );
+  }
+
+  const target = input.status;
+  const currentRank = ORDER_STATUS_RANK[order.status];
+  if (ORDER_STATUS_RANK[target] < currentRank) {
+    throw new AppError(
+      `Este pedido ya está marcado como ${order.status === "delivered" ? "entregado" : "enviado"} y el estado no puede retroceder.`,
+      409,
+    );
+  }
+
+  // Campos "último gana" (la captura manual es la fuente más reciente). Solo se escriben los
+  // que vengan en el body: una llamada que solo cambia el estado nunca borra la guía guardada.
+  const fieldUpdates: { trackingUrl?: string; shippingCarrier?: string } = {};
+  if (input.trackingUrl) fieldUpdates.trackingUrl = input.trackingUrl;
+  if (input.shippingCarrier) fieldUpdates.shippingCarrier = input.shippingCarrier;
+
+  // Avance de estado atómico y solo hacia adelante, en su propio UPDATE con el mismo
+  // `WHERE status IN (<rangos por debajo>)` del webhook: si un evento de Skydropx entra
+  // concurrentemente, la BD serializa el cambio y ninguno de los dos retrocede al otro.
+  // Se omite cuando el estado no cambia (re-`PATCH` para agregar la guía).
+  if (ORDER_STATUS_RANK[target] > currentRank) {
+    await Order.update(
+      { status: target },
+      { where: { id: order.id, status: { [Op.in]: statusesBelow(target) } } },
+    );
+  }
+
+  // Guard atómico del correo: idéntico al del webhook. Solo la PRIMERA vez que un pedido
+  // recibe número de guía se reclama el envío del correo; los `PATCH` posteriores actualizan
+  // datos pero no lo reenvían.
+  let shipmentEmailClaimed = false;
+  if (input.trackingNumber && order.trackingNumber == null) {
+    const [claimed] = await Order.update(
+      { ...fieldUpdates, trackingNumber: input.trackingNumber },
+      { where: { id: order.id, trackingNumber: null } },
+    );
+    shipmentEmailClaimed = claimed === 1;
+    if (!shipmentEmailClaimed) {
+      // El webhook (u otro PATCH concurrente) ya reclamó el trackingNumber: solo persistir el resto.
+      await Order.update(fieldUpdates, { where: { id: order.id } });
+    }
+  } else if (Object.keys(fieldUpdates).length > 0) {
+    await Order.update(fieldUpdates, { where: { id: order.id } });
+  }
+
+  const full = await Order.findByPk(orderId, {
+    include: [{ model: OrderItem, as: "items" }],
+  });
+
+  if (shipmentEmailClaimed) {
+    // Fire-and-forget, misma razón que en el webhook: `sendShipmentEmail` recarga la orden y
+    // habla con Resend, y el panel no debe quedarse esperando esa ida y vuelta. Nunca lanza
+    // (tiene su propio try/catch), así que un correo fallido no revierte el cambio de estado.
+    // Se le pasa la instancia `order` (no la `full` que se devuelve): el helper hace su propio
+    // `reload()` con los items sin `unitCost`, y hacerlo sobre `full` mutaría en segundo plano
+    // el objeto que el controlador está por serializar.
+    void sendShipmentEmail(order, {
+      number: input.trackingNumber!,
+      url: input.trackingUrl ?? order.trackingUrl ?? undefined,
+      carrier: input.shippingCarrier ?? order.shippingCarrier ?? undefined,
+    });
+  }
+
+  logger.info(
+    { orderId, status: target, trackingNumber: input.trackingNumber },
+    "[orders] estado de envío actualizado manualmente por admin",
+  );
+
   return full!;
 }

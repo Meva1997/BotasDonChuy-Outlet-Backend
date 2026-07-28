@@ -123,3 +123,33 @@ export const cancelOrderSchema = z.object({
 });
 
 export type CancelOrderInput = z.infer<typeof cancelOrderSchema>;
+
+// Avance manual de estado de envío desde el panel admin (Fase O.1).
+// `status` se limita a `shipped`/`delivered` a propósito: `cancelled` sigue siendo
+// exclusivo de `POST /api/admin/orders/:id/cancel` (el único camino que reembolsa y
+// restockea), y `pending`/`paid` los fija el flujo de pago, no el dueño.
+// Los tres campos de guía son opcionales: marcar `delivered` sin guía es válido
+// (entrega en mano o local), y una guía capturada a mano puede no traer URL.
+export const orderStatusUpdateSchema = z.object({
+  status: z.enum(["shipped", "delivered"], {
+    message: 'El estado debe ser "shipped" (enviado) o "delivered" (entregado)',
+  }),
+  trackingNumber: z
+    .string("El número de guía debe ser texto")
+    .trim()
+    .min(1, "El número de guía no puede ir vacío")
+    .max(100, "El número de guía es demasiado largo (máximo 100 caracteres)")
+    .optional(),
+  trackingUrl: z
+    .url("El enlace de rastreo debe ser una URL válida (por ejemplo https://...)")
+    .max(500, "El enlace de rastreo es demasiado largo (máximo 500 caracteres)")
+    .optional(),
+  shippingCarrier: z
+    .string("La paquetería debe ser texto")
+    .trim()
+    .min(1, "La paquetería no puede ir vacía")
+    .max(80, "El nombre de la paquetería es demasiado largo (máximo 80 caracteres)")
+    .optional(),
+});
+
+export type OrderStatusUpdateInput = z.infer<typeof orderStatusUpdateSchema>;

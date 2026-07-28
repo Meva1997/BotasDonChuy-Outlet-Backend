@@ -500,6 +500,36 @@ doesn't over-restock), then sets `status: "cancelled"` / `paymentStatus: "refund
 `Sentry.captureException`s, fires `sendAlertEmail`, and throws `502`. This is the first and only
 refund path in the code.
 
+**Manual shipment status** (Fase O.1, `roadmap-operacion-y-negocio.md` — `PATCH
+/api/admin/orders/:id/status` `[auth]`, in `order.controller.ts`'s `adminUpdateOrderStatus` →
+`orders.service.updateOrderStatusByAdmin(id, input)`): the only way an order reaches
+`shipped`/`delivered` **without** Skydropx. Before this, `Order.status` only advanced there from
+`applyShipmentUpdateFromWebhook` — i.e. only when Skydropx reports a shipment Skydropx created — so an
+order that fell back to the flat rate at checkout (no `skydropxRateId` → `createShipmentForOrder`
+skips the label → no webhook ever arrives) stayed `paid` **forever**, with no "va en camino" email and
+counted as pending by the dashboard. Body is `orderStatusUpdateSchema` (`src/schemas/checkout.ts`,
+alongside `cancelOrderSchema`): `status` restricted to `shipped`/`delivered`, plus optional
+`trackingNumber`/`trackingUrl` (zod `z.url()`)/`shippingCarrier`; `:id` goes through `parseId`.
+**Zero new columns** — all four fields already exist on `Order` from Fase 8.5/8.6, so no migration.
+Rules: **forward-only**, reusing the **same** `ORDER_STATUS_RANK`/`statusesBelow` the webhook uses
+(both are now exported from `payment.service.ts` for exactly this) — a backwards move returns `409`;
+**repeating the current status is allowed** (that's how a guía captured later gets attached to an
+order already marked `shipped`). A `cancelled` order returns `409` and `cancelled` isn't an accepted
+`status` value at all (`400`) — cancelling stays exclusive to `POST /api/admin/orders/:id/cancel`, the
+only path that refunds and restocks; a still-`pending` order returns `409` too (shipping unpaid goods,
+and `pendingOrderSweeper` would still cancel its PaymentIntent under it). The status advance is its
+own atomic `UPDATE ... WHERE status IN (statusesBelow(target))`, the field writes are "last wins" and
+only for keys actually sent (a status-only call never wipes a stored guía), and the **"tu pedido va en
+camino" email is claimed with the exact same atomic guard as the webhook** (`Order.update({
+trackingNumber }, { where: { id, trackingNumber: null } })` → only on `affected === 1`), reusing the
+now-exported `sendShipmentEmail` with its `order-shipped/${id}` `idempotencyKey`. So the email fires
+**exactly once per order** whether Skydropx or the owner supplied the tracking, and the two paths
+cannot duplicate it. Marking `delivered` **without** tracking is valid (hand/local delivery) and sends
+no email. The email is fire-and-forget and is handed the pre-reload `order` instance, not the `full`
+one being serialized back — `sendOrderEmail` `reload()`s what it's given, and doing that to the
+response object would mutate it mid-serialization. This is the first import of `payment.service` from
+`orders.service` (no cycle: `payment.service` never imports `orders.service`).
+
 **Reports** (`src/routes/adminReports.routes.ts`, `src/controllers/reports.controller.ts`,
 `src/services/reports.service.ts`): mounted at `/api/admin/reports` (`router.use(requireAuth)`).
 Both endpoints are computed **in memory** from a single shared fetch (`loadReportData`) of
@@ -912,8 +942,9 @@ root and adds `types: [jest, node]`). `roadmaps-completados/roadmap-testing.md` 
 parts** (0 = infra; 0.5 = dedicated test DB; 1 = pure services; 2 = auth; 3 = checkout; 4 = webhook
 idempotency; 5 = manual cancel/refund/release; 6 = live shipping rates; 7 = Skydropx HTTP client;
 8 = admin product CRUD + images; 9 = brand/admin users; 10 = dashboard/reports aggregations) —
-**all twelve are done** as of this phase (19 suites / 183 tests, latest count — grows as tests are
-added part by part). Keep adding
+**all twelve are done** as of this phase (20 suites / 194 tests, latest count — grows as tests are
+added part by part; new phases add their own suite, e.g. `adminOrderStatus.test.ts` for Fase O.1).
+Keep adding
 new tests **part by part** (one behavior area at a time), marking `[x]` in `roadmaps-completados/roadmap-testing.md` as
 each closes, and don't touch `src/` from a test change unless a test reveals a real bug.
 `pnpm test` also runs automatically on every PR and on pushes to `main` via GitHub Actions

@@ -32,7 +32,7 @@ orden se queda en `paid` para siempre, sin correo de "va en camino" y sin forma 
 
 | Punto | Estado | Riesgo si no se atiende |
 |---|---|---|
-| Marcar un pedido como enviado/entregado a mano | ❌ ausente | Todo pedido con tarifa plana queda en `paid` de por vida; el cliente nunca recibe el correo de envío |
+| Marcar un pedido como enviado/entregado a mano | ✅ **Fase O.1** (`PATCH /api/admin/orders/:id/status`) | — (falta cablear el botón en el panel: Fase 14 del roadmap del frontend) |
 | Reintentar una guía de Skydropx fallida | ❌ ausente (`CLAUDE.md` ya lo admite) | Alerta por correo y nada más; con el centinela colgado, la orden **nunca** puede volver a intentar |
 | Idempotencia en `POST /api/orders` | ❌ ausente | Doble clic = 2 órdenes, 2 PaymentIntents y stock descontado doble por 30–40 min |
 | Consulta de pedido por el cliente | ❌ ausente | Si borra el correo, escribe por WhatsApp; toda consulta de estado es trabajo manual del dueño |
@@ -68,7 +68,7 @@ Para no repetirlas once veces. Vienen de la sección **Workflow** de [`CLAUDE.md
 
 # BLOQUE O — Cierre operativo (antes del 1 de octubre)
 
-### Fase O.1 — Estados de envío manuales `[el hueco más grande]`
+### Fase O.1 — Estados de envío manuales ✅ `[el hueco más grande]`
 
 **Objetivo:** que el dueño pueda mover un pedido a `shipped`/`delivered` desde el panel y pegarle
 una guía capturada a mano.
@@ -102,15 +102,29 @@ vender; el precio es que ese pedido sale del flujo automático y **hoy no hay pu
   de envío que mandar.
 
 **Tareas:**
-- [ ] `orderStatusUpdateSchema` en `src/schemas/checkout.ts` (o `src/schemas/order.ts` si crece):
+- [x] `orderStatusUpdateSchema` en `src/schemas/checkout.ts` (o `src/schemas/order.ts` si crece):
   `status` restringido a `shipped`/`delivered`, tracking opcional, `trackingUrl` validada como URL.
-- [ ] `orders.service.ts`: `updateOrderStatusByAdmin(id, payload)` — valida la transición con
+- [x] `orders.service.ts`: `updateOrderStatusByAdmin(id, payload)` — valida la transición con
   `advanceOrderStatus`, persiste, reclama el correo con el guard atómico de `trackingNumber`.
-- [ ] `adminUpdateOrderStatus` en `order.controller.ts` (`parseId`, `asyncHandler`, `AppError`).
-- [ ] Ruta en `adminOrder.routes.ts` + bloque `@openapi`.
-- [ ] Tests de integración: transición válida; retroceso → `409`; `cancelled` rechazado; correo una
+- [x] `adminUpdateOrderStatus` en `order.controller.ts` (`parseId`, `asyncHandler`, `AppError`).
+- [x] Ruta en `adminOrder.routes.ts` + bloque `@openapi`.
+- [x] Tests de integración: transición válida; retroceso → `409`; `cancelled` rechazado; correo una
   sola vez cuando webhook y `PATCH` compiten por el mismo tracking.
-- [ ] Fase 🔴 en `../frontend/ROADMAP-BACKEND-INTEGRATION.md` (el panel necesita el botón).
+- [x] Fase 🔴 en `../frontend/ROADMAP-BACKEND-INTEGRATION.md` (el panel necesita el botón).
+
+**Cómo quedó (decisiones que el diseño de arriba no fijaba):**
+- No existía una función llamada `advanceOrderStatus`: la regla "solo hacia adelante" vivía como
+  `ORDER_STATUS_RANK` + `statusesBelow` dentro de `payment.service.ts`. Se **exportaron** esas dos
+  (junto con `sendShipmentEmail`) y `orders.service.ts` las importa, en vez de duplicar el rango.
+  No hay ciclo: `payment.service` nunca importa `orders.service`.
+- **Repetir el estado actual sí se permite** (no solo avanzar): es la única forma de pegarle una guía
+  a un pedido que ya se marcó `shipped` sin ella. Retroceder sigue siendo `409`.
+- **Un pedido `pending` no se puede enviar** (`409`), aunque `pending → shipped` sea "hacia adelante"
+  por rango: todavía no hay cobro capturado, su stock sigue reservado y `pendingOrderSweeper`
+  acabaría cancelando el PaymentIntent de un pedido ya en camino.
+- Tests: `tests/integration/adminOrderStatus.test.ts` (11 casos, nivel 2 — HTTP contra Postgres real,
+  solo `email.service` mockeado). El caso de la carrera corre el `PATCH` por HTTP y
+  `applyShipmentUpdateFromWebhook` por servicio dentro del mismo `Promise.all`.
 
 **Cómo verificar:** crear un pedido forzando el fallback de tarifa plana (con Skydropx apagado en
 `.env` o mockeado a error), pagarlo con `stripe trigger payment_intent.succeeded`, confirmar que
@@ -442,7 +456,7 @@ activo — hay que revisarlos **cerca del 1 de octubre**:
 
 **Bloque O — antes del 1 de octubre**
 
-- [ ] **O.1** — `PATCH /api/admin/orders/:id/status` + tracking manual + correo de envío con guard único
+- [x] **O.1** — `PATCH /api/admin/orders/:id/status` + tracking manual + correo de envío con guard único
 - [ ] **O.2** — Idempotencia en `POST /api/orders` (devuelve el original, no `409`)
 - [ ] **O.3** — Reintento de guía Skydropx + liberación del centinela huérfano
 - [ ] **O.4** — `GET /api/orders/lookup/:token` (consulta pública con token opaco)

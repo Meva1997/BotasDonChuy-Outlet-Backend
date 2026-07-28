@@ -155,6 +155,7 @@ pnpm migrate:status   # verifica qué quedó aplicado
 | `GET`    | `/api/admin/dashboard`        | ✅   | Métricas agregadas del panel (KPIs, ingresos, ventas recientes, inventario) |
 | `GET`    | `/api/admin/orders`           | ✅   | Lista paginada de pedidos con sus items (incl. `unitCost`) |
 | `POST`   | `/api/admin/orders/:id/cancel` | ✅  | Cancela manualmente un pedido `pending`/`paid` (reembolso real vía Stripe si ya estaba pagado) |
+| `PATCH`  | `/api/admin/orders/:id/status` | ✅  | Marca un pedido como `shipped`/`delivered` a mano, con guía capturada (solo hacia adelante) |
 | `GET`    | `/api/admin/reports/monthly`  | ✅   | Ventas por mes por producto (`MonthlyReport[]`; mes en curso con `partial`) |
 | `GET`    | `/api/admin/reports/replenishment` | ✅ | Reposición sugerida (`ReplenishmentRow[]`; pronóstico + cobertura + margen) |
 | `GET`    | `/api/admin/brand`            | —    | Identidad de marca (lectura pública, crea el singleton con defaults si falta) |
@@ -344,6 +345,29 @@ guía generada, no se restockea) o ya `cancelled` responde `409`.
   reactivar una orden que un admin ya canceló (con su stock ya repuesto). Si eso ocurre, la orden
   queda `cancelled` y se dispara una alerta operativa para revisar si corresponde un reembolso
   manual — ver `CLAUDE.md`.
+
+### `PATCH /api/admin/orders/:id/status` (envío/entrega manual, Fase O.1)
+
+La única forma de que un pedido llegue a `shipped`/`delivered` **sin pasar por Skydropx**. Antes de
+esta ruta, `Order.status` solo avanzaba ahí desde el webhook de Skydropx, o sea únicamente cuando
+Skydropx reporta una guía que Skydropx creó: un pedido que en el checkout cayó al **fallback de
+tarifa plana** nace sin `skydropxRateId` → no se genera guía → nunca llega el webhook → se quedaba
+en `paid` **para siempre**, sin correo de "va en camino" y contando como pendiente en el dashboard.
+
+Body: `{ status: "shipped" | "delivered", trackingNumber?, trackingUrl?, shippingCarrier? }`.
+No agrega ninguna columna — las cuatro ya existen en `Order` desde las Fases 8.5/8.6.
+
+- **Solo hacia adelante**, con el mismo rango que aplica el webhook
+  (`pending < paid < shipped < delivered`): retroceder responde `409`. **Repetir el estado actual sí
+  se permite** — es como se agrega una guía a un pedido ya marcado enviado sin ella.
+- **`cancelled` no se toca aquí**: no es un valor aceptado en el body (`400`) y un pedido ya
+  cancelado responde `409`. Cancelar sigue siendo exclusivo de `POST /api/admin/orders/:id/cancel`,
+  el único camino que reembolsa y restockea. Un pedido todavía `pending` también responde `409` (no
+  se despacha mercancía sin pago confirmado).
+- El correo **"tu pedido va en camino" sale exactamente una vez por pedido**, lo dispare el panel o
+  el webhook: los dos comparten el mismo guard atómico (`WHERE trackingNumber IS NULL`) y el mismo
+  `idempotencyKey` de Resend. Marcar `delivered` **sin** guía es válido (entrega en mano o local) y
+  no manda correo.
 
 ### `GET /api/admin/reports/monthly` y `/replenishment` (reportes)
 
@@ -602,7 +626,7 @@ Suite automatizada con **Jest + ts-jest + supertest** (Fase H.1 — ver
 [`roadmaps-completados/roadmap-testing.md`](roadmaps-completados/roadmap-testing.md) para el desglose por partes; las **12 partes** — infra,
 BD de test, servicios puros, auth, checkout, idempotencia de webhooks, cancelación/reembolso manual,
 envío en vivo, cliente Skydropx, CRUD admin de productos/imágenes, marca/usuarios admin y
-agregaciones de dashboard/reports — están **completas**: 19 suites / 183 tests en verde). Los tests
+agregaciones de dashboard/reports — están **completas**: 20 suites / 194 tests en verde). Los tests
 viven en `tests/` (fuera de `src/`, para que `tsc` no los incluya en el build de producción);
 `ts-jest` los transpila en memoria.
 
@@ -699,7 +723,7 @@ src/
 │   ├── adminProduct.routes.ts   # Rutas /api/admin/products (CRUD admin + imágenes + import masivo, requireAuth)
 │   ├── auth.routes.ts           # Rutas /api/auth
 │   ├── order.routes.ts          # Ruta /api/orders (checkout público)
-│   ├── adminOrder.routes.ts     # Rutas /api/admin/orders (listado + cancelación manual, requireAuth)
+│   ├── adminOrder.routes.ts     # Rutas /api/admin/orders (listado, cancelación y estado manual, requireAuth)
 │   ├── adminDashboard.routes.ts # Ruta /api/admin/dashboard (requireAuth)
 │   ├── adminReports.routes.ts   # Rutas /api/admin/reports/* (requireAuth)
 │   ├── shipping.routes.ts       # Ruta /api/shipping/rates (cotización en vivo, pública)

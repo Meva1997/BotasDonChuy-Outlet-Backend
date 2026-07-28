@@ -2,7 +2,11 @@ import type { Request, RequestHandler, Response } from "express";
 import Stripe from "stripe";
 import { Op, type WhereOptions } from "sequelize";
 import { asyncHandler } from "../middlewares/asyncHandler";
-import { createOrderSchema, cancelOrderSchema } from "../schemas/checkout";
+import {
+  createOrderSchema,
+  cancelOrderSchema,
+  orderStatusUpdateSchema,
+} from "../schemas/checkout";
 import { parseId } from "../utils/parseId";
 import * as ordersService from "../services/orders.service";
 import * as paymentService from "../services/payment.service";
@@ -230,6 +234,24 @@ export const adminCancelOrder: RequestHandler = asyncHandler(
     const { reason } = cancelOrderSchema.parse(req.body ?? {});
 
     const order = await ordersService.cancelOrderByAdmin(id, reason);
+
+    res.json({ order });
+  },
+);
+
+/**
+ * PATCH /api/admin/orders/:id/status — avance manual de estado de envío (admin, Fase O.1).
+ * Mueve el pedido a `shipped`/`delivered` y guarda la guía capturada a mano; solo hacia
+ * adelante (409 si retrocede, si el pedido está cancelado o si aún no está pagado). El correo
+ * "tu pedido va en camino" sale una sola vez por pedido, lo dispare el panel o el webhook de
+ * Skydropx. Ver `updateOrderStatusByAdmin` en orders.service.ts.
+ */
+export const adminUpdateOrderStatus: RequestHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const id = parseId(req.params.id, "pedido");
+    const input = orderStatusUpdateSchema.parse(req.body ?? {});
+
+    const order = await ordersService.updateOrderStatusByAdmin(id, input);
 
     res.json({ order });
   },
