@@ -15,7 +15,9 @@ import {
   ORDER_STATUS_RANK,
   statusesBelow,
   sendShipmentEmail,
+  createPaymentIntentForOrder,
 } from "./payment.service";
+import { IdempotencyStore, fingerprintOf } from "../utils/idempotency";
 import { stripe } from "../config/stripe";
 import { logger } from "../config/logger";
 import { Sentry } from "../config/sentry";
@@ -235,6 +237,203 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
     ],
   });
   return full!;
+}
+
+// ── Checkout idempotente (Fase O.2) ───────────────────────────────────────────
+
+/** Lo que devuelve un checkout: la orden persistida y el secreto para cobrarla. */
+export interface PlacedOrder {
+  order: Order;
+  clientSecret: string | null;
+}
+
+/**
+ * Lo mismo, más si esta respuesta es la **repetición** de un checkout anterior. El cuerpo
+ * de un reenvío es byte a byte el del original (esa es justo la garantía de la fase), así
+ * que sin este dato el cliente no puede distinguir "se creó tu pedido" de "ya lo tenías";
+ * el controlador lo traduce al header `Idempotency-Replayed`.
+ */
+export interface PlaceOrderResult extends PlacedOrder {
+  replayed: boolean;
+}
+
+/**
+ * Estado que `executeCheckout` va marcando para que el manejo de errores sepa **hasta
+ * dónde llegó** el intento. La distinción no es cosmética: mientras nada se haya
+ * persistido, liberar la clave es lo correcto (el comprador corrige y reintenta al
+ * instante); una vez que `createOrder` commiteó, liberarla convierte el reintento en un
+ * segundo pedido con su segundo descuento de stock.
+ */
+interface CheckoutAttempt {
+  persisted: boolean;
+}
+
+/**
+ * Ventana de deduplicación del checkout. Corta a propósito: cubre el doble clic y el
+ * reintento del navegador (segundos), no un segundo pedido legítimo del mismo cliente
+ * más tarde. Coincide con la del import masivo por consistencia, no por necesidad.
+ */
+const CHECKOUT_IDEMPOTENCY_WINDOW_MS = 60_000;
+
+/**
+ * Se cachea la **promesa**, no el resultado: dos requests concurrentes (el caso real del
+ * doble clic) llegan aquí antes de que el primero termine, y ambos deben esperar al
+ * mismo checkout en vez de arrancar uno cada quien. `bodyHash` acompaña a la promesa
+ * para detectar una `Idempotency-Key` reusada con otro carrito.
+ */
+const recentCheckouts = new IdempotencyStore<{
+  bodyHash: string;
+  result: Promise<PlacedOrder>;
+}>(CHECKOUT_IDEMPOTENCY_WINDOW_MS);
+
+/**
+ * Huella del intento de compra. Se normaliza antes de hashear porque el mismo carrito
+ * puede llegar con los renglones en distinto orden o partidos en varias líneas de la
+ * misma talla: se agregan y se ordenan igual que en `createOrder`, así el reenvío del
+ * mismo carrito da la misma huella.
+ *
+ * `quotationId`/`rateId` SÍ entran: si el cliente volvió a cotizar entre un clic y el
+ * otro, el envío que va a pagar es distinto y no es el mismo pedido.
+ */
+function checkoutFingerprint(input: CreateOrderInput): string {
+  const quantities = new Map<string, number>();
+  for (const item of input.items) {
+    const key = `${item.productId}-${item.size}`;
+    quantities.set(key, (quantities.get(key) ?? 0) + item.quantity);
+  }
+  const c = input.customer;
+  return fingerprintOf({
+    items: Array.from(quantities.entries()).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+    // Lista posicional en vez del objeto: no depende del orden de claves que produzca zod.
+    customer: [
+      c.fullName,
+      c.email,
+      c.phone,
+      c.street,
+      c.neighborhood,
+      c.city,
+      c.state,
+      c.postalCode,
+      c.references ?? "",
+    ],
+    shippingCarrier: input.shippingCarrier ?? null,
+    quotationId: input.quotationId ?? null,
+    rateId: input.rateId ?? null,
+  });
+}
+
+/**
+ * Checkout completo e idempotente (Fase O.2): crea la orden, su PaymentIntent y devuelve
+ * el `clientSecret`.
+ *
+ * **Por qué existe:** `POST /api/orders` era la única entrada crítica sin protección contra
+ * reenvío. Un doble clic creaba otra fila `Order`, otro PaymentIntent real en Stripe y
+ * **descontaba el stock otra vez**; ese inventario fantasma no se liberaba hasta que
+ * `pendingOrderSweeper` alcanzara la orden (más de `PENDING_ORDER_TTL_MINUTES`), o sea 30–40
+ * minutos bloqueado justo en el momento de más tráfico. `orderRateLimiter` no lo cubre: dos
+ * clics están muy por debajo de 10 req/min.
+ *
+ * **Por qué devuelve el original en vez de un 409** (a diferencia del import masivo, que sí
+ * rechaza): el cliente está esperando para pagar. Un 409 lo deja sin poder completar la compra
+ * y encima con stock ya apartado a su nombre. La respuesta correcta a un reenvío es la misma
+ * respuesta del original — mismo `order`, mismo `clientSecret`, mismo 201.
+ *
+ * **Dos capas de clave:**
+ *  1. `Idempotency-Key` explícita si el cliente la manda (lo correcto a largo plazo, y lo que
+ *     Stripe ya usa internamente para el reembolso de `cancelOrderByAdmin`). Reusar la misma
+ *     clave con OTRO carrito es un error del cliente, no un reenvío → 409, para no devolverle
+ *     jamás un pedido que no es el que acaba de armar.
+ *  2. Piso automático sin tocar el frontend: huella del carrito + datos del cliente. Dos
+ *     compradores distintos no pueden colisionar aquí (la huella incluye correo, teléfono y
+ *     dirección completa); los que sí colisionan son los dos clics de la misma persona.
+ *
+ * Un intento fallido libera la clave **solo si no alcanzó a persistir nada**: los errores
+ * comunes (409 sin stock, 503 de cotización, 400 de validación) ocurren antes de escribir
+ * y el comprador tiene que poder corregir y reintentar de inmediato en vez de esperar la
+ * ventana completa. Si en cambio falla *después* de que `createOrder` commiteó (Stripe
+ * caído, por ejemplo), la clave se conserva: la orden y su stock descontado ya existen, y
+ * un reintento que las duplique es peor que repetir el mismo error.
+ */
+export async function placeOrder(
+  input: CreateOrderInput,
+  idempotencyKey?: string,
+): Promise<PlaceOrderResult> {
+  const bodyHash = checkoutFingerprint(input);
+  const key = idempotencyKey ? `key:${fingerprintOf(idempotencyKey)}` : `body:${bodyHash}`;
+
+  const cached = recentCheckouts.get(key);
+  if (cached) {
+    if (cached.bodyHash !== bodyHash) {
+      throw new AppError(
+        "Esa clave de idempotencia ya se usó para otro pedido. Vuelve a cargar el checkout para generar una nueva y reintenta.",
+        409,
+      );
+    }
+    logger.info({ key }, "[orders] checkout duplicado: se devuelve el pedido original");
+    return { ...(await cached.result), replayed: true };
+  }
+
+  // El `get` y el `set` van sin `await` de por medio a propósito: Node no interrumpe entre
+  // ellos, así que dos requests concurrentes no pueden reclamar la clave los dos.
+  const attempt: CheckoutAttempt = { persisted: false };
+  const result = executeCheckout(input, attempt);
+  recentCheckouts.set(key, { bodyHash, result });
+  // El `.catch` es solo para decidir si se libera la clave; la promesa original es la que
+  // se espera abajo, así que el error sí llega al llamador (y no queda ningún rechazo sin
+  // manejar). Se registra ANTES del `await` para que corra aunque el llamador se vaya.
+  result.catch((err) => releaseKeyOnFailure(key, result, attempt, err));
+  return { ...(await result), replayed: false };
+}
+
+/**
+ * Decide si un intento fallido libera su clave. Ver el bloque de `placeOrder`: liberar es
+ * lo correcto solo mientras el intento no haya escrito nada.
+ */
+function releaseKeyOnFailure(
+  key: string,
+  result: Promise<PlacedOrder>,
+  attempt: CheckoutAttempt,
+  err: unknown,
+): void {
+  if (attempt.persisted) {
+    logger.error(
+      { key, err },
+      "[orders] el checkout falló después de crear la orden: la clave NO se libera para que un reenvío no duplique el pedido ni el descuento de stock",
+    );
+    return;
+  }
+  // `deleteIf` y no `delete`: si este intento tardó más que el TTL, la entrada vigente ya
+  // es la de otra petición y borrarla dejaría pasar un duplicado.
+  recentCheckouts.deleteIf(key, (entry) => entry.result === result);
+}
+
+async function executeCheckout(
+  input: CreateOrderInput,
+  attempt: CheckoutAttempt,
+): Promise<PlacedOrder> {
+  const order = await createOrder(input);
+  // Desde aquí el intento ya dejó huella en la BD (fila `Order` + stock descontado): lo que
+  // falle de ahora en adelante NO puede tratarse como "no pasó nada, reintenta".
+  attempt.persisted = true;
+
+  const payment = await createPaymentIntentForOrder(order);
+  if (payment.paymentIntentId) {
+    await order.update({
+      paymentIntentId: payment.paymentIntentId,
+      paymentStatus: "processing",
+    });
+  }
+
+  return { order, clientSecret: payment.clientSecret };
+}
+
+/**
+ * Vacía la memoria de checkouts recientes. Existe **solo para los tests**: el estado vive en
+ * el módulo y sobrevive al `truncateAll` entre casos, así que sin esto un caso que repite el
+ * mismo carrito que otro recibiría la orden (ya borrada) del anterior.
+ */
+export function resetCheckoutIdempotency(): void {
+  recentCheckouts.clear();
 }
 
 /**

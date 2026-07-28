@@ -283,6 +283,24 @@ validado con `createOrderSchema` (zod). El backend es la **autoridad de precios,
 - **Topes anti-abuso** (zod): máximo `99` unidades por artículo y `50` artículos por pedido (`400`
   si se exceden). El límite **real** de existencias por talla lo impone el descuento atómico: pedir
   más unidades de las que hay en esa talla (o una talla inexistente) devuelve `409`.
+- **Idempotente (Fase O.2):** un reenvío del mismo checkout dentro de una ventana corta (**60 s**)
+  no crea un segundo pedido — devuelve la **misma respuesta del original** (mismo `order`, mismo
+  `clientSecret`, mismo `201`). Sin esto, un doble clic creaba otra fila `Order`, otro PaymentIntent
+  real y **descontaba el stock otra vez**, y ese inventario fantasma no se liberaba hasta que
+  `pendingOrderSweeper` alcanzara la orden (30–40 min). Se devuelve el original en vez de un `409`
+  —al revés que el import masivo— porque el cliente está esperando para pagar: un `409` lo dejaría
+  sin poder comprar y con stock apartado a su nombre. Hay **dos capas de clave**: el header
+  `Idempotency-Key` (opcional, un valor nuevo por intento de compra; reusarlo con **otro** carrito
+  responde `409`, y uno de más de 200 caracteres `400`) y, si no viene, una huella automática del
+  carrito + los datos del cliente (renglones agregados y ordenados, así que el mismo carrito en
+  distinto orden se reconoce igual). Es un mapa **en memoria**, deliberadamente no persistido —
+  misma decisión que el guard del import masivo: protege del accidente, no del abuso; contra el
+  abuso está `orderRateLimiter`. Un intento fallido libera la clave para que el comprador pueda
+  corregir y reintentar de inmediato, **salvo** cuando el pedido ya se había creado y lo que falló
+  fue el cobro: ahí la clave se conserva, porque la orden y su stock descontado ya existen y liberarla
+  convertiría el reintento justo en el pedido duplicado que todo esto evita. La respuesta repetida
+  trae el header `Idempotency-Replayed: true` (el cuerpo es idéntico al del original a propósito, así
+  que es lo único que las distingue); va en `exposedHeaders` del CORS para que el navegador lo lea.
 
 La ruta está limitada por `orderRateLimiter` (Fase H.3, mismo patrón que `authRateLimiter` /
 `shippingRateLimiter`, `10` req/min por IP): cada request exitoso crea un PaymentIntent real de
@@ -293,7 +311,9 @@ pagar). Solo aplica a la ruta pública `POST /`, no a `adminOrder.routes.ts` (ya
 La orden nace en `status: "pending"` / `paymentStatus: "unpaid"`, se le crea un **PaymentIntent real
 de Stripe** y se guarda su `paymentIntentId` (`paymentStatus: "processing"`). Respuesta `201`:
 `{ order, clientSecret }` — el `clientSecret` sirve para que el cliente confirme el pago. Errores:
-`400` (body/cliente inválido), `409` (sin stock o producto no disponible, con el ítem en el mensaje).
+`400` (body/cliente inválido, o `Idempotency-Key` demasiado larga), `409` (sin stock o producto no
+disponible —con el ítem en el mensaje—, tarifa de envío vencida, o `Idempotency-Key` reusada con
+otro carrito).
 
 Todos los errores responden `{ message }` (los de validación agregan `details`). El `message` es la
 copia que el front pinta tal cual, así que es una frase accionable en español: nombra el producto y,
@@ -447,7 +467,11 @@ exige `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET` (el server no arranca sin el
   lock de la fila de la orden, solo mientras esté `pending`).
 - **Barrido:** `src/services/pendingOrderSweeper.ts` corre cada `PENDING_ORDER_SWEEP_INTERVAL_MINUTES`,
   reconcilia las órdenes `pending` viejas contra Stripe y libera su stock (o las marca `paid` si el
-  PaymentIntent ya se pagó y se perdió el webhook).
+  PaymentIntent ya se pagó y se perdió el webhook). También alcanza a las órdenes `pending` **sin**
+  `paymentIntentId` —las que quedaron así porque Stripe falló cuando la orden ya estaba escrita con su
+  stock descontado—: no hay nada que reconciliar (el cliente nunca recibió un `clientSecret`, así que
+  ese pedido no puede pagarse) y son las únicas que ningún webhook va a tocar, así que se les repone el
+  stock directo.
 - **Correo de confirmación (Fase 9.3):** al pasar a `paid`, `markOrderPaidFromWebhook` dispara el
   correo de confirmación (Resend) con el resumen del pedido. La transición a `paid` es un **UPDATE
   atómico condicional** (`WHERE status: "pending", paymentStatus != 'paid'`): garantiza que el correo
@@ -626,7 +650,8 @@ Suite automatizada con **Jest + ts-jest + supertest** (Fase H.1 — ver
 [`roadmaps-completados/roadmap-testing.md`](roadmaps-completados/roadmap-testing.md) para el desglose por partes; las **12 partes** — infra,
 BD de test, servicios puros, auth, checkout, idempotencia de webhooks, cancelación/reembolso manual,
 envío en vivo, cliente Skydropx, CRUD admin de productos/imágenes, marca/usuarios admin y
-agregaciones de dashboard/reports — están **completas**: 20 suites / 194 tests en verde). Los tests
+agregaciones de dashboard/reports — están **completas**: 23 suites / 220 tests en verde, y cada
+fase nueva suma la suya). Los tests
 viven en `tests/` (fuera de `src/`, para que `tsc` no los incluya en el build de producción);
 `ts-jest` los transpila en memoria.
 
@@ -637,9 +662,10 @@ pnpm test <patrón>      # una parte (p. ej. pnpm test auth)
 ```
 
 **Tres niveles de prueba:** (1) *unit puro* sin BD (`cart`, `forecast`, `formatMoney`, `date`,
-`skydropx` con `fetch` mockeado, `dashboard`/`reports`, `sentry`, `errorHandler`);
-(2) *integración HTTP* con `request(app)...` contra un Postgres de test real (`auth`, `checkout`,
-`products`, `shippingRates`, `adminProducts`, `adminProductImport`, `adminBrandUsers`); (3)
+`skydropx` con `fetch` mockeado, `dashboard`/`reports`, `sentry`, `errorHandler`, `idempotency`);
+(2) *integración HTTP* con `request(app)...` contra un Postgres de test real (`auth`,
+`checkout`, `checkoutIdempotency`, `adminOrderStatus`, `products`, `shippingRates`, `adminProducts`,
+`adminProductImport`, `adminBrandUsers`); (3)
 *servicio + SDK mockeado* para
 concurrencia/idempotencia (`webhooks`, `cancelOrder`). **Stripe,
 Skydropx y Resend van SIEMPRE mockeados** (cuestan dinero o mandan correos reales); la **BD no se
@@ -685,9 +711,9 @@ tests/                           # Suite automatizada (fuera de src/ — tsc la 
 ├── setup/                       # env.ts, db.ts, factories.ts, mocks/{stripe,skydropx,resend}.ts
 ├── smoke/                       # import app + GET /health (valida el arranque en test)
 ├── unit/                        # nivel 1 — servicios/utils/config/middlewares puros, sin BD
-└── integration/                 # niveles 2/3 — Postgres de test (auth, checkout, products, webhooks,
-                                  # cancelOrder, shippingRates, adminProducts, adminProductImport,
-                                  # adminBrandUsers)
+└── integration/                 # niveles 2/3 — Postgres de test (auth, checkout, checkoutIdempotency,
+                                  # products, webhooks, cancelOrder, adminOrderStatus, shippingRates,
+                                  # adminProducts, adminProductImport, adminBrandUsers)
 src/
 ├── app.ts                       # Punto de entrada: Express, middleware, arranque y apagado ordenado
 ├── seed.ts                      # Script de seed (productos, histórico, admin, marca)
@@ -741,7 +767,7 @@ src/
 │   └── adminUser.ts               # Esquemas zod de alta de usuario y update de cuenta propia
 ├── services/
 │   ├── cart.ts                    # computeTotals, computeShipping, SHIPPING_BY_TYPE
-│   ├── orders.service.ts          # Checkout: stock atómico, totales, precios congelados; releaseOrderStock / cancelOrderByAdmin
+│   ├── orders.service.ts          # Checkout idempotente: stock atómico, totales, precios congelados; releaseOrderStock / cancelOrderByAdmin / updateOrderStatusByAdmin
 │   ├── payment.service.ts         # Stripe: PaymentIntent, concilia pagos/fallos/reembolsos, crea guía Skydropx, dispara correos
 │   ├── pendingOrderSweeper.ts     # Barrido de órdenes pending abandonadas (libera stock, reconcilia con Stripe)
 │   ├── skydropx.service.ts        # Cliente REST de Skydropx (OAuth2, throttle 2 req/s, cotización, guía, poll)
@@ -760,6 +786,7 @@ src/
 │   ├── date.ts                    # Helpers de fecha UTC (isoDay/isoMonth/formatShortDate/...)
 │   ├── formatMoney.ts             # Formateo es-MX compartido por correos/reportes/errores de precio
 │   ├── parseId.ts                 # Valida :id numérico antes de tocar Sequelize (evita 500 por NaN)
+│   ├── idempotency.ts             # Huella sha256 + mapa con TTL compartidos por el checkout y el import masivo
 │   ├── constantTimeEqual.ts       # Comparación en tiempo constante (firma HMAC de Skydropx y código de reset)
 │   ├── productSizesInclude.ts     # Include reusado para resolver los VIRTUAL stock/sizes de Product
 │   ├── excelCell.ts               # Lee celdas de exceljs (fórmulas, richText, hyperlink) sin "[object Object]"

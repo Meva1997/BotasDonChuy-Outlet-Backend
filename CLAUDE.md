@@ -213,6 +213,45 @@ account-level rate limit and bloat the orders table even though `pendingOrderSwe
 releases the unpaid ones. Only mounted on the public `POST /` in `order.routes.ts`, not on
 `adminOrder.routes.ts` (already behind `requireAuth`).
 
+**Checkout idempotency** (Fase O.2, `roadmap-operacion-y-negocio.md`): the controller no longer calls
+`createOrder` directly — it calls `orders.service.placeOrder(input, idempotencyKey?)`, which wraps the
+whole checkout (`createOrder` → `createPaymentIntentForOrder` → persist `paymentIntentId`, the three
+steps that used to sit in the controller) behind a **60 s dedup window**. Without it a double click
+created a second `Order`, a second real PaymentIntent and **decremented stock again**, and that phantom
+inventory stayed locked until `pendingOrderSweeper` reached the order (`PENDING_ORDER_TTL_MINUTES`, 30)
+— 30–40 minutes of unsellable stock at peak traffic. `orderRateLimiter` doesn't cover it: two clicks are
+far under 10 req/min. A replay **returns the original response** (same `order`, same `clientSecret`, same
+`201`) instead of the `409` the bulk import returns for its own duplicate guard — the deliberate
+difference is that the checkout customer is waiting to pay, and a `409` would leave them unable to buy
+*and* holding reserved stock. Two key layers: an explicit `Idempotency-Key` header (optional, read by
+`readIdempotencyKey` in the controller — trimmed, empty = absent, >200 chars = `400`), and, when absent,
+an automatic fingerprint of the cart + customer (`checkoutFingerprint`: lines aggregated by
+`(productId, size)` and sorted like `createOrder` does, so the same cart in a different order is
+recognized; customer fields as a **positional array**, not the object, so it doesn't depend on zod's
+key order; `quotationId`/`rateId` included — a re-quote between clicks is a different shipping cost, so
+a different order). Reusing an explicit key with a **different** cart is a client bug, not a replay →
+`409`, so a buyer is never handed an order that isn't theirs. What's cached is the **in-flight promise**,
+not the result: the real double-click arrives before the first request finishes, and both must await the
+same checkout — the `get`/`set` pair has no `await` between them, so two concurrent requests can't both
+claim the key. A failed attempt **releases** the key **only while nothing was persisted** (most failures
+— `409` stock, `503` quote, `400` validation — happen before any write, and the buyer has to be able to
+fix and retry immediately); `executeCheckout` flips a `persisted` flag right after `createOrder` commits,
+and past that point the key is **kept** — the `Order` row and its stock decrement already exist, so
+releasing it would turn the retry (the likeliest one of all, since the buyer just saw an error) into
+exactly the duplicate order + 30–40 min of locked stock this phase exists to prevent; a resend inside the
+window gets the same error, not a second order. The release goes through `IdempotencyStore.deleteIf`
+(identity-checked), never a bare `delete`: an attempt can outlive the 60 s TTL (Stripe's SDK default
+timeout is 80 s), and by the time it fails its entry may already belong to another request. A replay is
+flagged with an **`Idempotency-Replayed: true` response header** (`placeOrder` returns `replayed`) —
+the body is byte-identical to the original by design, so without it the client can't tell "your order was
+created" from "you already had this one"; it's listed in the CORS `exposedHeaders` in `app.ts` or the
+browser wouldn't let the front read it. The store is
+`IdempotencyStore` from `src/utils/idempotency.ts`, **in memory and deliberately not persisted** (same
+decision and same accepted limitation as `assertNotDuplicateCommit` and `pendingOrderSweeper`'s failure
+counter: it protects against the accident, not the abuse — `orderRateLimiter` is the hard barrier).
+`resetCheckoutIdempotency()` is exported **only for tests** (module state survives `truncateAll`, so
+without it a case reusing another's cart would get the already-deleted order).
+
 **Payments / Stripe** (Fase 8, activo): the `stripe`
 package is installed and configured in `src/config/stripe.ts` (its own `dotenv.config()` at module
 top, like `database.ts`, since imports run before `app.ts`'s `dotenv.config()`). That module
@@ -282,9 +321,17 @@ its `OrderItem`s separately, `ProductSize.update({ stock: literal('stock + N') }
 double-restock. `src/services/pendingOrderSweeper.ts` (`startPendingOrderSweeper`, started from
 `app.ts` after `connectDB()`; skipped when `NODE_ENV === "test"`, timer `unref()`ed) runs every
 `PENDING_ORDER_SWEEP_INTERVAL_MINUTES`, finds `pending` orders older than
-`PENDING_ORDER_TTL_MINUTES` with a `paymentIntentId`, and **reconciles each against Stripe**
-(`retrieve`): if the PaymentIntent is `succeeded` it marks the order `paid` (recovers a missed
-webhook), otherwise it cancels the PaymentIntent and calls `releaseOrderStock`.
+`PENDING_ORDER_TTL_MINUTES` and **reconciles each against Stripe** (`retrieve`): if the PaymentIntent
+is `succeeded` it marks the order `paid` (recovers a missed webhook), otherwise it cancels the
+PaymentIntent and calls `releaseOrderStock`. An order **without** a `paymentIntentId` skips Stripe
+entirely and goes straight to `releaseOrderStock`: the sweep deliberately does **not** filter on
+`paymentIntentId != null` (it did until Fase O.2), because a `pending` order can lack one when Stripe
+failed *after* `createOrder` had already committed the row and decremented stock (see
+`executeCheckout` in `orders.service.ts`) — and those are precisely the orders nothing else will ever
+touch, since no webhook can arrive for a PaymentIntent that doesn't exist, so their stock stayed
+reserved forever. Restocking them is safe because the client never received a `clientSecret`, so the
+order can never be paid. `sweepOnce` is exported for `tests/integration/pendingOrderSweeper.test.ts`
+(the timer itself doesn't run under `NODE_ENV=test`, so the suite runs a single cycle by hand).
 
 **Envío en vivo / Skydropx** (Fase 8.1–8.7, activo — cotización en vivo, órdenes con tarifa real,
 guía automática al pagar, webhook de estado de envío y Swagger de los endpoints nuevos, ver
@@ -789,7 +836,10 @@ menos de 60 s (hash sha256 del payload). Es un `Map` en memoria, deliberadamente
 — se reinicia con el proceso y no cubre varias instancias, misma decisión y misma limitación
 asumida que el contador de fallos de `pendingOrderSweeper.ts`. Protege del accidente (doble clic,
 reintento del navegador), no del abuso; la barrera dura contra duplicados sigue siendo el índice
-único de `code`.
+único de `code`. Desde la Fase O.2 el mapa con TTL y la huella salen de `src/utils/idempotency.ts`
+(`IdempotencyStore`/`fingerprintOf`), compartidos con el guard del checkout; lo que **no** se
+comparte es la política — aquí un reenvío se rechaza, en `POST /api/orders` se le devuelve la
+respuesta del original (ver **Checkout idempotency**).
 
 Errores por fila se traducen a un mensaje en español con prefijo `Fila N:` (zod, `AppError`, o un
 `UniqueConstraintError` del índice de `code` si dos filas —o dos peticiones concurrentes— compiten
@@ -942,8 +992,9 @@ root and adds `types: [jest, node]`). `roadmaps-completados/roadmap-testing.md` 
 parts** (0 = infra; 0.5 = dedicated test DB; 1 = pure services; 2 = auth; 3 = checkout; 4 = webhook
 idempotency; 5 = manual cancel/refund/release; 6 = live shipping rates; 7 = Skydropx HTTP client;
 8 = admin product CRUD + images; 9 = brand/admin users; 10 = dashboard/reports aggregations) —
-**all twelve are done** as of this phase (20 suites / 194 tests, latest count — grows as tests are
-added part by part; new phases add their own suite, e.g. `adminOrderStatus.test.ts` for Fase O.1).
+**all twelve are done** as of this phase (23 suites / 220 tests, latest count — grows as tests are
+added part by part; new phases add their own suite, e.g. `adminOrderStatus.test.ts` for Fase O.1 and
+`checkoutIdempotency.test.ts` + `pendingOrderSweeper.test.ts` for Fase O.2).
 Keep adding
 new tests **part by part** (one behavior area at a time), marking `[x]` in `roadmaps-completados/roadmap-testing.md` as
 each closes, and don't touch `src/` from a test change unless a test reveals a real bug.

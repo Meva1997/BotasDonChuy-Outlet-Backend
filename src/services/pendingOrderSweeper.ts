@@ -32,18 +32,28 @@ const REPEATED_FAILURE_ALERT_THRESHOLD = 3;
  *  - En otro caso → cancela el PaymentIntent (si es cancelable) y repone el stock
  *    vía `releaseOrderStock` (idempotente y con lock: si el webhook `canceled`
  *    llega a la vez, no se repone dos veces).
+ *  - Si la orden **no tiene** `paymentIntentId` → repone el stock sin consultar a
+ *    Stripe (no hay nada que reconciliar, ver abajo).
  *
  * Reconciliar contra Stripe evita el peor caso: liberar el stock de una orden que
  * en realidad sí se pagó pero cuyo webhook aún no llegaba.
+ *
+ * Exportada para los tests: `startPendingOrderSweeper` no corre en `NODE_ENV=test`,
+ * así que la suite ejecuta un ciclo suelto en vez de esperar al `setInterval`.
  */
-async function sweepOnce(): Promise<void> {
+export async function sweepOnce(): Promise<void> {
   const cutoff = new Date(Date.now() - PENDING_ORDER_TTL_MINUTES * 60_000);
   // WhereOptions (sin genérico) admite `createdAt`, que el timestamp automático de
   // Sequelize agrega a la tabla pero no figura en OrderAttributes.
+  //
+  // El barrido NO exige `paymentIntentId != null`: una orden puede quedar `pending` sin
+  // PaymentIntent si Stripe falló DESPUÉS de que `createOrder` ya había commiteado la fila
+  // y descontado el stock (ver `executeCheckout` en orders.service.ts). Filtrarlas dejaba
+  // ese stock reservado para siempre, porque son justo las órdenes que nadie más va a tocar:
+  // sin PaymentIntent no hay webhook de Stripe que llegue por ellas.
   const where: WhereOptions = {
     status: "pending",
     createdAt: { [Op.lt]: cutoff },
-    paymentIntentId: { [Op.ne]: null },
   };
   const stale = await Order.findAll({ where });
 
@@ -56,8 +66,22 @@ async function sweepOnce(): Promise<void> {
 
   for (const order of stale) {
     const paymentIntentId = order.paymentIntentId;
-    if (!paymentIntentId) continue;
     try {
+      if (!paymentIntentId) {
+        // Nunca se creó el PaymentIntent, así que el cliente jamás recibió un
+        // `clientSecret`: esta orden no puede pagarse nunca y no hay nada que
+        // reconciliar contra Stripe. Se repone el stock directamente. (Si Stripe sí
+        // llegó a crear el intent pero la respuesta se perdió, ese intent queda sin
+        // confirmar y expira solo — nadie tiene su secret para cobrarlo.)
+        logger.warn(
+          { orderId: order.id },
+          "[sweeper] orden pending sin PaymentIntent: se repone su stock",
+        );
+        await releaseOrderStock(order.id);
+        consecutiveFailuresByOrderId.delete(order.id);
+        continue;
+      }
+
       const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
 
       if (pi.status === "succeeded") {

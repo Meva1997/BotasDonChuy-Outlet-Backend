@@ -16,6 +16,7 @@ import { setupTestDatabase, truncateAll, closeTestDatabase } from "../setup/db";
 import { createProduct } from "../setup/factories";
 import { ProductSize } from "../../src/models/ProductSize";
 import { createPaymentIntentForOrder } from "../../src/services/payment.service";
+import { resetCheckoutIdempotency } from "../../src/services/orders.service";
 
 const createPaymentIntentForOrderMock = createPaymentIntentForOrder as jest.Mock;
 
@@ -32,6 +33,9 @@ const validCustomer = {
 
 beforeAll(setupTestDatabase);
 afterEach(truncateAll);
+// La memoria de checkouts recientes (Fase O.2) vive en el módulo y sobrevive al truncate:
+// sin limpiarla, un caso que repite el mismo carrito que otro recibiría su orden ya borrada.
+afterEach(resetCheckoutIdempotency);
 afterAll(closeTestDatabase);
 
 beforeEach(() => {
@@ -45,14 +49,19 @@ describe("POST /api/orders — descuento atómico de stock", () => {
   it("dos compras concurrentes por la última pieza → una 201 y una 409; stock final en 0", async () => {
     const product = await createProduct({ sizes: { 25: 1 } });
 
-    const body = {
-      items: [{ productId: product.id, size: 25, quantity: 1 }],
-      customer: validCustomer,
+    // Dos COMPRADORES distintos (no el mismo dos veces): desde la Fase O.2 dos requests
+    // idénticos son un doble clic y se deduplican, así que la carrera por la última pieza
+    // solo existe entre clientes diferentes.
+    const items = [{ productId: product.id, size: 25, quantity: 1 }];
+    const bodyA = { items, customer: validCustomer };
+    const bodyB = {
+      items,
+      customer: { ...validCustomer, email: "otro@test.com", phone: "4619999999" },
     };
 
     const [resA, resB] = await Promise.all([
-      request(app).post("/api/orders").send(body),
-      request(app).post("/api/orders").send(body),
+      request(app).post("/api/orders").send(bodyA),
+      request(app).post("/api/orders").send(bodyB),
     ]);
 
     const statuses = [resA.status, resB.status].sort();

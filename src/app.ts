@@ -49,7 +49,10 @@ const PORT = process.env.PORT || 4000;
 //Global Middleware
 app.use(helmet());
 const corsOrigins = process.env.CORS_ORIGIN?.split(",").map((o) => o.trim());
-app.use(cors({ origin: corsOrigins }));
+// `exposedHeaders`: por defecto el navegador solo deja leer los headers seguros de la
+// lista CORS, así que sin esto el `Idempotency-Replayed` de `POST /api/orders` (Fase O.2)
+// llegaría a la respuesta pero el front no podría verlo.
+app.use(cors({ origin: corsOrigins, exposedHeaders: ["Idempotency-Replayed"] }));
 
 // Webhook de Stripe: la verificación de firma exige el cuerpo CRUDO, así que se
 // monta con express.raw ANTES del express.json() global (que solo parsea el resto).

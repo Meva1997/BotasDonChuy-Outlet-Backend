@@ -34,7 +34,7 @@ orden se queda en `paid` para siempre, sin correo de "va en camino" y sin forma 
 |---|---|---|
 | Marcar un pedido como enviado/entregado a mano | ✅ **Fase O.1** (`PATCH /api/admin/orders/:id/status`) | — (falta cablear el botón en el panel: Fase 14 del roadmap del frontend) |
 | Reintentar una guía de Skydropx fallida | ❌ ausente (`CLAUDE.md` ya lo admite) | Alerta por correo y nada más; con el centinela colgado, la orden **nunca** puede volver a intentar |
-| Idempotencia en `POST /api/orders` | ❌ ausente | Doble clic = 2 órdenes, 2 PaymentIntents y stock descontado doble por 30–40 min |
+| Idempotencia en `POST /api/orders` | ✅ **Fase O.2** (ventana de 60 s + header `Idempotency-Key`) | — (opcional: mandar el header desde `usePlaceOrder.ts`, Fase 15 del roadmap del frontend) |
 | Consulta de pedido por el cliente | ❌ ausente | Si borra el correo, escribe por WhatsApp; toda consulta de estado es trabajo manual del dueño |
 | Readiness real en `/health` | ❌ superficial | El healthcheck pasa en verde con Postgres caído |
 | Búsqueda/orden en el catálogo | ❌ solo `categoria`/`talla` | Con el catálogo creciendo por import masivo, el cliente no encuentra lo que busca |
@@ -133,7 +133,7 @@ tracking capturado y el dashboard deja de contarlo como pendiente.
 
 ---
 
-### Fase O.2 — Idempotencia en `POST /api/orders`
+### Fase O.2 — Idempotencia en `POST /api/orders` ✅
 
 **Objetivo:** que un doble clic o un reintento del navegador no cree dos pedidos.
 
@@ -161,13 +161,69 @@ clics están muy por debajo del límite.
   el abuso sigue siendo `orderRateLimiter`.
 
 **Tareas:**
-- [ ] Helper compartido de idempotencia (extraer el patrón de `productImport.service.ts` a
+- [x] Helper compartido de idempotencia (extraer el patrón de `productImport.service.ts` a
   `src/utils/idempotency.ts` para no tener dos `Map` con TTL copiados).
-- [ ] Aplicarlo en `orders.service.createOrder`, cacheando `{ order, clientSecret }` del original.
-- [ ] Aceptar el header `Idempotency-Key` cuando venga y darle prioridad sobre el hash.
-- [ ] Tests: dos `POST` idénticos concurrentes → una sola fila `Order`, un solo PaymentIntent
+- [x] Aplicarlo en `orders.service.createOrder`, cacheando `{ order, clientSecret }` del original.
+- [x] Aceptar el header `Idempotency-Key` cuando venga y darle prioridad sobre el hash.
+- [x] Tests: dos `POST` idénticos concurrentes → una sola fila `Order`, un solo PaymentIntent
   (mock de Stripe), stock descontado **una** vez, y el mismo `clientSecret` en ambas respuestas.
-- [ ] Fase 🔴 en el roadmap del frontend (mandar `Idempotency-Key` desde `usePlaceOrder.ts`).
+- [x] Fase 🔴 en el roadmap del frontend (mandar `Idempotency-Key` desde `usePlaceOrder.ts`).
+
+**Cómo quedó (decisiones que el diseño de arriba no fijaba):**
+- La dedup **no** vive dentro de `createOrder` sino en un `placeOrder(input, idempotencyKey?)` nuevo
+  que lo envuelve. El `clientSecret` no lo produce `createOrder`: los tres pasos del checkout
+  (crear orden → crear PaymentIntent → persistir `paymentIntentId`) estaban repartidos entre el
+  service y el **controlador**, así que cachear "la respuesta del original" obligaba a tener los tres
+  bajo un mismo techo. Se movieron a `placeOrder` y el controlador quedó en validar + delegar.
+  `createOrder` sigue exportado e intacto (es la pieza con la transacción y el stock atómico).
+- **Se cachea la promesa en vuelo, no el resultado.** El doble clic real llega *antes* de que el
+  primer request termine; guardando solo el resultado, los dos arrancarían su propio checkout. El
+  `get`/`set` del mapa no tiene `await` en medio, así que dos requests concurrentes no pueden
+  reclamar la misma clave.
+- **Reusar una `Idempotency-Key` con otro carrito → `409`** (no se devuelve el pedido anterior ni se
+  crea uno nuevo). Es un bug del cliente, y las dos alternativas son peores: devolverle un pedido que
+  no armó, o cobrarle dos veces. La huella del carrito viaja junto a la promesa para poder detectarlo.
+- **Un intento fallido libera la clave, pero solo si no alcanzó a escribir.** Los errores comunes
+  (`409` sin stock, `503` de cotización, `400` de validación) ocurren antes de persistir y el
+  comprador tiene que poder corregir y reintentar en el acto, no esperar 60 s. Si en cambio falla
+  *después* de que `createOrder` commiteó (Stripe caído), la clave **se conserva**: la orden y su
+  stock descontado ya existen, y liberarla convertiría el reintento —el más probable de todos, porque
+  el comprador acaba de ver un error— exactamente en el pedido duplicado con stock apartado 30–40 min
+  que esta fase existe para evitar. `executeCheckout` marca un flag `persisted` justo después del
+  commit y el manejador de error decide con él; un reenvío en esa ventana recibe el mismo error, no un
+  segundo pedido.
+- **La liberación va con chequeo de identidad** (`IdempotencyStore.deleteIf`, no `delete`): un intento
+  puede tardar más que el TTL (el timeout por defecto del SDK de Stripe son 80 s contra una ventana de
+  60 s), y para cuando falla su entrada ya expiró y otra petición reclamó la clave. Un `delete` a
+  ciegas borraría **esa** entrada nueva.
+- **El reenvío se marca con `Idempotency-Replayed: true`.** El cuerpo de la respuesta repetida es
+  idéntico al del original a propósito, así que sin el header el cliente no puede distinguir "se creó
+  tu pedido" de "este ya lo tenías" — relevante mientras el front no mande `Idempotency-Key` y la
+  dedup dependa de la huella. Va en `exposedHeaders` del CORS de `app.ts`, o el navegador no dejaría
+  leerlo.
+- **Corolario en `pendingOrderSweeper`:** conservar la clave deja la orden viva, pero esa orden quedó
+  `pending` **sin** `paymentIntentId` (Stripe fue justo lo que falló) y el barrido filtraba
+  `paymentIntentId != null`, así que su stock no lo liberaba nadie — para siempre. Se quitó el filtro:
+  una orden sin PaymentIntent salta la consulta a Stripe (no hay nada que reconciliar) y va directo a
+  `releaseOrderStock`. Reponer es seguro porque el `clientSecret` nunca llegó al cliente, así que ese
+  pedido no puede pagarse; y si Stripe alcanzó a crear el intent pero se perdió la respuesta, ese
+  intent queda sin confirmar y expira solo. Tests en `tests/integration/pendingOrderSweeper.test.ts`
+  (4 casos, con `sweepOnce` exportada porque el timer no corre bajo `NODE_ENV=test`).
+- La huella normaliza el carrito igual que `createOrder` (renglones agregados por `(productId, size)`
+  y ordenados), así que el mismo carrito con los renglones en otro orden se reconoce como el mismo
+  pedido. Los datos del cliente entran como **arreglo posicional**, no como objeto, para no depender
+  del orden de claves que produzca zod.
+- Efecto colateral en un test existente: `checkout.test.ts` probaba la carrera por la última pieza con
+  el **mismo** body dos veces, que ahora es un doble clic y se deduplica. Se cambió a dos compradores
+  distintos, que es lo que esa prueba siempre quiso decir.
+- Tests: `tests/unit/utils/idempotency.test.ts` (10 casos del helper, con timers falsos para el TTL) y
+  `tests/integration/checkoutIdempotency.test.ts` (13 casos, nivel 2 — HTTP contra Postgres real, con
+  `payment.service` mockeado; el contador de llamadas al mock **es** la prueba de que Stripe se llamó
+  una sola vez). Se exporta `resetCheckoutIdempotency()` solo para los tests: el mapa vive en el
+  módulo y sobrevive al `truncateAll` entre casos. Los dos casos de liberación de clave mandan el
+  **mismo** carrito las dos veces (el fallo es "sin stock" y entra mercancía entre un envío y otro):
+  con carritos distintos la huella también sería distinta y el reintento pasaría aunque la clave se
+  hubiera quedado ocupada, o sea que el test no probaría nada.
 
 **Cómo verificar:** disparar dos `POST /api/orders` idénticos con `Promise.all` → una sola orden en
 la BD, un solo PaymentIntent en el dashboard de Stripe test, stock descontado una vez.
@@ -457,7 +513,7 @@ activo — hay que revisarlos **cerca del 1 de octubre**:
 **Bloque O — antes del 1 de octubre**
 
 - [x] **O.1** — `PATCH /api/admin/orders/:id/status` + tracking manual + correo de envío con guard único
-- [ ] **O.2** — Idempotencia en `POST /api/orders` (devuelve el original, no `409`)
+- [x] **O.2** — Idempotencia en `POST /api/orders` (devuelve el original, no `409`)
 - [ ] **O.3** — Reintento de guía Skydropx + liberación del centinela huérfano
 - [ ] **O.4** — `GET /api/orders/lookup/:token` (consulta pública con token opaco)
 - [ ] **O.5** — `GET /health/ready` con chequeo real de BD
