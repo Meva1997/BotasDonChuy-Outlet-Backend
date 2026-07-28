@@ -11,7 +11,11 @@ en [`../CLAUDE.md`](../CLAUDE.md) y [`../README.md`](../README.md)).
 | [`roadmap-testing.md`](roadmap-testing.md) | Expansión ejecutable de la Fase H.1 — las 12 partes de la suite de tests | ✅ Completo |
 | [`roadmap-skydropx.md`](roadmap-skydropx.md) | Integración de envíos en vivo con Skydropx (cotización, guía automática, webhook) | ✅ Completo |
 
+**Roadmap activo:** [`../roadmap-operacion-y-negocio.md`](../roadmap-operacion-y-negocio.md) —
+cierre operativo (bloque O, antes del lanzamiento) y features de negocio (bloque N).
+
 **Pendientes diferidos a futuro** (no bloquean el desarrollo actual — lanzamiento planeado para el
-1 de octubre, revisar cerca de esa fecha):
+1 de octubre, revisar cerca de esa fecha). Ambos se trackean ya en el roadmap activo, sección
+*Pendientes heredados*:
 - Verificar dominio en Resend (manual, fuera de código) — `ROADMAP.md` §Fase 9.
 - Evaluar rate limiting en `GET /api/products`/`GET /api/products/:id` — `roadmap-hardening.md` §Fase H.3.
