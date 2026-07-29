@@ -30,16 +30,52 @@ therefore every rate limiter, sees the real client or the proxy) → registers
 global middleware (`helmet`, `cors` with `CORS_ORIGIN` — a comma-separated list of allowed origins,
 split/trimmed into an array before being passed to `cors()` — JSON and urlencoded body parsers) →
 mounts Swagger UI at `/api/docs` (+ raw spec at `/api/docs.json`) → mounts the routers → exposes
-`GET /health`. Everything with a **process-level side effect** — `connectDB()`,
+`GET /health` and `GET /health/ready` (Fase O.5, see below). Everything with a **process-level side effect** — `connectDB()`,
 `startPendingOrderSweeper()`, `startShipmentRetrySweeper()` (Fase O.3), `app.listen(PORT)` (default `4000`, capturing the returned
 `http.Server` in `server`), and the graceful-shutdown signal wiring — sits **after** `export default
 app` inside `if (process.env.NODE_ENV !== "test")` (Fase H.1, see **Testing**): Supertest imports
 `app` directly in tests and must not open a port, connect to the DB, or start the cron. **Graceful
-shutdown** (Fase H.5): `SIGTERM`/`SIGINT` both call a shared `gracefulShutdown` that (1)
+shutdown** (Fase H.5): `SIGTERM`/`SIGINT` both call a shared `gracefulShutdown` that (0) calls
+`markDraining()` (Fase O.5) so any readiness probe landing during the drain gets an honest `503`
+instead of a `200` that's no longer true — **that window lasts only as long as in-flight requests**,
+since on Node ≥19 `server.close()` also destroys idle keep-alive connections and an idle process
+exits in milliseconds, so the next probe usually sees a connection error rather than the `503`;
+making a load balancer reliably observe it would need an explicit delay between marking drain and
+`server.close()`, deliberately not implemented (it would lengthen every redeploy), (1)
 `stopPendingOrderSweeper()`/`stopShipmentRetrySweeper()` the two crons, (2) `server.close()`s to stop accepting new connections and
 drain in-flight requests, (3) `await sequelize.close()`s the pool — so a redeploy can't cut a
 checkout transaction mid-flight. A flag ignores repeated signals and a 10 s `unref()`ed timeout
 forces `process.exit(1)` if a hung connection stalls `server.close()`.
+
+**Healthchecks** (Fase O.5, `roadmap-operacion-y-negocio.md` — `src/services/readiness.ts`, routes
+inline in `app.ts` right before `errorHandler`): **two separate probes**, and pointing the
+orchestrator at the wrong one is the whole hazard. `GET /health` is **liveness** ("the process is
+alive") and deliberately **still doesn't touch the DB** — if it did, a momentary Postgres blip would
+make the orchestrator **restart** the app (killing in-flight requests, fixing nothing) instead of
+just pulling it out of rotation. `GET /health/ready` is **readiness** ("can it serve?"): it runs
+`sequelize.authenticate()` and answers `200 { status: "ok", database: "up", timestamp }` or `503
+{ status: "unavailable", database, reason, timestamp }`. Four things in `checkReadiness` are load-bearing:
+(1) a **mandatory timeout** (`HEALTH_READY_TIMEOUT_MS`, 3 s, via `positiveNumberEnv`) inside a
+`Promise.race` — `config/database.ts` sets no `connectTimeout`/`statement_timeout` and `pool.acquire`
+is 30 s, so with Postgres down the probe would otherwise hang far past what any orchestrator waits;
+the `setTimeout` is `unref()`ed and **`clearTimeout`ed in a `finally`**, or on the happy path the
+losing timer would reject later with nobody listening (unhandled rejection). (2) A **1 s result cache
+plus in-flight sharing** (same pattern as `loadReportData` in `reports.service.ts`), because this is a
+public unauthenticated route and the pool is 5 connections — without it a script hammering it starves
+real checkouts up to `pool.acquire`; the cache window is counted from when the check **finishes**, not
+when it starts, so a slow (DB-down) check doesn't expire mid-flight and let every request open its own
+query. A dedicated rate limiter was rejected instead: probes come from one internal IP, so a
+mis-calibrated limit would `429` **the probe itself** → false "not ready" → the instance restarts
+itself. (3) A **draining flag** (`markDraining()`, irreversible) checked before anything else, so
+shutdown answers `503 reason: "draining"` without touching the DB. (4) **Transition-only logging and
+no Sentry**: a probe runs forever every few seconds, so one line (or one Sentry event) per failed
+attempt would flood the log provider and eat the quota; only the ready↔not-ready change is logged.
+`checkReadiness` **never throws** (a DB failure is a valid `{ ready: false }`, not a request error) —
+the route must not reach `errorHandler`, which would report a 500 to Sentry per probe and return
+Spanish UI copy for something a machine reads. The `503` body **never** carries the DB error text
+(public route); it goes to the log. `checkReadiness(timeoutMs?)` takes an override only so tests can
+pass a short one, and `resetReadinessCache()` is exported **only for tests** (module state survives
+`truncateAll`, same as `resetCheckoutIdempotency()`).
 
 **Database** (`src/config/database.ts`): a single shared `sequelize` instance built from
 `DATABASE_URL` (postgres dialect, connection pool max 5). `connectDB()` only authenticates —
@@ -1207,7 +1243,8 @@ contention.
   (defaults to the sandbox host), optional `SKYDROPX_CARRIERS` (comma-separated `provider_name`
   slugs to restrict the quotation's `requested_carriers` — see the Skydropx section), optional
   `SHIPMENT_RETRY_DELAY_MINUTES` (15) / `SHIPMENT_RETRY_SWEEP_INTERVAL_MINUTES` (10) — the shipment
-  retry knobs from Fase O.3, see **Reintento de guía**. These two go through
+  retry knobs from Fase O.3, see **Reintento de guía**, and optional `HEALTH_READY_TIMEOUT_MS`
+  (3000) — the DB-check budget of `GET /health/ready` (Fase O.5, see **Healthchecks**). These go through
   `positiveNumberEnv` (`src/utils/env.ts`) instead of a bare `Number(process.env.X ?? default)`:
   `??` only falls back on `undefined`, so a blank line in `.env` parses as `0` and a typo as `NaN`,
   and here a `0` retry margin means a sentinel claimed milliseconds ago counts as orphaned — a

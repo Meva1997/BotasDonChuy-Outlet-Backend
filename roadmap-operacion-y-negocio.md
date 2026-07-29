@@ -36,7 +36,7 @@ orden se queda en `paid` para siempre, sin correo de "va en camino" y sin forma 
 | Reintentar una guía de Skydropx fallida | ✅ **Fase O.3** (`POST /api/admin/orders/:id/shipment/retry` + barrido automático) | — (falta cablear el botón en el panel: Fase 16 del roadmap del frontend) |
 | Idempotencia en `POST /api/orders` | ✅ **Fase O.2** (ventana de 60 s + header `Idempotency-Key`) | — (opcional: mandar el header desde `usePlaceOrder.ts`, Fase 15 del roadmap del frontend) |
 | Consulta de pedido por el cliente | ✅ **Fase O.4** (`GET /api/orders/lookup/:token`) | — (falta la página de seguimiento en el front: Fase 17 del roadmap del frontend) |
-| Readiness real en `/health` | ❌ superficial | El healthcheck pasa en verde con Postgres caído |
+| Readiness real en `/health` | ✅ **Fase O.5** (`GET /health/ready`) | — (falta apuntar el probe del orquestador a la ruta nueva al desplegar) |
 | Búsqueda/orden en el catálogo | ❌ solo `categoria`/`talla` | Con el catálogo creciendo por import masivo, el cliente no encuentra lo que busca |
 | Cupones / códigos de descuento | ❌ ausente | Sin la palanca de marketing más barata que existe |
 | Gastos reales (vs. `GASTOS_FIJOS` hardcodeado) | ❌ constante de `$2,000` | El KPI de utilidad del dashboard es ficción |
@@ -461,7 +461,7 @@ cambiar un carácter del token → `404` sin filtrar si la orden existe.
 
 ---
 
-### Fase O.5 — Readiness real en el healthcheck
+### Fase O.5 — Readiness real en el healthcheck ✅
 
 **Objetivo:** que el healthcheck falle cuando la app no puede atender tráfico.
 
@@ -476,12 +476,66 @@ que el orquestador **reinicie** la app en vez de solo sacarla de rotación, que 
 contrario de lo que conviene.
 
 **Tareas:**
-- [ ] `GET /health/ready` con `sequelize.authenticate()` + timeout corto → `200`/`503`.
-- [ ] Documentar en `README.md` cuál probe apunta a cuál en el deploy.
-- [ ] Test de smoke (con la BD de test arriba, `/health/ready` responde `200`).
+- [x] `GET /health/ready` con `sequelize.authenticate()` + timeout corto → `200`/`503`.
+- [x] Documentar en `README.md` cuál probe apunta a cuál en el deploy.
+- [x] Test de smoke (con la BD de test arriba, `/health/ready` responde `200`).
+
+**Cómo quedó (decisiones que el diseño de arriba no fijaba):**
+- **El timeout no es una precaución, es lo único que hace útil al endpoint.** `config/database.ts`
+  no fija `connectTimeout` ni `statement_timeout`, y `pool.acquire` son 30 s: con Postgres caído,
+  un `sequelize.authenticate()` a secas se cuelga mucho más de lo que el orquestador espera por su
+  sondeo, así que el probe expiraría por su lado sin que la ruta llegue a contestar nunca. Va en un
+  `Promise.race` contra un `setTimeout` de `HEALTH_READY_TIMEOUT_MS` (**3000**, leído con
+  `positiveNumberEnv` como manda la regla de la Fase O.3). Detalle que muerde: el timer hay que
+  **limpiarlo en un `finally`**, o en el camino feliz se rechaza más tarde sin nadie escuchando y
+  sale como unhandled rejection. **3 s y no 500 ms** a propósito: un pico de tráfico que sature
+  momentáneamente el pool no debe sacar la instancia de rotación — eso solo cascadea la caída.
+- **Caché de 1 s + promesa compartida** (`src/services/readiness.ts`), que el diseño no pedía. Es
+  una ruta **pública y sin auth** contra un pool de **5 conexiones**: una query por request deja
+  que un script la martille y haga esperar a los checkouts hasta `pool.acquire` (30 s). Mismo
+  patrón que `loadReportData` en `reports.service.ts`. La ventana se cuenta desde que el chequeo
+  **termina**, no desde que arranca: midiéndola desde el arranque, un chequeo lento (justo el caso
+  de BD caída) nace vencido y cada request abre su propia consulta. Se descartó un rate limiter
+  propio, que era la opción obvia: el sondeo sale de una sola IP interna, así que un límite mal
+  calibrado le devolvería `429` **al probe** → falso "no listo" → la instancia se reinicia sola.
+- **Bandera de drenado.** `gracefulShutdown` llama a `markDraining()` como primera línea y desde
+  ese instante `/health/ready` responde `503` con `reason: "draining"` **sin consultar la BD**: es
+  el otro caso de "no puede atender" que el objetivo de la fase nombra y que el diseño no cubría —
+  mientras el proceso drena, un `200` es mentira aunque Postgres esté perfecto.
+  **Su alcance real es menor de lo que sugiere el patrón, y conviene tenerlo claro** (medido, no
+  supuesto): en Node ≥ 19 `server.close()` cierra de inmediato las conexiones keep-alive ociosas y,
+  sin requests en vuelo, el proceso sale en milisegundos, así que el sondeo siguiente recibe un
+  error de conexión y no el `503`. O sea que la ventana dura lo que dure el tráfico que se está
+  drenando. Que un balanceador la vea siempre exigiría un **retardo explícito** entre marcar el
+  drenado y `server.close()` — no se implementó porque alargaría cada redeploy y esa es una
+  decisión de despliegue, no de código. Queda como candidato si algún día el deploy real muestra
+  errores de conexión durante los redeploys.
+- **El cuerpo del `503` no lleva el error de la BD**, solo `reason`. Es una ruta pública: el host,
+  el puerto y el driver van al log. Y el log es **solo por transición** (ready↔no-ready), no por
+  sondeo — un probe corre para siempre cada pocos segundos y una línea por intento llena (y cobra)
+  el proveedor de logs. Por lo mismo **no hay `Sentry.captureException`** aquí: un evento cada 5 s
+  se come la cuota, y quien reporta la caída al final es el orquestador.
+- **`checkReadiness` nunca lanza**, y el handler además lo envuelve en `try/catch`. Si el error
+  llegara a `errorHandler`, cada sondeo con la BD caída mandaría un **500 a Sentry** y devolvería
+  copia de UI en español para algo que lee una máquina.
+- **`/health` no se tocó ni una línea**, que es la mitad del punto: es el liveness, y si dependiera
+  de Postgres el orquestador **reiniciaría** la app ante una caída momentánea en vez de solo
+  sacarla de rotación. La suite lo afirma explícitamente (espía `authenticate` y verifica que no se
+  llame), para que un refactor que "unifique" los dos handlers rompa el test.
+- **El test de smoke no vive en `tests/smoke/`.** Ese suite corre a propósito **sin Postgres** (su
+  comentario lo dice), así que un assert de `/health/ready` a `200` rompería esa garantía. Quedó en
+  `tests/integration/healthReady.test.ts` (4 casos, nivel 2) más
+  `tests/unit/services/readiness.test.ts` (8 casos, nivel 1 — con `authenticate` espiado se puede
+  simular lo que en producción no se provoca a voluntad: la BD **colgada sin responder**, que es el
+  caso que motiva el timeout). `resetReadinessCache()` se exporta solo para los tests, igual que
+  `resetCheckoutIdempotency()`.
+- Sin migración, sin columnas y sin dependencias nuevas. **No lleva fase en el roadmap del
+  frontend**: lo consume el orquestador, no el front.
 
 **Cómo verificar:** bajar Postgres con el server corriendo → `/health` sigue `200`, `/health/ready`
-responde `503`.
+responde `503` (en ~3 s, no en 30). Al volver a levantarlo, `/health/ready` vuelve a `200` en ≤1 s
+(TTL de la caché). Con `kill -TERM` al proceso, `/health/ready` responde `503 reason: "draining"` de
+inmediato, sin esperar el timeout.
 
 ---
 
@@ -675,7 +729,7 @@ activo — hay que revisarlos **cerca del 1 de octubre**:
 - [x] **O.2** — Idempotencia en `POST /api/orders` (devuelve el original, no `409`)
 - [x] **O.3** — Reintento de guía Skydropx + liberación del centinela huérfano
 - [x] **O.4** — `GET /api/orders/lookup/:token` (consulta pública con token opaco)
-- [ ] **O.5** — `GET /health/ready` con chequeo real de BD
+- [x] **O.5** — `GET /health/ready` con chequeo real de BD
 
 **Bloque N — features de negocio**
 

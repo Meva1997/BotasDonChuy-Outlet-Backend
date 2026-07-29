@@ -25,6 +25,7 @@ import accountRoutes from "./routes/account.routes";
 import shippingRoutes from "./routes/shipping.routes";
 import { errorHandler } from "./middlewares/errorHandler";
 import { trustProxyEnv } from "./utils/env";
+import { checkReadiness, markDraining } from "./services/readiness";
 import {
   startPendingOrderSweeper,
   stopPendingOrderSweeper,
@@ -120,9 +121,84 @@ app.use("/api/shipping", shippingRoutes); // cotización en vivo, pública
  *                   type: string
  *                   format: date-time
  */
-// Verification route
+// Verification route (liveness: "el proceso vive"). NO toca la BD a propósito — ver /health/ready.
 app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
+/**
+ * @openapi
+ * /health/ready:
+ *   get:
+ *     summary: Readiness del servicio (¿puede atender tráfico?)
+ *     description: >
+ *       A diferencia de `/health` (liveness), consulta la base de datos bajo un timeout corto.
+ *       Apunta aquí el *readiness probe* del orquestador: un `503` saca la instancia de rotación
+ *       sin reiniciarla. También responde `503` mientras el proceso está apagándose.
+ *     tags: [Health]
+ *     responses:
+ *       200:
+ *         description: El servicio puede atender tráfico.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   example: ok
+ *                 database:
+ *                   type: string
+ *                   example: up
+ *                 timestamp:
+ *                   type: string
+ *                   format: date-time
+ *       503:
+ *         description: El servicio no puede atender tráfico (base de datos caída o apagado en curso).
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   example: unavailable
+ *                 database:
+ *                   type: string
+ *                   example: down
+ *                 reason:
+ *                   type: string
+ *                   enum: [database, draining]
+ *                 timestamp:
+ *                   type: string
+ *                   format: date-time
+ */
+// Readiness (Fase O.5). El handler no deja escapar ningún error: si pasara por `errorHandler`,
+// cada sondeo con la BD caída mandaría un 500 a Sentry y devolvería copia de UI en español para
+// algo que lee una máquina. El detalle del fallo va al log, nunca al cuerpo: es una ruta pública.
+app.get("/health/ready", async (req, res) => {
+  const timestamp = new Date().toISOString();
+
+  // `checkReadiness` está escrita para no lanzar nunca; el try/catch sostiene esa garantía
+  // desde este lado, para que la ruta no pueda degradarse a un 500 si eso cambiara.
+  try {
+    const { ready, reason } = await checkReadiness();
+
+    if (ready) {
+      res.json({ status: "ok", database: "up", timestamp });
+      return;
+    }
+
+    res.status(503).json({
+      status: "unavailable",
+      database: reason === "database" ? "down" : "up",
+      reason,
+      timestamp,
+    });
+  } catch (err) {
+    logger.error({ err }, "Readiness: el chequeo falló de forma inesperada");
+    res.status(503).json({ status: "unavailable", database: "down", timestamp });
+  }
 });
 
 app.use(errorHandler);
@@ -143,6 +219,8 @@ if (process.env.NODE_ENV !== "test") {
   /**
    * Apagado ordenado (Fase H.5). Un redeploy envía `SIGTERM` (o `SIGINT` con Ctrl+C
    * en dev): en vez de morir de golpe a media transacción, se cierra en orden —
+   *   0. poner el readiness en rojo (Fase O.5) para que el balanceador deje de mandar
+   *      tráfico nuevo a esta instancia mientras drena,
    *   1. detener los sweepers (dejan de abrir trabajo nuevo),
    *   2. `server.close()` deja de aceptar conexiones y espera las requests en vuelo,
    *   3. cerrar el pool de Sequelize.
@@ -152,6 +230,7 @@ if (process.env.NODE_ENV !== "test") {
   const gracefulShutdown = async (signal: string): Promise<void> => {
     if (isShuttingDown) return; // ignora señales repetidas
     isShuttingDown = true;
+    markDraining(); // `GET /health/ready` responde 503 desde este instante, sin tocar la BD
     logger.info({ signal }, "Apagado ordenado iniciado");
 
     // Red de seguridad: si el cierre se atora (una conexión colgada que impide que

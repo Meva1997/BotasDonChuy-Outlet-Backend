@@ -86,6 +86,9 @@ ALERT_EMAIL_TO=tu_correo@ejemplo.com     # opcional: destino de las alertas oper
 
 # Despliegue detrás de un proxy — opcional, pero necesaria si hay uno (ver nota abajo)
 TRUST_PROXY=1                            # saltos de proxy en los que confiar (1 = lo típico en un PaaS)
+
+# Healthcheck (Fase O.5) — opcional
+HEALTH_READY_TIMEOUT_MS=3000             # margen del chequeo de BD en /health/ready (default 3000)
 ```
 
 > **`TRUST_PROXY` cuando la API va detrás de un proxy** (Render, Railway, Fly, nginx,
@@ -150,7 +153,8 @@ pnpm migrate:status   # verifica qué quedó aplicado
 
 | Método   | Ruta                          | Auth | Descripción                                        |
 | -------- | ----------------------------- | ---- | -------------------------------------------------- |
-| `GET`    | `/health`                     | —    | Healthcheck (status + timestamp)                   |
+| `GET`    | `/health`                     | —    | Liveness: el proceso vive (status + timestamp, no toca la BD) |
+| `GET`    | `/health/ready`               | —    | Readiness: ¿puede atender? Consulta la BD → `200`/`503` |
 | `GET`    | `/api/products`               | —    | Lista productos visibles (paginados y filtrables)  |
 | `GET`    | `/api/products/:id`           | —    | Devuelve un producto visible por `id`              |
 | `POST`   | `/api/auth/login`             | —    | Login con email/password; devuelve JWT y usuario   |
@@ -186,6 +190,54 @@ pnpm migrate:status   # verifica qué quedó aplicado
 | `PUT`    | `/api/admin/account`          | ✅   | Actualiza el correo y/o la contraseña de la cuenta propia |
 | `POST`   | `/api/webhooks/stripe`        | 🔑   | Webhook de Stripe (firma verificada; lo invoca Stripe, no de uso manual) |
 | `POST`   | `/api/webhooks/skydropx`      | 🔑   | Webhook de estado de envío de Skydropx (firma HMAC verificada; lo invoca Skydropx, no de uso manual) |
+
+### `GET /health` y `GET /health/ready` (probes del despliegue, Fase O.5)
+
+Son **dos probes distintos y el orquestador debe apuntar cada uno al suyo**:
+
+| Probe | Ruta | Qué contesta | Qué hace el orquestador si falla |
+| --- | --- | --- | --- |
+| **Liveness** | `GET /health` | `200 { status, timestamp }`. **No toca la BD.** | **Reinicia** el contenedor |
+| **Readiness** | `GET /health/ready` | `200 { status: "ok", database: "up", timestamp }` · `503 { status: "unavailable", database, reason, timestamp }` | Lo **saca de rotación** (sin reiniciarlo) |
+
+Separarlos no es cosmético: si el liveness dependiera de Postgres, una caída momentánea de la BD
+haría que el orquestador **reinicie la app** —que no arregla nada y encima tira las requests en
+vuelo— en vez de solo dejar de mandarle tráfico. Por eso `/health` se quedó exactamente como
+estaba y el chequeo real vive en la ruta nueva.
+
+`/health/ready` hace `sequelize.authenticate()` bajo un timeout de `HEALTH_READY_TIMEOUT_MS`
+(3 s por defecto). El timeout es imprescindible: `src/config/database.ts` no fija
+`connectTimeout` ni `statement_timeout` y `pool.acquire` son 30 s, así que con Postgres caído la
+consulta podría colgarse mucho más de lo que el probe espera. El resultado se cachea **1 s** y las
+consultas concurrentes comparten la que está en vuelo (`src/services/readiness.ts`), para que un
+script que martille esta ruta pública no se coma las 5 conexiones del pool y deje esperando a los
+checkouts. Un `503` **nunca** incluye el error de la BD en el cuerpo (ruta pública sin auth): el
+detalle va al log, y solo en los **cambios** de estado, para no llenar el proveedor de logs con una
+línea por sondeo.
+
+Durante el apagado ordenado, `/health/ready` responde `503` con `reason: "draining"` desde el
+instante en que llega la señal — ver [Apagado ordenado](#apagado-ordenado-graceful-shutdown).
+
+> **Hasta dónde llega el `reason: "draining"`.** Garantiza que un sondeo que **alcance a llegar**
+> durante el drenado reciba un `503` honesto en vez de un `200` mentiroso, pero esa ventana dura lo
+> que duren las requests en vuelo: en Node ≥ 19 `server.close()` cierra de inmediato las conexiones
+> keep-alive ociosas y, sin nada que drenar, el proceso sale en milisegundos, así que el sondeo
+> siguiente recibe un error de conexión (no el `503`). Para que un balanceador alcance a verlo haría
+> falta un retardo explícito entre marcar el drenado y `server.close()`, que **no** está
+> implementado porque alargaría cada redeploy. En la práctica el balanceador se entera por el error
+> de conexión, que es igual de concluyente; el `503` cubre el caso en que sí hay tráfico drenando.
+
+Ejemplo de configuración (Kubernetes; en Render/Railway/Fly el healthcheck configurable es el
+readiness):
+
+```yaml
+livenessProbe:
+  httpGet: { path: /health, port: 4000 }
+readinessProbe:
+  httpGet: { path: /health/ready, port: 4000 }
+  periodSeconds: 10
+  timeoutSeconds: 5   # holgado respecto a HEALTH_READY_TIMEOUT_MS
+```
 
 ### `GET /api/products`
 
@@ -672,7 +724,11 @@ intento y manda una sola al agotar los 3.
 
 ## Apagado ordenado (graceful shutdown)
 
-`SIGTERM`/`SIGINT` disparan un `gracefulShutdown` compartido en `src/app.ts` que: (1) detiene los dos
+`SIGTERM`/`SIGINT` disparan un `gracefulShutdown` compartido en `src/app.ts` que: (0) pone el
+readiness en rojo (`markDraining()`, Fase O.5) — a partir de ahí `GET /health/ready` responde `503`
+con `reason: "draining"` sin consultar la BD, así ningún sondeo que llegue mientras se drena recibe
+un `200` que ya no es cierto (ver el [alcance real](#get-health-y-get-healthready-probes-del-despliegue-fase-o5)
+de esa ventana); (1) detiene los dos
 barridos —`pendingOrderSweeper` y `shipmentRetrySweeper`— (dejan de abrir trabajo nuevo), (2) `server.close()` — deja de aceptar
 conexiones nuevas y espera a que terminen las que están en vuelo, (3) cierra el pool de Sequelize.
 Así un redeploy no corta una transacción de checkout a medias. Señales repetidas se ignoran, y un
@@ -726,7 +782,7 @@ Suite automatizada con **Jest + ts-jest + supertest** (Fase H.1 — ver
 [`roadmaps-completados/roadmap-testing.md`](roadmaps-completados/roadmap-testing.md) para el desglose por partes; las **12 partes** — infra,
 BD de test, servicios puros, auth, checkout, idempotencia de webhooks, cancelación/reembolso manual,
 envío en vivo, cliente Skydropx, CRUD admin de productos/imágenes, marca/usuarios admin y
-agregaciones de dashboard/reports — están **completas**: 28 suites / 285 tests en verde, y cada
+agregaciones de dashboard/reports — están **completas**: 30 suites / 297 tests en verde, y cada
 fase nueva suma la suya). Los tests
 viven en `tests/` (fuera de `src/`, para que `tsc` no los incluya en el build de producción);
 `ts-jest` los transpila en memoria.
@@ -738,10 +794,11 @@ pnpm test <patrón>      # una parte (p. ej. pnpm test auth)
 ```
 
 **Tres niveles de prueba:** (1) *unit puro* sin BD (`cart`, `forecast`, `formatMoney`, `date`,
-`skydropx` con `fetch` mockeado, `dashboard`/`reports`, `sentry`, `errorHandler`, `idempotency`);
+`skydropx` con `fetch` mockeado, `dashboard`/`reports`, `sentry`, `errorHandler`, `idempotency`,
+`readiness`);
 (2) *integración HTTP* con `request(app)...` contra un Postgres de test real (`auth`,
 `checkout`, `checkoutIdempotency`, `adminOrderStatus`, `products`, `shippingRates`, `adminProducts`,
-`adminProductImport`, `adminBrandUsers`); (3)
+`adminProductImport`, `adminBrandUsers`, `healthReady`); (3)
 *servicio + SDK mockeado* para
 concurrencia/idempotencia (`webhooks`, `cancelOrder`). **Stripe,
 Skydropx y Resend van SIEMPRE mockeados** (cuestan dinero o mandan correos reales); la **BD no se
@@ -789,7 +846,7 @@ tests/                           # Suite automatizada (fuera de src/ — tsc la 
 ├── unit/                        # nivel 1 — servicios/utils/config/middlewares puros, sin BD
 └── integration/                 # niveles 2/3 — Postgres de test (auth, checkout, checkoutIdempotency,
                                   # products, webhooks, cancelOrder, adminOrderStatus, shippingRates,
-                                  # adminProducts, adminProductImport, adminBrandUsers)
+                                  # adminProducts, adminProductImport, adminBrandUsers, healthReady)
 src/
 ├── app.ts                       # Punto de entrada: Express, middleware, arranque y apagado ordenado
 ├── seed.ts                      # Script de seed (productos, histórico, admin, marca)
@@ -850,6 +907,7 @@ src/
 │   ├── skydropx.service.ts        # Cliente REST de Skydropx (OAuth2, throttle 2 req/s, cotización, guía, poll)
 │   ├── packing.ts                 # buildParcel: arma una sola caja apilada por pedido
 │   ├── productAvailability.ts     # assertProductAvailable: guardia compartida checkout/cotización
+│   ├── readiness.ts               # Readiness de GET /health/ready: chequeo de BD con timeout, caché 1s y flag de drenado
 │   ├── alert.service.ts           # sendAlertEmail: avisos operativos (guía fallida o irreintentable, sweepers con fallas repetidas)
 │   ├── image.service.ts           # Cloudinary: sube buffer (upload_stream) y borra asset (destroy)
 │   ├── productImport.service.ts   # Importación/restock masivo: parsea el .xlsx, previsualiza y aplica
