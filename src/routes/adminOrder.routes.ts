@@ -3,6 +3,7 @@ import {
   adminGetOrders,
   adminCancelOrder,
   adminUpdateOrderStatus,
+  adminRetryShipment,
 } from "../controllers/order.controller";
 import { requireAuth } from "../middlewares/requireAuth";
 
@@ -163,5 +164,92 @@ router.post("/:id/cancel", adminCancelOrder);
  *               $ref: '#/components/schemas/Error'
  */
 router.patch("/:id/status", adminUpdateOrderStatus);
+
+/**
+ * @openapi
+ * /api/admin/orders/{id}/shipment/retry:
+ *   post:
+ *     summary: Reintenta generar la guía de Skydropx de un pedido pagado que se quedó sin ella
+ *     description: >
+ *       La guía se genera automáticamente al confirmarse el pago; si esa llamada falla
+ *       (Skydropx caído, saldo agotado) el pedido queda pagado y sin guía, y hasta ahora no
+ *       había forma de reintentarlo. Esta ruta lo reintenta y, si el proceso murió a media
+ *       creación dejando el valor centinela `creating` en `skydropxShipmentId`, lo libera por
+ *       antigüedad antes de reclamarlo de nuevo — sin eso ese pedido no podría volver a generar
+ *       guía nunca. Un barrido automático hace lo mismo cada pocos minutos; esta ruta es para
+ *       no esperarlo.
+ *       **Cada guía se cobra**, así que ante la duda no se genera una segunda: responde `409`
+ *       si el pedido ya tiene guía, si tiene una que Skydropx cobró pero no se pudo guardar (el
+ *       mensaje incluye su id para buscarla en el panel de Skydropx), si otra solicitud la está
+ *       generando en este momento, si el pedido no está pagado, está cancelado o ya se marcó como
+ *       enviado/entregado, o si se cobró con la tarifa plana de respaldo (no hay tarifa de
+ *       Skydropx que convertir en guía — genérala en su panel y captura el número al marcar el
+ *       pedido como enviado).
+ *       A diferencia del camino automático, aquí se espera el resultado: un fallo de Skydropx
+ *       responde `502`.
+ *       Caso especial: si Skydropx **no respondió** al crear la guía (timeout o corte de
+ *       conexión), pudo haberla creado y cobrado sin que quedara registrada; el pedido se marca
+ *       como no conciliado y este endpoint responde `409` pidiendo verificar en el panel de
+ *       Skydropx. Una vez confirmado que no existe ninguna guía, se reintenta con
+ *       `{ "force": true }` en el body para generarla de todos modos. `force` **solo** aplica a
+ *       ese caso: nunca desbloquea un pedido con una guía de id conocido.
+ *     tags: [Admin - Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer, minimum: 1 }
+ *         description: id del pedido cuya guía se quiere generar.
+ *     requestBody:
+ *       required: false
+ *       description: >
+ *         Opcional. El reintento normal no lleva body.
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               force:
+ *                 type: boolean
+ *                 description: >
+ *                   Confirma que ya se revisó el panel de Skydropx y NO existe ninguna guía de
+ *                   este pedido. Solo desbloquea el caso en que Skydropx no respondió al crearla.
+ *             example: { force: true }
+ *     responses:
+ *       200:
+ *         description: Guía generada; el pedido vuelve con su `skydropxShipmentId` y sus items.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 order:
+ *                   $ref: '#/components/schemas/Order'
+ *       400:
+ *         $ref: '#/components/responses/ValidationError'
+ *       401:
+ *         $ref: '#/components/responses/Unauthorized'
+ *       404:
+ *         $ref: '#/components/responses/NotFound'
+ *       409:
+ *         description: >
+ *           El pedido ya tiene guía (real o cobrada sin guardar), se está generando ahora
+ *           mismo, no está pagado, está cancelado, ya se marcó como enviado/entregado, usó la
+ *           tarifa plana de respaldo, o quedó sin conciliar porque Skydropx no respondió (se
+ *           desbloquea con `force: true` tras verificar en su panel).
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       502:
+ *         description: Skydropx no pudo generar la guía; el pedido sigue sin ella.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.post("/:id/shipment/retry", adminRetryShipment);
 
 export default router;

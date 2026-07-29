@@ -44,6 +44,13 @@ export interface OrderAttributes {
   // de `POST /shipments` no los incluye (confirmado contra sandbox real). `shipmentStatus` es el
   // último estado que reporte ese mismo webhook (`in_transit`, `delivered`, etc.).
   skydropxShipmentId: string | null;
+  // Momento en que se reclamó el centinela de creación de guía (Fase O.3). Es el reloj con el
+  // que se decide si un `"creating"` quedó HUÉRFANO (el proceso murió antes de llamar a
+  // Skydropx) y puede liberarse. Columna propia y no `updatedAt` a propósito: `updatedAt` lo
+  // bumpea cualquier otra escritura sobre el pedido (webhook de envío, avance manual de estado,
+  // marcado de pago), así que un pedido realmente atorado en `"creating"` reiniciaba su reloj
+  // cada vez que el dueño lo tocaba desde el panel y nunca podía liberarse.
+  shipmentClaimedAt: Date | null;
   trackingNumber: string | null;
   trackingUrl: string | null;
   labelUrl: string | null;
@@ -67,6 +74,7 @@ interface OrderCreationAttributes extends Optional<
   | "skydropxRateId"
   | "shippingRequiresDropoff"
   | "skydropxShipmentId"
+  | "shipmentClaimedAt"
   | "trackingNumber"
   | "trackingUrl"
   | "labelUrl"
@@ -101,6 +109,7 @@ export class Order
   declare skydropxRateId: string | null;
   declare shippingRequiresDropoff: boolean | null;
   declare skydropxShipmentId: string | null;
+  declare shipmentClaimedAt: Date | null;
   declare trackingNumber: string | null;
   declare trackingUrl: string | null;
   declare labelUrl: string | null;
@@ -229,6 +238,11 @@ Order.init(
     },
     skydropxShipmentId: {
       type: DataTypes.STRING,
+      allowNull: true,
+      defaultValue: null,
+    },
+    shipmentClaimedAt: {
+      type: DataTypes.DATE,
       allowNull: true,
       defaultValue: null,
     },

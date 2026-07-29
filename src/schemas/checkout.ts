@@ -153,3 +153,13 @@ export const orderStatusUpdateSchema = z.object({
 });
 
 export type OrderStatusUpdateInput = z.infer<typeof orderStatusUpdateSchema>;
+
+// Reintento manual de la guía de Skydropx (Fase O.3). El body es opcional por completo: el caso
+// normal no lleva nada. `force` solo desbloquea un escenario —Skydropx no respondió al crear la
+// guía, así que pudo haberla creado y cobrado— y significa "ya revisé el panel de Skydropx y no
+// existe ninguna guía de este pedido". Nunca fuerza sobre una guía de id conocido: esa existe.
+export const retryShipmentSchema = z.object({
+  force: z.boolean("La confirmación debe ser verdadero o falso").optional(),
+});
+
+export type RetryShipmentInput = z.infer<typeof retryShipmentSchema>;

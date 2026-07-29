@@ -28,6 +28,10 @@ import {
   startPendingOrderSweeper,
   stopPendingOrderSweeper,
 } from "./services/pendingOrderSweeper";
+import {
+  startShipmentRetrySweeper,
+  stopShipmentRetrySweeper,
+} from "./services/shipmentRetrySweeper";
 import "./models/Product"; // register the model so sync() creates its table
 import "./models/ProductSize";
 import "./models/AdminUser";
@@ -120,6 +124,7 @@ app.use(errorHandler);
 if (process.env.NODE_ENV !== "test") {
   connectDB();
   startPendingOrderSweeper(); // libera stock de órdenes pending abandonadas (Stripe)
+  startShipmentRetrySweeper(); // reintenta la guía de pedidos pagados que se quedaron sin ella
 
   const server = app.listen(PORT, () => {
     logger.info(`Server running at http://localhost:${PORT}`);
@@ -128,7 +133,7 @@ if (process.env.NODE_ENV !== "test") {
   /**
    * Apagado ordenado (Fase H.5). Un redeploy envía `SIGTERM` (o `SIGINT` con Ctrl+C
    * en dev): en vez de morir de golpe a media transacción, se cierra en orden —
-   *   1. detener el sweeper (deja de abrir trabajo nuevo),
+   *   1. detener los sweepers (dejan de abrir trabajo nuevo),
    *   2. `server.close()` deja de aceptar conexiones y espera las requests en vuelo,
    *   3. cerrar el pool de Sequelize.
    * Un guard de timeout fuerza la salida si algo cuelga, para no dejar el proceso zombie.
@@ -150,7 +155,8 @@ if (process.env.NODE_ENV !== "test") {
 
     try {
       stopPendingOrderSweeper();
-      logger.info("Sweeper de pendientes detenido");
+      stopShipmentRetrySweeper();
+      logger.info("Sweepers de pendientes y de guías detenidos");
 
       await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));

@@ -68,6 +68,8 @@ SKYDROPX_CLIENT_SECRET=...
 SKYDROPX_WEBHOOK_SECRET=...             # secreto HMAC del webhook de estado de envío (Fase 8.6); el server no arranca sin él
 SKYDROPX_BASE_URL=https://sb-pro.skydropx.com   # opcional (default: sandbox; producción es pro.skydropx.com)
 SKYDROPX_CARRIERS=dhl,paquetexpress    # opcional: slugs provider_name separados por coma, restringe qué paqueterías cotizar
+SHIPMENT_RETRY_DELAY_MINUTES=15         # opcional: espera antes de reintentar una guía (y antigüedad de un centinela huérfano)
+SHIPMENT_RETRY_SWEEP_INTERVAL_MINUTES=10 # opcional: cada cuánto corre el barrido de guías pendientes
 SHIP_FROM_POSTAL_CODE=38000
 SHIP_FROM_STATE=Guanajuato
 SHIP_FROM_CITY=Celaya
@@ -156,6 +158,7 @@ pnpm migrate:status   # verifica qué quedó aplicado
 | `GET`    | `/api/admin/orders`           | ✅   | Lista paginada de pedidos con sus items (incl. `unitCost`) |
 | `POST`   | `/api/admin/orders/:id/cancel` | ✅  | Cancela manualmente un pedido `pending`/`paid` (reembolso real vía Stripe si ya estaba pagado) |
 | `PATCH`  | `/api/admin/orders/:id/status` | ✅  | Marca un pedido como `shipped`/`delivered` a mano, con guía capturada (solo hacia adelante) |
+| `POST`   | `/api/admin/orders/:id/shipment/retry` | ✅ | Reintenta generar la guía de Skydropx de un pedido pagado que se quedó sin ella |
 | `GET`    | `/api/admin/reports/monthly`  | ✅   | Ventas por mes por producto (`MonthlyReport[]`; mes en curso con `partial`) |
 | `GET`    | `/api/admin/reports/replenishment` | ✅ | Reposición sugerida (`ReplenishmentRow[]`; pronóstico + cobertura + margen) |
 | `GET`    | `/api/admin/brand`            | —    | Identidad de marca (lectura pública, crea el singleton con defaults si falta) |
@@ -439,6 +442,34 @@ en Skydropx: `tracking_number`/`label_url` no llegan en la respuesta, así que
 `trackingNumber`/`trackingUrl`/`labelUrl` quedan en `null` hasta que el webhook de Skydropx
 (Fase 8.6) los reporte — ver `roadmaps-completados/roadmap-skydropx.md` para el detalle completo.
 
+**Reintento de guía (Fase O.3):** si esa única llamada falla (Skydropx caído, saldo agotado, o el
+proceso muere a media creación), el pedido queda pagado y sin guía y **ningún webhook va a llegar por
+una guía que nunca se creó**. `POST /api/admin/orders/:id/shipment/retry` `[auth]` lo reintenta desde
+el panel, y `src/services/shipmentRetrySweeper.ts` hace lo mismo solo cada
+`SHIPMENT_RETRY_SWEEP_INTERVAL_MINUTES` sobre los pedidos `paid` con tarifa de Skydropx que siguen sin
+guía pasados `SHIPMENT_RETRY_DELAY_MINUTES` (hasta 3 intentos por pedido, con una sola alerta por
+correo al agotarlos). Ese mismo margen sirve para **liberar el centinela huérfano**: el valor
+`"creating"` que quedaría bloqueando al pedido para siempre si el proceso muriera entre reclamarlo y
+llamar a Skydropx. La antigüedad de ese centinela se mide con la columna propia
+`orders.shipmentClaimedAt` (poblada al reclamarlo) y **no** con `updatedAt`, que cualquier otra
+escritura sobre el pedido reiniciaría.
+
+**Cada guía se cobra**, así que ninguno de los dos caminos genera una segunda ante la duda: un pedido
+con `skydropxShipmentId` real se rechaza con `409`, y el caso "Skydropx la creó y cobró pero no se
+pudo guardar su id" se marca con el valor especial `unreconciled:<id real>`, que nadie reintenta y que
+conserva el id para localizar la guía en el panel de Skydropx (el webhook de esa guía, si llega,
+reconcilia la fila solo). Un pedido ya marcado como `shipped`/`delivered` también se rechaza: ahí la
+guía suele haberse generado a mano en el panel de Skydropx y capturado con el `PATCH .../status`.
+
+Cuando Skydropx **no responde** al crear la guía (timeout, conexión cortada, 5xx) no se puede saber si
+la creó y la cobró, así que el pedido se marca `unreconciled:desconocido` en vez de liberarse para un
+reintento: liberarlo es exactamente lo que pagaría la segunda guía. Un `4xx` sí libera (ahí Skydropx
+rechazó la petición y no creó nada). Ese es el único caso que el dueño puede **forzar** desde el panel
+(`{ "force": true }` en el body) una vez que confirmó que no existe ninguna guía; un id real nunca se
+fuerza. El endpoint **espera el resultado**: `200` con la guía creada, `409` si el pedido no aplica
+(ya tiene guía, se está generando, no está pagado, está cancelado, ya se marcó como enviado/entregado,
+se cobró con tarifa plana, o quedó sin conciliar) y `502` si Skydropx vuelve a fallar.
+
 **Webhook de estado de envío (Fase 8.6):** `POST /api/webhooks/skydropx`
 (`src/routes/webhook.routes.ts` → `order.controller.ts`'s `skydropxWebhook`) se monta con el mismo
 `express.raw` que el de Stripe y verifica la firma **HMAC-SHA512** del header
@@ -592,12 +623,14 @@ todo error no controlado que llegue al `500`.
 — si falta, no hace nada y solo loguea un warning) en dos casos: falla al generar una guía de
 Skydropx después de haber pagado el pedido (`createShipmentForOrder`), y fallas repetidas (3
 seguidas) del barrido de órdenes pendientes contra Stripe para la misma orden. Estos son avisos
-operativos, no un sistema de reintentos automáticos.
+operativos, no un sistema de reintentos automáticos — con una excepción: desde la Fase O.3 la guía
+fallida **sí** se reintenta sola (`shipmentRetrySweeper`), y por eso ese camino apaga la alerta por
+intento y manda una sola al agotar los 3.
 
 ## Apagado ordenado (graceful shutdown)
 
-`SIGTERM`/`SIGINT` disparan un `gracefulShutdown` compartido en `src/app.ts` que: (1) detiene el
-`pendingOrderSweeper` (deja de abrir trabajo nuevo), (2) `server.close()` — deja de aceptar
+`SIGTERM`/`SIGINT` disparan un `gracefulShutdown` compartido en `src/app.ts` que: (1) detiene los dos
+barridos —`pendingOrderSweeper` y `shipmentRetrySweeper`— (dejan de abrir trabajo nuevo), (2) `server.close()` — deja de aceptar
 conexiones nuevas y espera a que terminen las que están en vuelo, (3) cierra el pool de Sequelize.
 Así un redeploy no corta una transacción de checkout a medias. Señales repetidas se ignoran, y un
 timeout de 10s (`unref()`ado) fuerza `process.exit(1)` si alguna conexión colgada bloquea el cierre.
@@ -650,7 +683,7 @@ Suite automatizada con **Jest + ts-jest + supertest** (Fase H.1 — ver
 [`roadmaps-completados/roadmap-testing.md`](roadmaps-completados/roadmap-testing.md) para el desglose por partes; las **12 partes** — infra,
 BD de test, servicios puros, auth, checkout, idempotencia de webhooks, cancelación/reembolso manual,
 envío en vivo, cliente Skydropx, CRUD admin de productos/imágenes, marca/usuarios admin y
-agregaciones de dashboard/reports — están **completas**: 23 suites / 220 tests en verde, y cada
+agregaciones de dashboard/reports — están **completas**: 24 suites / 240 tests en verde, y cada
 fase nueva suma la suya). Los tests
 viven en `tests/` (fuera de `src/`, para que `tsc` no los incluya en el build de producción);
 `ts-jest` los transpila en memoria.
@@ -674,8 +707,8 @@ Postgres de test y cada una dropea/recrea las tablas en su `beforeAll` (`sync({ 
 que correrlas en paralelo produce errores intermitentes de tipo `ENUM ya existe`; un solo worker
 serializa todo y elimina la carrera.
 
-Al importar `src/app.ts` con `NODE_ENV=test`, un gate salta el `connectDB()`, el
-`pendingOrderSweeper` y el `app.listen(...)`, así que Supertest levanta `app` sin abrir puerto ni
+Al importar `src/app.ts` con `NODE_ENV=test`, un gate salta el `connectDB()`, los barridos
+(`pendingOrderSweeper`/`shipmentRetrySweeper`) y el `app.listen(...)`, así que Supertest levanta `app` sin abrir puerto ni
 conectar a la BD. La config de test (`.env.test`, gitignored) trae llaves dummy que satisfacen el
 fail-fast de cada `src/config/*` más el `DATABASE_URL` de pruebas.
 
@@ -749,7 +782,7 @@ src/
 │   ├── adminProduct.routes.ts   # Rutas /api/admin/products (CRUD admin + imágenes + import masivo, requireAuth)
 │   ├── auth.routes.ts           # Rutas /api/auth
 │   ├── order.routes.ts          # Ruta /api/orders (checkout público)
-│   ├── adminOrder.routes.ts     # Rutas /api/admin/orders (listado, cancelación y estado manual, requireAuth)
+│   ├── adminOrder.routes.ts     # Rutas /api/admin/orders (listado, cancelación, estado manual y reintento de guía, requireAuth)
 │   ├── adminDashboard.routes.ts # Ruta /api/admin/dashboard (requireAuth)
 │   ├── adminReports.routes.ts   # Rutas /api/admin/reports/* (requireAuth)
 │   ├── shipping.routes.ts       # Ruta /api/shipping/rates (cotización en vivo, pública)
@@ -768,12 +801,13 @@ src/
 ├── services/
 │   ├── cart.ts                    # computeTotals, computeShipping, SHIPPING_BY_TYPE
 │   ├── orders.service.ts          # Checkout idempotente: stock atómico, totales, precios congelados; releaseOrderStock / cancelOrderByAdmin / updateOrderStatusByAdmin
-│   ├── payment.service.ts         # Stripe: PaymentIntent, concilia pagos/fallos/reembolsos, crea guía Skydropx, dispara correos
+│   ├── payment.service.ts         # Stripe: PaymentIntent, concilia pagos/fallos/reembolsos, crea/reintenta guía Skydropx, dispara correos
 │   ├── pendingOrderSweeper.ts     # Barrido de órdenes pending abandonadas (libera stock, reconcilia con Stripe)
+│   ├── shipmentRetrySweeper.ts    # Barrido de guías pendientes: reintenta la guía de pedidos pagados sin ella
 │   ├── skydropx.service.ts        # Cliente REST de Skydropx (OAuth2, throttle 2 req/s, cotización, guía, poll)
 │   ├── packing.ts                 # buildParcel: arma una sola caja apilada por pedido
 │   ├── productAvailability.ts     # assertProductAvailable: guardia compartida checkout/cotización
-│   ├── alert.service.ts           # sendAlertEmail: avisos operativos (guía fallida, sweeper con fallas repetidas)
+│   ├── alert.service.ts           # sendAlertEmail: avisos operativos (guía fallida o irreintentable, sweepers con fallas repetidas)
 │   ├── image.service.ts           # Cloudinary: sube buffer (upload_stream) y borra asset (destroy)
 │   ├── productImport.service.ts   # Importación/restock masivo: parsea el .xlsx, previsualiza y aplica
 │   ├── email.service.ts           # sendEmail(...) sobre Resend; loguea pero nunca lanza

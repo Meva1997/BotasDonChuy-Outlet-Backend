@@ -6,6 +6,7 @@ import {
   createOrderSchema,
   cancelOrderSchema,
   orderStatusUpdateSchema,
+  retryShipmentSchema,
 } from "../schemas/checkout";
 import { parseId } from "../utils/parseId";
 import { AppError } from "../middlewares/AppError";
@@ -270,6 +271,26 @@ export const adminUpdateOrderStatus: RequestHandler = asyncHandler(
     const input = orderStatusUpdateSchema.parse(req.body ?? {});
 
     const order = await ordersService.updateOrderStatusByAdmin(id, input);
+
+    res.json({ order });
+  },
+);
+
+/**
+ * POST /api/admin/orders/:id/shipment/retry — reintento manual de la guía (admin, Fase O.3).
+ * Regenera la guía de un pedido pagado que se quedó sin ella (Skydropx falló al pagar) y libera
+ * el centinela huérfano que dejaría un proceso caído. 409 si el pedido ya tiene guía —real o
+ * cobrada sin persistir—, si no está pagado, si está cancelado o si se cobró con tarifa plana;
+ * 502 si Skydropx vuelve a fallar. Ver `retryShipmentForOrder` en payment.service.ts.
+ */
+export const adminRetryShipment: RequestHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const id = parseId(req.params.id, "pedido");
+    // Body opcional: el reintento normal no manda nada. `force` solo aplica al caso "Skydropx no
+    // respondió y pudo haber cobrado la guía" (ver `retryShipmentForOrder`).
+    const { force } = retryShipmentSchema.parse(req.body ?? {});
+
+    const order = await paymentService.retryShipmentForOrder(id, { force });
 
     res.json({ order });
   },

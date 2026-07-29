@@ -56,10 +56,66 @@ export class SkydropxRequestError extends Error {
   constructor(
     message: string,
     public readonly status?: number,
+    /**
+     * Ruta que falló. Necesaria para clasificar el fallo de `createShipment`: dentro de un
+     * mismo `skydropxRequest` puede fallar primero la renovación del token OAuth (el `POST
+     * /shipments` nunca salió → nada se cobró) y sin el path las dos serían indistinguibles.
+     */
+    public readonly path?: string,
   ) {
     super(message);
     this.name = "SkydropxRequestError";
   }
+}
+
+/**
+ * El `POST /api/v1/shipments` falló **sin respuesta concluyente**: timeout, conexión cortada a
+ * media petición o 5xx. La guía pudo haberse creado —y **cobrado**— del lado de Skydropx aunque
+ * nosotros nunca viéramos la respuesta, así que quien llame NO puede tratarlo como "no pasó nada"
+ * y volver a intentar: sería pagar la guía dos veces.
+ *
+ * Se distingue de un `SkydropxRequestError` 4xx, donde Skydropx rechazó la petición explícitamente
+ * (datos mal armados, saldo insuficiente) y por lo tanto no creó ni cobró nada — ese caso sí es
+ * seguro reintentarlo, y es justo el que el barrido de la Fase O.3 existe para recuperar.
+ */
+export class SkydropxShipmentUncertainError extends Error {
+  constructor(
+    message: string,
+    public readonly reason: unknown,
+  ) {
+    super(message);
+    this.name = "SkydropxShipmentUncertainError";
+  }
+}
+
+/**
+ * Códigos de error de red que garantizan que la petición **nunca llegó** al servidor: no se
+ * resolvió el DNS o se rechazó la conexión, así que Skydropx no pudo procesar (ni cobrar) nada.
+ * Cualquier otro fallo de socket (`ECONNRESET`, `EPIPE`, "socket hang up") ocurre con la petición
+ * ya en vuelo y por lo tanto es **incierto**.
+ */
+const NEVER_SENT_ERROR_CODES = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ERR_INVALID_URL",
+]);
+
+/**
+ * ¿El fallo de un `POST /shipments` deja en duda si la guía se creó y se cobró?
+ *
+ * - `4xx` (salvo 408/429, donde la petición sí pudo procesarse) → Skydropx la rechazó: no hay guía.
+ * - error de red que nunca salió del proceso → no hay guía.
+ * - timeout, corte a media petición, 5xx o cualquier otra cosa → **incierto**.
+ */
+function shipmentCreationIsUncertain(err: unknown): boolean {
+  if (err instanceof SkydropxRequestError && err.status !== undefined) {
+    if (err.status === 408 || err.status === 429) return true;
+    return !(err.status >= 400 && err.status < 500);
+  }
+  const code = (err as { cause?: { code?: string } } | undefined)?.cause?.code;
+  if (code && NEVER_SENT_ERROR_CODES.has(code)) return false;
+  return true; // timeout (`AbortSignal`), socket cortado o error desconocido: no se puede afirmar
 }
 
 let cachedToken: CachedToken | null = null;
@@ -81,9 +137,11 @@ function throttle(): Promise<void> {
   return next;
 }
 
+const OAUTH_TOKEN_PATH = "/api/v1/oauth/token";
+
 async function fetchAccessToken(): Promise<CachedToken> {
   await throttle();
-  const response = await fetch(`${SKYDROPX_BASE_URL}/api/v1/oauth/token`, {
+  const response = await fetch(`${SKYDROPX_BASE_URL}${OAUTH_TOKEN_PATH}`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -99,6 +157,7 @@ async function fetchAccessToken(): Promise<CachedToken> {
     throw new SkydropxRequestError(
       `Skydropx OAuth falló (${response.status}): ${body}`,
       response.status,
+      OAUTH_TOKEN_PATH,
     );
   }
 
@@ -107,6 +166,16 @@ async function fetchAccessToken(): Promise<CachedToken> {
     accessToken: data.access_token,
     expiresAt: Date.now() + data.expires_in * 1000,
   };
+}
+
+/**
+ * Fuerza que haya un token vigente en caché **antes** de una llamada cuyo fallo hay que
+ * clasificar. `skydropxRequest` renueva el token por dentro, así que sin esto un timeout de la
+ * renovación se confundiría con un timeout de la llamada real — y en `createShipment` esa
+ * diferencia decide entre "seguro reintentar" y "quizá ya se cobró una guía".
+ */
+export async function ensureAccessToken(): Promise<void> {
+  await getAccessToken();
 }
 
 /** Token vigente, cacheado en memoria. Dedupe: dos refresh concurrentes comparten la misma llamada. */
@@ -149,6 +218,7 @@ export async function skydropxRequest<T>(
     throw new SkydropxRequestError(
       `Skydropx ${init.method ?? "GET"} ${path} falló (${response.status}): ${body}`,
       response.status,
+      path,
     );
   }
 
@@ -513,6 +583,8 @@ const CONSIGNMENT_NOTE_SAT_CODE = "53102400";
 // Valor de ejemplo de la documentación oficial, confirmado válido en sandbox real.
 const DEFAULT_PACKAGE_TYPE = "4G";
 
+const SHIPMENTS_PATH = "/api/v1/shipments";
+
 export async function createShipment(
   rateId: string,
   addressFrom: SkydropxContact,
@@ -523,9 +595,13 @@ export async function createShipment(
     package_type: DEFAULT_PACKAGE_TYPE,
     consignment_note: CONSIGNMENT_NOTE_SAT_CODE,
   };
-  const response = await skydropxRequest<SkydropxCreateShipmentResponse>(
-    "/api/v1/shipments",
-    {
+  // El token se resuelve FUERA del try de abajo: si falla aquí, el `POST /shipments` nunca salió
+  // y el fallo es concluyente. Dentro del try, cualquier timeout ya es ambiguo.
+  await ensureAccessToken();
+
+  let response: SkydropxCreateShipmentResponse;
+  try {
+    response = await skydropxRequest<SkydropxCreateShipmentResponse>(SHIPMENTS_PATH, {
       method: "POST",
       body: JSON.stringify({
         shipment: {
@@ -535,8 +611,20 @@ export async function createShipment(
           packages: [pkg],
         },
       }),
-    },
-  );
+    });
+  } catch (err) {
+    // Cada guía se cobra, así que un fallo sin respuesta concluyente NO puede reintentarse a
+    // ciegas: se marca como incierto y quien llame decide (ver `createShipmentForOrder`).
+    if (shipmentCreationIsUncertain(err)) {
+      throw new SkydropxShipmentUncertainError(
+        `No se pudo confirmar si Skydropx creó la guía de la tarifa ${rateId}: ${
+          (err as Error).message
+        }`,
+        err,
+      );
+    }
+    throw err;
+  }
   return {
     shipmentId: response.data.id,
     carrierName: response.data.attributes.carrier_name,

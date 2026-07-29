@@ -566,7 +566,7 @@ const options: Options = {
               type: "string",
               nullable: true,
               description:
-                "id de la guía (shipment) creada en Skydropx al confirmarse el pago. null antes de pagar, si la orden usó la tarifa plana de respaldo (sin rate de Skydropx que convertir en guía), o mientras se reclama con el valor centinela \"creating\" (ver createShipmentForOrder).",
+                "id de la guía (shipment) creada en Skydropx al confirmarse el pago. null antes de pagar o si la orden usó la tarifa plana de respaldo (sin rate de Skydropx que convertir en guía). Puede traer dos valores especiales en vez de un id: \"creating\" mientras se reclama la creación (valor centinela, ver createShipmentForOrder) y \"unreconciled:<id>\" cuando Skydropx creó y cobró la guía pero no se pudo guardar su id — ese pedido necesita reconciliarse a mano en el panel de Skydropx y ningún reintento genera otra guía para él.",
               example: "ship_7c1a9e",
             },
             trackingNumber: {

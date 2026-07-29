@@ -1,4 +1,5 @@
 import dotenv from "dotenv";
+import { positiveNumberEnv } from "../utils/env";
 
 // Igual que src/config/stripe.ts / resend.ts: los imports de módulo se evalúan
 // ANTES del dotenv.config() de src/app.ts, así que cada config carga su propio .env aquí.
@@ -60,6 +61,27 @@ const rawCarriers = process.env.SKYDROPX_CARRIERS?.split(",")
   .filter(Boolean);
 export const SKYDROPX_CARRIERS: string[] | undefined =
   rawCarriers && rawCarriers.length > 0 ? rawCarriers : undefined;
+
+/**
+ * Minutos que deben pasar para reintentar la guía de un pedido pagado que se quedó sin
+ * ella (Fase O.3). Mide dos cosas a la vez, a propósito:
+ *  - cuánto espera el barrido antes de reintentar un pedido `paid` sin guía, y
+ *  - cuándo un centinela `"creating"` se considera **huérfano** (el proceso murió entre
+ *    reclamarlo y llamar a Skydropx) y puede liberarse.
+ * El intento normal se resuelve o falla en segundos (timeout de 5s por request, 8s el poll
+ * de re-cotización), así que 15 minutos deja un margen amplio: nunca se le quita el turno a
+ * una creación realmente en vuelo.
+ */
+export const SHIPMENT_RETRY_DELAY_MINUTES = positiveNumberEnv(
+  "SHIPMENT_RETRY_DELAY_MINUTES",
+  15,
+);
+
+/** Cada cuántos minutos corre el barrido de guías pendientes (Fase O.3). */
+export const SHIPMENT_RETRY_SWEEP_INTERVAL_MINUTES = positiveNumberEnv(
+  "SHIPMENT_RETRY_SWEEP_INTERVAL_MINUTES",
+  10,
+);
 
 /**
  * Dirección de origen (tienda física en Celaya, GTO) para cada cotización

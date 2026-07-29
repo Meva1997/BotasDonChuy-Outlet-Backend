@@ -33,7 +33,7 @@ orden se queda en `paid` para siempre, sin correo de "va en camino" y sin forma 
 | Punto | Estado | Riesgo si no se atiende |
 |---|---|---|
 | Marcar un pedido como enviado/entregado a mano | ✅ **Fase O.1** (`PATCH /api/admin/orders/:id/status`) | — (falta cablear el botón en el panel: Fase 14 del roadmap del frontend) |
-| Reintentar una guía de Skydropx fallida | ❌ ausente (`CLAUDE.md` ya lo admite) | Alerta por correo y nada más; con el centinela colgado, la orden **nunca** puede volver a intentar |
+| Reintentar una guía de Skydropx fallida | ✅ **Fase O.3** (`POST /api/admin/orders/:id/shipment/retry` + barrido automático) | — (falta cablear el botón en el panel: Fase 16 del roadmap del frontend) |
 | Idempotencia en `POST /api/orders` | ✅ **Fase O.2** (ventana de 60 s + header `Idempotency-Key`) | — (opcional: mandar el header desde `usePlaceOrder.ts`, Fase 15 del roadmap del frontend) |
 | Consulta de pedido por el cliente | ❌ ausente | Si borra el correo, escribe por WhatsApp; toda consulta de estado es trabajo manual del dueño |
 | Readiness real en `/health` | ❌ superficial | El healthcheck pasa en verde con Postgres caído |
@@ -230,7 +230,7 @@ la BD, un solo PaymentIntent en el dashboard de Stripe test, stock descontado un
 
 ---
 
-### Fase O.3 — Reintento de guía de Skydropx
+### Fase O.3 — Reintento de guía de Skydropx ✅
 
 **Objetivo:** poder regenerar una guía que falló, sin entrar a la base de datos.
 
@@ -247,19 +247,134 @@ volver a generar guía. El reintento tiene que poder distinguir el centinela de 
 la liberación.
 
 **Tareas:**
-- [ ] `POST /api/admin/orders/:id/shipment/retry` `[auth]` → llama a `createShipmentForOrder`.
+- [x] `POST /api/admin/orders/:id/shipment/retry` `[auth]` → llama a `createShipmentForOrder`.
   Rechaza con `409` si la orden ya tiene un `skydropxShipmentId` **real** (no el centinela), para no
   pagar una segunda guía.
-- [ ] Liberar el centinela huérfano: si `skydropxShipmentId === "creating"` y la orden lleva más de
+- [x] Liberar el centinela huérfano: si `skydropxShipmentId === "creating"` y la orden lleva más de
   N minutos así, el reintento lo limpia y vuelve a reclamar. Considerar un `createdAt` del centinela
   o apoyarse en `updatedAt` para medir la antigüedad.
-- [ ] Barrido automático (opcional, evaluar): extender `pendingOrderSweeper` —o un cron gemelo— para
+- [x] Barrido automático (opcional, evaluar): extender `pendingOrderSweeper` —o un cron gemelo— para
   detectar órdenes `paid` sin `skydropxShipmentId` después de N minutos y reintentar solas. Es lo que
   convierte la alerta por correo en una recuperación de verdad.
-- [ ] Confirmar que `labelUrl` viaje en `GET /api/admin/orders` para imprimir la guía desde el panel.
-- [ ] Tests: reintento sobre orden con guía real → `409`; con centinela huérfano → libera y crea una
+- [x] Confirmar que `labelUrl` viaje en `GET /api/admin/orders` para imprimir la guía desde el panel.
+- [x] Tests: reintento sobre orden con guía real → `409`; con centinela huérfano → libera y crea una
   sola guía; dos reintentos concurrentes → una sola llamada a Skydropx (mock del `fetch`).
-- [ ] Fase 🔴 en el roadmap del frontend.
+- [x] Fase 🔴 en el roadmap del frontend.
+
+**Cómo quedó (decisiones que el diseño de arriba no fijaba):**
+- **El centinela huérfano y el centinela "ya se cobró la guía" eran indistinguibles**, y ese era el
+  verdadero obstáculo para reintentar. `createShipmentForOrder` deja `"creating"` escrito a propósito
+  cuando Skydropx **sí creó y cobró** la guía pero no se pudo guardar su id — precisamente para que
+  nadie genere una segunda. Un reintento por antigüedad, tal como lo pedía la tarea, habría pagado esa
+  segunda guía en el peor caso posible. Se resolvió dándole a ese caso un **valor propio**,
+  `unreconciled:<id real>`: conserva el id para que un humano lo localice en el panel de Skydropx, y
+  ni el endpoint ni el barrido lo tocan (el `WHERE` del barrido solo acepta `null` o el centinela
+  exacto). El `"creating"` vuelve a significar una sola cosa —"alguien está creando la guía"— y por
+  eso liberarlo por antigüedad es seguro.
+- **Antes de rendirse, se reintenta el `UPDATE`** que guarda el id de una guía ya cobrada
+  (3 intentos, 1 s). Es el único fallo de esta función que cuesta dinero y su causa típica (pool
+  agotado, conexión reciclada) es transitoria: insistir ahí evita la mayoría de los casos
+  `unreconciled` en vez de solo gestionarlos mejor.
+- **El webhook de esa guía la reconcilia solo.** `applyShipmentUpdateFromWebhook` busca también por
+  `unreconciled:<id>` y, al encontrarla, escribe el id real: el evento **es** la prueba de que la guía
+  existe y de cuál es su id, así que el caso más común se cierra sin intervención humana.
+- **Un solo knob de tiempo** (`SHIPMENT_RETRY_DELAY_MINUTES`, 15) para las dos cosas que se miden:
+  cuándo un `"creating"` cuenta como huérfano y cuánto espera el barrido antes de reintentar. Un
+  intento normal se resuelve o falla en segundos (timeout de 5 s por request, 8 s el poll de
+  re-cotización), así que 15 min nunca le quita el turno a una creación real en vuelo.
+- **El endpoint espera el resultado** y responde `502` si Skydropx falla, en vez del fire-and-forget
+  del camino automático: el dueño está mirando la respuesta y necesita saber si insistir. Dos
+  reintentos concurrentes (doble clic) los serializa el mismo centinela: uno crea la guía, el otro
+  recibe `409` "se está generando", no un error.
+- **La alerta por correo pasó a ser opcional por llamada** (`notifyOnFailure`). El camino automático
+  la sigue mandando; el reintento manual y el barrido la apagan porque ya tienen canal — el endpoint
+  responde el error al momento y el barrido alerta **una sola vez al agotar sus 3 intentos**, en vez
+  de un correo por ciclo.
+- **El barrido es un cron gemelo** (`src/services/shipmentRetrySweeper.ts`), no una rama dentro de
+  `pendingOrderSweeper`: distinta ventana, distintos candidatos y distinto criterio de rendición. Solo
+  mira pedidos `paid` **con** tarifa de Skydropx creados en las últimas 24 h (pasado ese punto el
+  fallo ya no es transitorio y hace falta una decisión humana), procesa hasta 20 por ciclo y va
+  secuencial: el límite de 2 req/s de Skydropx es de la cuenta entera y lo comparte con las
+  cotizaciones de checkouts en vivo. Se arranca y se detiene en `app.ts` junto al otro.
+- `labelUrl` ya viajaba en `GET /api/admin/orders` (esa ruta no excluye ningún campo); quedó cubierto
+  con un test para que no se pierda en un refactor.
+- Tests: `tests/integration/shipmentRetry.test.ts` (20 casos — el endpoint por HTTP, el barrido
+  llamando a `sweepShipmentsOnce`, y la reconciliación por webhook; `skydropx.service` y
+  `email.service` mockeados, Postgres real). `resetShipmentRetryAttempts()` se exporta solo para los
+  tests, igual que `resetCheckoutIdempotency()`.
+- **Riesgo residual asumido:** si la BD está caída el tiempo suficiente para que también falle el
+  marcado `unreconciled:`, la orden queda en `"creating"` y el barrido podría reclamarla a los 15 min
+  y pagar una segunda guía. Por eso la alerta de ese caso es incondicional y de severidad `fatal`.
+
+**Correcciones tras el `/code-review` de la fase (2026-07-28).** Diez hallazgos, todos arreglados en
+el mismo commit. Los tres primeros son los que costaban dinero o dejaban al dueño atorado:
+
+- **El fallo que el diseño de arriba no cubría: el `POST /shipments` sin respuesta.** El marcador
+  `unreconciled:` protegía el caso "la guía se creó y falló guardarla en la BD", pero cada `fetch`
+  sale con `AbortSignal.timeout` de 5 s: si Skydropx **procesa y cobra** la guía y la respuesta tarda
+  o la conexión se corta, `createShipment` lanzaba, `createdShipmentId` seguía en `null`, y el `catch`
+  liberaba el centinela creyendo que no había pasado nada. Antes de esta fase eso era inofensivo
+  porque **nada reintentaba**; con el barrido, era una segunda guía pagada a los 15 min. Ahora
+  `createShipment` clasifica su propio fallo: un `4xx` (salvo 408/429) es un rechazo explícito —no
+  creó ni cobró nada, seguro reintentar, y es justo el caso "saldo agotado"/"Skydropx caído" que esta
+  fase recupera—, mientras que timeout, socket cortado o `5xx` lanzan `SkydropxShipmentUncertainError`
+  y la orden queda marcada `unreconciled:desconocido`. Para que la clasificación sea fiable el token
+  OAuth se resuelve **fuera** del `try` (un fallo de token nunca es incierto: el POST no salió) y
+  `SkydropxRequestError` carga su `path`.
+- **`force: true`, la salida del caso incierto.** Ese marcador no lo puede sanar el webhook (no hay id
+  que empatar), así que sin una puerta el pedido quedaría atorado para siempre — exactamente lo que
+  esta fase vino a eliminar. El endpoint acepta un body opcional `{ force }` que significa "ya revisé
+  el panel de Skydropx y no existe ninguna guía". Es lo único que desbloquea; un id real nunca se
+  fuerza, porque ahí no hay nada que confirmar.
+- **El reintento no rechazaba un pedido `shipped`/`delivered`.** El camino que el propio `409` de la
+  tarifa plana recomienda —generar la guía a mano en el panel y capturarla con el `PATCH /status` de
+  la Fase O.1— deja el pedido `shipped` con `skydropxShipmentId` en `null` y `skydropxRateId` puesto,
+  o sea reintentable: un clic en el botón cobraba una segunda guía por un pedido que ya salió. El
+  barrido nunca estuvo expuesto (su `WHERE status: "paid"` lo excluye).
+- **`Number(process.env.X ?? 15)` no valida nada.** `??` solo cae al default con `undefined`, así que
+  una línea vacía en el `.env` daba `0` —margen de centinela cero: una creación reclamada hace
+  milisegundos cuenta como huérfana y un reintento concurrente paga la segunda guía— y un valor mal
+  tecleado daba `NaN`, que convierte el `setInterval` del barrido en un bucle de ~1 ms. Los dos knobs
+  pasan por `positiveNumberEnv` (`src/utils/env.ts`), con su test unitario.
+- **El reloj del centinela era `updatedAt`**, que bumpea cualquier otra escritura sobre el pedido
+  (webhook de envío, avance manual de estado, marcado de pago). Un pedido realmente atorado en
+  `"creating"` reiniciaba su cuenta cada vez que el dueño lo tocaba desde el panel y no podía
+  liberarse nunca. Ahora hay columna propia, `orders.shipmentClaimedAt` (migración
+  `20260728120000-orders-shipment-claimed-at.ts`), poblada al reclamar; las filas anteriores quedan en
+  `NULL` y cuentan como huérfanas de inmediato, que es lo correcto.
+- **El `503` del webhook se disparaba con centinelas rancios.** `applyShipmentUpdateFromWebhook` pedía
+  reintento ante cualquier envío desconocido mientras existiera **una sola** fila en `"creating"`, y
+  esta fase hace que esos centinelas duren mucho más. Como además los mensajes nuevos le piden al
+  dueño generar guías a mano en el panel de Skydropx, los eventos de esas guías se respondían `503` en
+  bucle. El conteo se acota ahora a centinelas reclamados hace menos de 15 min (la misma columna
+  nueva), que es lo único que significa "creación en vuelo".
+- **`pendingShipmentWhere` filtraba solo `skydropxRateId`**, pero `createShipmentForOrder` exige rate
+  **y** cotización: un pedido con uno y no el otro entraba en cada ciclo, se salía en la primera
+  línea, gastaba sus tres intentos y disparaba la alerta de "no se pudo generar la guía" sin una sola
+  llamada a Skydropx.
+- **El contador de intentos caducaba por "no salió en este ciclo"**, y ese ciclo viene recortado a 20
+  pedidos: uno que rotara fuera de la página perdía su cuenta, volvía a cero y podía gastar otros tres
+  intentos y mandar una segunda alerta idéntica. Ahora caduca **por tiempo** (la ventana de 24 h).
+  Además los pedidos agotados se excluyen **en la consulta** y no con un `continue`: si no, seguían
+  ocupando lugares del `LIMIT` y —con el orden `createdAt ASC`— veinte pedidos atorados al frente
+  dejaban sin turno a todos los más nuevos durante 24 h.
+- **`attemptShipment` devolvía `null` para dos cosas distintas**: "falló" y "otra llamada tiene el
+  centinela". El barrido contaba la segunda como fallo, gastando intentos y adelantando la alerta de
+  un pedido cuya guía se estaba creando perfectamente (pasa de verdad cuando el cliente paga tarde
+  —3DS— y el webhook está creando la guía justo cuando corre el barrido). Ahora devuelve un
+  `ShipmentAttempt` tipado: `created` · `in-progress` · `unreconciled` · `failed`, y solo el último
+  gasta intento.
+- **`persistShipmentId` escribía sin condición de centinela**, a diferencia del resto de escrituras
+  del flujo. Una creación lenta cuyo centinela ya se liberó por huérfano podía pisar en su intento 2 o
+  3 lo que un intento más nuevo hubiera escrito —otro id real, o un marcador `unreconciled:`—
+  borrando justo el dato que un humano necesita para reconciliar. Ahora, si el `UPDATE` no afecta
+  ninguna fila, no se toca nada y se alerta `fatal`: la guía ya está cobrada y hay que revisar si el
+  pedido terminó con dos.
+
+Tests: `shipmentRetry.test.ts` pasa de 20 a 34 casos (el caso incierto y su `force`, el pedido ya
+enviado, el `4xx` que sí libera, el filtro de cotización, el intento que no se gasta, el contador que
+sobrevive a caerse de la página, y las dos ramas del `503` del webhook) más
+`tests/unit/utils/env.test.ts` (8 casos).
 
 **Cómo verificar:** mockear un fallo de Skydropx en `createShipmentForOrder`, pagar un pedido,
 confirmar que llega la alerta y que el pedido queda sin guía; luego reintentar desde el endpoint →
@@ -514,7 +629,7 @@ activo — hay que revisarlos **cerca del 1 de octubre**:
 
 - [x] **O.1** — `PATCH /api/admin/orders/:id/status` + tracking manual + correo de envío con guard único
 - [x] **O.2** — Idempotencia en `POST /api/orders` (devuelve el original, no `409`)
-- [ ] **O.3** — Reintento de guía Skydropx + liberación del centinela huérfano
+- [x] **O.3** — Reintento de guía Skydropx + liberación del centinela huérfano
 - [ ] **O.4** — `GET /api/orders/lookup/:token` (consulta pública con token opaco)
 - [ ] **O.5** — `GET /health/ready` con chequeo real de BD
 
