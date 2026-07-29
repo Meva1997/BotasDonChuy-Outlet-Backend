@@ -83,7 +83,21 @@ SHIP_FROM_PHONE=...
 LOG_LEVEL=debug                         # opcional: nivel de pino (default info en prod, debug en dev)
 SENTRY_DSN=https://...ingest.sentry.io/...  # opcional: si falta, Sentry queda deshabilitado (solo se loguea)
 ALERT_EMAIL_TO=tu_correo@ejemplo.com     # opcional: destino de las alertas operativas (correo vía Resend)
+
+# Despliegue detrás de un proxy — opcional, pero necesaria si hay uno (ver nota abajo)
+TRUST_PROXY=1                            # saltos de proxy en los que confiar (1 = lo típico en un PaaS)
 ```
+
+> **`TRUST_PROXY` cuando la API va detrás de un proxy** (Render, Railway, Fly, nginx,
+> Cloudflare…). Sin ella, `req.ip` es la IP del proxy y **todos** los rate limiters de
+> `src/middlewares/rateLimit.ts` dejan de contar por cliente: pasan a ser un único cupo
+> compartido por toda la tienda (30 consultas/min de `GET /api/orders/lookup/:token` para
+> todos los compradores juntos, no para cada uno). No viene activada por defecto a propósito:
+> confiar en el `X-Forwarded-For` de un servidor expuesto directamente permitiría saltarse los
+> límites rotando IPs inventadas, así que el valor correcto depende del despliegue. Acepta
+> `1` (o el número de proxies encadenados — **empieza aquí**), `loopback`/`10.0.0.0/8`/una lista
+> separada por comas (lo más estricto), o `true` (confía en toda la cadena; solo si el proxy
+> garantiza reescribir el header). Sin definir, se conserva el default de Express.
 
 > **El esquema nunca se sincroniza automáticamente**, ni siquiera en desarrollo. `connectDB()`
 > solo autentica la conexión; todo cambio de esquema pasa por una migración versionada
@@ -153,6 +167,7 @@ pnpm migrate:status   # verifica qué quedó aplicado
 | `POST`   | `/api/admin/products/import/preview` | ✅ | Previsualiza un `.xlsx` de alta/restock masivo (no escribe nada) |
 | `POST`   | `/api/admin/products/import` | ✅ | Aplica las filas revisadas en el preview (JSON) |
 | `POST`   | `/api/orders`                 | —    | Checkout: crea un pedido desde el carrito          |
+| `GET`    | `/api/orders/lookup/:token`   | —    | Consulta pública del estado y rastreo de un pedido (token opaco del correo) |
 | `POST`   | `/api/shipping/rates`         | —    | Cotiza tarifas de envío en vivo (Skydropx) para el carrito, con fallback a tarifa plana |
 | `GET`    | `/api/admin/dashboard`        | ✅   | Métricas agregadas del panel (KPIs, ingresos, ventas recientes, inventario) |
 | `GET`    | `/api/admin/orders`           | ✅   | Lista paginada de pedidos con sus items (incl. `unitCost`) |
@@ -368,6 +383,34 @@ guía generada, no se restockea) o ya `cancelled` responde `409`.
   reactivar una orden que un admin ya canceló (con su stock ya repuesto). Si eso ocurre, la orden
   queda `cancelled` y se dispara una alerta operativa para revisar si corresponde un reembolso
   manual — ver `CLAUDE.md`.
+
+### `GET /api/orders/lookup/:token` (consulta pública del pedido, Fase O.4)
+
+Deja al comprador ver en qué va su pedido **sin cuenta ni contraseña**. No hay cuentas de cliente ni
+ninguna otra lectura pública de órdenes: hasta esta fase, lo único que tenía después de pagar era el
+correo de confirmación, así que si lo borraba o le caía en spam, cada "¿ya salió mi pedido?" acababa
+siendo trabajo manual del dueño por WhatsApp.
+
+- **La credencial es el token**, un UUID opaco (`orders.publicToken`, con índice único) que se genera
+  en `createOrder`, viaja como link en el correo de confirmación (`/pedido/<token>`) y se devuelve
+  también en el `201` del checkout. **No** es `id + email`: los ids son secuenciales y un correo es
+  adivinable, así que ese par sería enumerable aunque se le pusiera rate limit.
+- **Proyección explícita**, no la fila del pedido con exclusiones: se arma campo por campo y el
+  `SELECT` va acotado, así que una columna nueva en `Order` **no aparece** hasta que alguien la
+  agregue a mano — el modo de fallo seguro. Devuelve estado, rastreo, totales con los precios
+  congelados y la dirección de envío. Quedan fuera `unitCost`, `paymentIntentId`, `refundId`,
+  `labelUrl` (la etiqueta imprimible es del dueño), los ids de Skydropx, `shippingRequiresDropoff`,
+  el propio token y el correo/teléfono del cliente (el link se comparte con facilidad).
+  `refundedAt` **sí** va: un pedido cancelado tiene que decir cuándo se devolvió el dinero.
+- Un token **inexistente, alterado o mal formado** responde siempre el **mismo `404` con el mismo
+  mensaje** (misma regla anti-enumeración que el login). El mal formado se rechaza antes de tocar la
+  BD: la columna es `uuid` y Postgres rechazaría la comparación con un error que el `errorHandler`
+  degradaría a un **500** — mismo problema que `parseId` resuelve para los `:id` numéricos.
+- Rate limiter propio (`orderLookupRateLimiter`, **30 req/min por IP**). Holgado a propósito: quien
+  recarga esa página es un comprador esperando su pedido, y adivinar un UUID es inviable con o sin
+  límite. Ojo con el "por IP": detrás de un proxy sin `TRUST_PROXY` configurada (ver
+  [Variables de entorno](#variables-de-entorno)) ese cupo es uno solo para toda la tienda, y el
+  comprador 31 del minuto recibe un 429 en su propio pedido.
 
 ### `PATCH /api/admin/orders/:id/status` (envío/entrega manual, Fase O.1)
 
@@ -683,7 +726,7 @@ Suite automatizada con **Jest + ts-jest + supertest** (Fase H.1 — ver
 [`roadmaps-completados/roadmap-testing.md`](roadmaps-completados/roadmap-testing.md) para el desglose por partes; las **12 partes** — infra,
 BD de test, servicios puros, auth, checkout, idempotencia de webhooks, cancelación/reembolso manual,
 envío en vivo, cliente Skydropx, CRUD admin de productos/imágenes, marca/usuarios admin y
-agregaciones de dashboard/reports — están **completas**: 24 suites / 240 tests en verde, y cada
+agregaciones de dashboard/reports — están **completas**: 28 suites / 285 tests en verde, y cada
 fase nueva suma la suya). Los tests
 viven en `tests/` (fuera de `src/`, para que `tsc` no los incluya en el build de producción);
 `ts-jest` los transpila en memoria.
@@ -764,7 +807,7 @@ src/
 ├── controllers/
 │   ├── product.controller.ts    # Lógica de productos (listar, obtener por id, CRUD admin, import masivo)
 │   ├── auth.controller.ts       # Login, forgot-password, verify-reset-code, reset-password, me
-│   ├── order.controller.ts      # Checkout, admin orders, cancelación manual, webhooks de Stripe/Skydropx
+│   ├── order.controller.ts      # Checkout, consulta pública por token, admin orders, cancelación manual, webhooks de Stripe/Skydropx
 │   ├── shipping.controller.ts   # POST /api/shipping/rates (cotización en vivo)
 │   ├── dashboard.controller.ts  # GET /api/admin/dashboard
 │   ├── reports.controller.ts    # GET /api/admin/reports/monthly y /replenishment
@@ -774,14 +817,14 @@ src/
 │   ├── AppError.ts               # Clase de error con status code para respuestas controladas
 │   ├── asyncHandler.ts            # Wrapper para controllers async (evita try/catch repetido)
 │   ├── errorHandler.ts            # Middleware centralizado de manejo de errores
-│   ├── rateLimit.ts               # authRateLimiter / shippingRateLimiter / orderRateLimiter
+│   ├── rateLimit.ts               # authRateLimiter / shippingRateLimiter / orderRateLimiter / orderLookupRateLimiter
 │   ├── requireAuth.ts             # Verifica JWT Bearer, adjunta req.user; requireRole helper
 │   └── upload.ts                  # multer en memoria (uploadProductImages / uploadLogo / uploadProductImportFile)
 ├── routes/
 │   ├── product.routes.ts        # Rutas /api/products
 │   ├── adminProduct.routes.ts   # Rutas /api/admin/products (CRUD admin + imágenes + import masivo, requireAuth)
 │   ├── auth.routes.ts           # Rutas /api/auth
-│   ├── order.routes.ts          # Ruta /api/orders (checkout público)
+│   ├── order.routes.ts          # Rutas /api/orders (checkout público + consulta por token)
 │   ├── adminOrder.routes.ts     # Rutas /api/admin/orders (listado, cancelación, estado manual y reintento de guía, requireAuth)
 │   ├── adminDashboard.routes.ts # Ruta /api/admin/dashboard (requireAuth)
 │   ├── adminReports.routes.ts   # Rutas /api/admin/reports/* (requireAuth)
@@ -800,7 +843,7 @@ src/
 │   └── adminUser.ts               # Esquemas zod de alta de usuario y update de cuenta propia
 ├── services/
 │   ├── cart.ts                    # computeTotals, computeShipping, SHIPPING_BY_TYPE
-│   ├── orders.service.ts          # Checkout idempotente: stock atómico, totales, precios congelados; releaseOrderStock / cancelOrderByAdmin / updateOrderStatusByAdmin
+│   ├── orders.service.ts          # Checkout idempotente: stock atómico, totales, precios congelados; releaseOrderStock / cancelOrderByAdmin / updateOrderStatusByAdmin / getOrderByPublicToken
 │   ├── payment.service.ts         # Stripe: PaymentIntent, concilia pagos/fallos/reembolsos, crea/reintenta guía Skydropx, dispara correos
 │   ├── pendingOrderSweeper.ts     # Barrido de órdenes pending abandonadas (libera stock, reconcilia con Stripe)
 │   ├── shipmentRetrySweeper.ts    # Barrido de guías pendientes: reintenta la guía de pedidos pagados sin ella

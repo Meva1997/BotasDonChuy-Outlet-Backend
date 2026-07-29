@@ -33,6 +33,12 @@ interface OrderConfirmationInput {
    * llegue, el mismo template renderiza el bloque de rastreo sin rediseñarse.
    */
   tracking?: { number: string; url?: string; carrier?: string };
+  /**
+   * Link a la página pública de seguimiento (Fase O.4), con el token opaco del pedido. Es la
+   * razón de ser de esa fase: sin él, el cliente que borra este correo no tiene forma de
+   * consultar su pedido y cada "¿ya salió?" acaba siendo trabajo manual del dueño por WhatsApp.
+   */
+  trackingPageUrl?: string;
 }
 
 /**
@@ -128,6 +134,22 @@ function shippingSection(input: OrderConfirmationInput): string {
 }
 
 /**
+ * Bloque con el link a la página pública de seguimiento (Fase O.4). Va en los dos correos
+ * (confirmación y "va en camino") a propósito: el de confirmación es el que el cliente conserva,
+ * y es justo el que puede borrar o perder en spam — cuantas más veces le llegue el link, menos
+ * probable es que la consulta acabe siendo un WhatsApp al dueño.
+ */
+function trackingPageSection(url?: string): string {
+  if (!url) return "";
+  return `<div style="margin:24px 0 0;text-align:center;">
+                <a href="${escapeHtml(url)}" style="display:inline-block;border:1px solid #7c2d12;color:#7c2d12;text-decoration:none;font-size:14px;font-weight:bold;padding:10px 20px;border-radius:8px;">Ver el estado de mi pedido</a>
+                <p style="margin:8px 0 0;font-size:12px;color:#a1a1aa;">
+                  Guarda este enlace: con él puedes consultar tu pedido cuando quieras.
+                </p>
+              </div>`;
+}
+
+/**
  * Correo de confirmación de pedido: resumen de artículos (con precios congelados del
  * `OrderItem`, nunca del `Product` actual), totales y dirección de envío. Nunca incluye
  * `unitCost`. CSS inline: los clientes de correo no cargan hojas de estilo externas.
@@ -210,6 +232,7 @@ export function orderConfirmationTemplate(input: OrderConfirmationInput): string
                 </div>
 
                 ${shippingSection(input)}
+                ${trackingPageSection(input.trackingPageUrl)}
               </td>
             </tr>
             <tr>

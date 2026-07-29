@@ -78,6 +78,28 @@ export const createOrder: RequestHandler = asyncHandler(
 );
 
 /**
+ * GET /api/orders/lookup/:token — consulta pública del pedido (Fase O.4).
+ *
+ * Sin auth: el token opaco de la orden (que viaja en el link del correo de confirmación) ES la
+ * credencial. Devuelve una proyección explícita —estado, rastreo, totales y dirección— nunca la
+ * fila completa; ver `getOrderByPublicToken` en orders.service.ts para qué queda fuera y por qué.
+ * Un token inválido, inexistente o mal formado responde el MISMO 404 genérico, para no confirmar
+ * qué tokens existen.
+ */
+export const lookupOrder: RequestHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    // Express tipa los params como `string | string[]`; el token siempre llega como uno solo,
+    // y si no, la validación de formato del servicio lo rechaza con el mismo 404 genérico.
+    const raw = req.params.token;
+    const token = Array.isArray(raw) ? (raw[0] ?? "") : (raw ?? "");
+
+    const order = await ordersService.getOrderByPublicToken(token);
+
+    res.json({ order });
+  },
+);
+
+/**
  * POST /api/webhooks/stripe — webhook de pagos de Stripe.
  *
  * La ruta se monta con `express.raw({ type: "application/json" })` (antes del

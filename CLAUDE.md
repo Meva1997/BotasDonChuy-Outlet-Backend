@@ -24,7 +24,9 @@ No linter is configured yet.
 Express 5 + TypeScript REST API backed by PostgreSQL through Sequelize 6. It is the backend
 for the "Botas Don Chuy Outlet" store (products of type `bota`, `sombrero`, or `ropa`).
 
-**Startup flow** (`src/app.ts`): loads env via `dotenv` → creates the Express app → registers
+**Startup flow** (`src/app.ts`): loads env via `dotenv` → creates the Express app → applies
+`trust proxy` when `TRUST_PROXY` is set (see **Conventions** — it decides whether `req.ip`, and
+therefore every rate limiter, sees the real client or the proxy) → registers
 global middleware (`helmet`, `cors` with `CORS_ORIGIN` — a comma-separated list of allowed origins,
 split/trimmed into an array before being passed to `cors()` — JSON and urlencoded body parsers) →
 mounts Swagger UI at `/api/docs` (+ raw spec at `/api/docs.json`) → mounts the routers → exposes
@@ -157,7 +159,12 @@ section for its trigger). `orderConfirmationTemplate` renders the itemized order
 discounted), the `subtotal`/`savings`/`shipping`/`total`, the shipping address, and a **conditional
 shipping block**: today (no Skydropx) a "Estamos preparando tu envío" placeholder, but the signature
 already accepts an optional `tracking: { number, url?, carrier? }` so a future "tu pedido fue enviado"
-email can reuse it without a redesign (ROADMAP Fase 8↔9 note). It **never** receives or renders
+email can reuse it without a redesign (ROADMAP Fase 8↔9 note). It also takes an optional
+`trackingPageUrl` (Fase O.4) and renders a "Ver el estado de mi pedido" button for it — in **both**
+emails (confirmation and "va en camino"), since they share `sendOrderEmail` and there's no telling
+which one the customer keeps; `publicOrderUrl` returns `undefined` for an order with no token (rows
+predating the column) and the block simply isn't rendered, rather than linking to a 404. It **never**
+receives or renders
 `unitCost`, formats money with the shared `formatMoney` (`src/utils/formatMoney.ts`, es-MX
 `$1,920.50` — also used by `dashboard.service.ts` and `product.controller.ts`'s price-conflict
 error, so the same amount reads the same everywhere), and formats the order date pinned to
@@ -212,6 +219,39 @@ Stripe PaymentIntent and an `Order` row, so a sustained flood on this public rou
 account-level rate limit and bloat the orders table even though `pendingOrderSweeper` eventually
 releases the unpaid ones. Only mounted on the public `POST /` in `order.routes.ts`, not on
 `adminOrder.routes.ts` (already behind `requireAuth`).
+
+**Public order lookup** (Fase O.4, `roadmap-operacion-y-negocio.md` — `GET /api/orders/lookup/:token`
+`[público]` in `order.routes.ts` → `order.controller.ts`'s `lookupOrder` →
+`orders.service.getOrderByPublicToken`): lets the buyer check their order's status and tracking
+without an account. There are no customer accounts and no other public read of orders, so until this
+phase the only thing a buyer had after paying was the confirmation email — deleted or spam-filtered,
+every "¿ya salió mi pedido?" became manual WhatsApp work for the store owner. The credential is
+**`Order.publicToken`**, an opaque UUID (unique index, `randomUUID()` generated inside `createOrder`
+alongside the row) that travels as a link in the confirmation email (`/pedido/<token>`, built by
+`publicOrderUrl` in `payment.service.ts` from `FRONTEND_URL` — the only URL this backend builds
+toward the front) **and** in the checkout's `201` (the order is the buyer's, so the front can send
+them to the tracking page without waiting for the email). Deliberately **not** `id + email`: ids are
+sequential and an email is guessable, so that pair would be enumerable even behind a rate limit.
+The response is an **explicit projection** (`PublicOrderView`), not the row with exclusions — built
+field by field with the `SELECT` narrowed to match, so a new `Order` column doesn't leak by someone
+forgetting to add it to an exclusion list; it takes a deliberate edit to appear. Out: `unitCost`,
+`paymentIntentId`, `refundId`, `labelUrl` (the printable label is the owner's — it carries the
+shipper's details and does nothing for someone who just wants to track), the Skydropx ids,
+`shippingRequiresDropoff`, the token itself, and `customerEmail`/`customerPhone` (a tracking page
+doesn't need them and the link gets forwarded over WhatsApp easily). In: status, `paymentStatus`,
+tracking, frozen item prices, totals, the shipping address (what the buyer needs to verify), and
+`refundedAt` — a cancelled order has to say *when* the money went back, which is the next question.
+A **malformed token is rejected before touching the DB**, not to save the query: the column is
+`uuid`, so `WHERE "publicToken" = 'abc'` makes Postgres throw a syntax error that `errorHandler`
+would degrade to a **500** — the same problem `parseId` solves for numeric `:id`s. With the format
+check, missing / tampered / malformed all return the **same 404 with the same message**, per the
+anti-enumeration rule (same as `POST /api/auth/login` and `assertValidResetCode`). Gated by
+`orderLookupRateLimiter` (30 req/min per IP) — deliberately loose, since brute-forcing a UUID is
+infeasible either way and the person reloading that page is a buyer waiting on their order.
+The `publicToken` column ships with `src/migrations/20260728130000-orders-public-token.ts`, which
+backfills existing rows with `gen_random_uuid()` (core since Postgres 13, no extension) **before**
+creating the unique index, and is also declared in `Order.init()`'s `indexes` because
+`tests/setup/db.ts` builds the schema with `sync({ force: true })`.
 
 **Checkout idempotency** (Fase O.2, `roadmap-operacion-y-negocio.md`): the controller no longer calls
 `createOrder` directly — it calls `orders.service.placeOrder(input, idempotencyKey?)`, which wraps the
@@ -1049,7 +1089,10 @@ nullable `shipmentClaimedAt` from Fase O.3 — the moment `createShipmentForOrde
 its own rather than `updatedAt` (which any other write to the order bumps) — see **Reintento de
 guía**; plus nullable `refundId`/`refundedAt` from Fase H.5 — the Stripe refund reference, populated only when a
 `paid` order is cancelled via `POST /api/admin/orders/:id/cancel`, alongside the new `refunded` value
-on the `paymentStatus` enum — see **Manual order cancel/refund**). Adding `refunded` needed a
+on the `paymentStatus` enum — see **Manual order cancel/refund**; plus nullable `publicToken` from
+Fase O.4 — the opaque UUID (unique index) that is the sole credential of `GET
+/api/orders/lookup/:token`, generated in `createOrder` and `null` only on rows predating the column,
+see **Public order lookup**). Adding `refunded` needed a
 `ALTER TYPE ... ADD VALUE` migration (`src/migrations/20260722120600-order-refund-fields.ts`); its
 `down` recreates the enum without it and must drop+restore the column's `DEFAULT 'unpaid'` around the
 type swap (Postgres can't auto-cast a default across types). `OrderItem` freezes per-unit prices (`unitOriginalPrice`, `unitSalePrice`, `unitCost`) so
@@ -1103,10 +1146,11 @@ root and adds `types: [jest, node]`). `roadmaps-completados/roadmap-testing.md` 
 parts** (0 = infra; 0.5 = dedicated test DB; 1 = pure services; 2 = auth; 3 = checkout; 4 = webhook
 idempotency; 5 = manual cancel/refund/release; 6 = live shipping rates; 7 = Skydropx HTTP client;
 8 = admin product CRUD + images; 9 = brand/admin users; 10 = dashboard/reports aggregations) —
-**all twelve are done** as of this phase (25 suites / 262 tests, latest count — grows as tests are
+**all twelve are done** as of this phase (28 suites / 285 tests, latest count — grows as tests are
 added part by part; new phases add their own suite, e.g. `adminOrderStatus.test.ts` for Fase O.1,
-`checkoutIdempotency.test.ts` + `pendingOrderSweeper.test.ts` for Fase O.2 and
-`shipmentRetry.test.ts` for Fase O.3).
+`checkoutIdempotency.test.ts` + `pendingOrderSweeper.test.ts` for Fase O.2,
+`shipmentRetry.test.ts` for Fase O.3, and `orderLookup.test.ts` +
+`unit/services/orderConfirmationTemplate.test.ts` for Fase O.4).
 Keep adding
 new tests **part by part** (one behavior area at a time), marking `[x]` in `roadmaps-completados/roadmap-testing.md` as
 each closes, and don't touch `src/` from a test change unless a test reveals a real bug.
@@ -1170,8 +1214,19 @@ contention.
   concurrent retry would then pay for a second label. **Use it for any new numeric env knob.**
   `FRONTEND_URL`, `SENTRY_DSN` (optional — enables Sentry error tracking if set, see the
   **Logging y monitoreo** section below), `ALERT_EMAIL_TO` (optional — destination for
-  operational alert emails, same section), and `LOG_LEVEL` (optional — overrides the pino
-  logger's level, defaults to `info` in production / `debug` otherwise). `.env` is gitignored —
+  operational alert emails, same section), `LOG_LEVEL` (optional — overrides the pino
+  logger's level, defaults to `info` in production / `debug` otherwise), and `TRUST_PROXY`
+  (optional — the value handed to `app.set("trust proxy", ...)`, parsed by `trustProxyEnv` in
+  `src/utils/env.ts`: `undefined` when unset/blank so `app.ts` never calls `app.set` at all, an
+  integer as a hop count, `true`/`false`, anything else passed through as an address list/preset).
+  **Every rate limiter counts by `req.ip`**, which behind a proxy (Render/Railway/Fly/nginx/
+  Cloudflare — the normal deploy shape here) is the proxy's own address unless Express is told
+  how many hops to trust: without it the limits stop being per-client and become **one bucket for
+  the whole store** — 30 lookups/min shared by every buyer refreshing `GET
+  /api/orders/lookup/:token`, not 30 each. It is deliberately **not** on by default: trusting
+  `X-Forwarded-For` on a directly-exposed server lets anyone bypass the limiters entirely by
+  rotating fake IPs, so only whoever deploys knows the right value (`TRUST_PROXY=1` is the usual
+  PaaS starting point). `.env` is gitignored —
   never commit it (the Stripe/Resend keys are
   test/sandbox; Skydropx currently points at its own separate sandbox account too — see
   `roadmaps-completados/roadmap-skydropx.md` §1).

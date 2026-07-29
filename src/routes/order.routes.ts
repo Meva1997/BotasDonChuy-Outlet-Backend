@@ -1,6 +1,6 @@
 import { Router } from "express";
-import { createOrder } from "../controllers/order.controller";
-import { orderRateLimiter } from "../middlewares/rateLimit";
+import { createOrder, lookupOrder } from "../controllers/order.controller";
+import { orderRateLimiter, orderLookupRateLimiter } from "../middlewares/rateLimit";
 
 const router: Router = Router();
 
@@ -85,5 +85,60 @@ const router: Router = Router();
  *               $ref: '#/components/schemas/Error'
  */
 router.post("/", orderRateLimiter, createOrder);
+
+/**
+ * @openapi
+ * /api/orders/lookup/{token}:
+ *   get:
+ *     summary: Consulta pública del estado y rastreo de un pedido
+ *     description: >
+ *       Deja al comprador ver en qué va su pedido sin cuenta ni contraseña. **No lleva auth:**
+ *       el `publicToken` opaco de la orden —que viaja como link en el correo de confirmación y
+ *       se devuelve también en la respuesta del checkout— es la credencial.
+ *
+ *
+ *       La respuesta es una **proyección explícita**, no la fila completa del pedido: quedan
+ *       fuera `unitCost`, `paymentIntentId`, `refundId`, `shippingRequiresDropoff` (bandera
+ *       operativa del dueño), `labelUrl` (la etiqueta imprimible es del dueño), los ids de
+ *       Skydropx, el propio token y el correo/teléfono del cliente.
+ *
+ *
+ *       Un token mal formado, inexistente o de un pedido borrado devuelve **el mismo `404` con
+ *       el mismo mensaje**, para no confirmar qué tokens existen. Sujeto a rate limiting.
+ *     tags: [Orders]
+ *     parameters:
+ *       - in: path
+ *         name: token
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *         description: El `publicToken` de la orden (UUID).
+ *         example: 3f1a9c7e-5d24-4b8e-9f01-2a6c8d4b7e13
+ *     responses:
+ *       200:
+ *         description: Pedido encontrado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 order: { $ref: '#/components/schemas/PublicOrderLookup' }
+ *       404:
+ *         description: >
+ *           No hay ningún pedido con ese token (o el token no tiene forma de UUID). Mensaje
+ *           idéntico en los dos casos, por diseño.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       429:
+ *         description: Demasiadas consultas desde la misma IP en poco tiempo.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.get("/lookup/:token", orderLookupRateLimiter, lookupOrder);
 
 export default router;

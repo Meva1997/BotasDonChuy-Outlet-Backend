@@ -35,7 +35,7 @@ orden se queda en `paid` para siempre, sin correo de "va en camino" y sin forma 
 | Marcar un pedido como enviado/entregado a mano | ✅ **Fase O.1** (`PATCH /api/admin/orders/:id/status`) | — (falta cablear el botón en el panel: Fase 14 del roadmap del frontend) |
 | Reintentar una guía de Skydropx fallida | ✅ **Fase O.3** (`POST /api/admin/orders/:id/shipment/retry` + barrido automático) | — (falta cablear el botón en el panel: Fase 16 del roadmap del frontend) |
 | Idempotencia en `POST /api/orders` | ✅ **Fase O.2** (ventana de 60 s + header `Idempotency-Key`) | — (opcional: mandar el header desde `usePlaceOrder.ts`, Fase 15 del roadmap del frontend) |
-| Consulta de pedido por el cliente | ❌ ausente | Si borra el correo, escribe por WhatsApp; toda consulta de estado es trabajo manual del dueño |
+| Consulta de pedido por el cliente | ✅ **Fase O.4** (`GET /api/orders/lookup/:token`) | — (falta la página de seguimiento en el front: Fase 17 del roadmap del frontend) |
 | Readiness real en `/health` | ❌ superficial | El healthcheck pasa en verde con Postgres caído |
 | Búsqueda/orden en el catálogo | ❌ solo `categoria`/`talla` | Con el catálogo creciendo por import masivo, el cliente no encuentra lo que busca |
 | Cupones / códigos de descuento | ❌ ausente | Sin la palanca de marketing más barata que existe |
@@ -382,7 +382,7 @@ se crea una sola guía y `skydropxShipmentId` queda poblado.
 
 ---
 
-### Fase O.4 — Consulta pública de pedido
+### Fase O.4 — Consulta pública de pedido ✅
 
 **Objetivo:** que el cliente vea el estado y el tracking de su pedido sin escribirle al dueño.
 
@@ -403,14 +403,58 @@ resto del backend automatizó.
   arma una proyección explícita, no un `toJSON()` con exclusiones.
 
 **Tareas:**
-- [ ] Migración: `orders.publicToken` (UUID, nullable por las filas existentes, índice único).
+- [x] Migración: `orders.publicToken` (UUID, nullable por las filas existentes, índice único).
   Backfill de las órdenes ya creadas en la misma migración.
-- [ ] Generar el token en `orders.service.createOrder` e incluir el link en
+- [x] Generar el token en `orders.service.createOrder` e incluir el link en
   `orderConfirmationTemplate` (ya recibe `FRONTEND_URL`).
-- [ ] `GET /api/orders/lookup/:token` `[público]` con proyección explícita + rate limiter propio.
-- [ ] Tests: token válido devuelve estado/tracking; token inválido → `404` genérico; la respuesta
+- [x] `GET /api/orders/lookup/:token` `[público]` con proyección explícita + rate limiter propio.
+- [x] Tests: token válido devuelve estado/tracking; token inválido → `404` genérico; la respuesta
   **no** contiene `unitCost`, `paymentIntentId` ni `shippingRequiresDropoff`.
-- [ ] Fase 🔴 en el roadmap del frontend (página de seguimiento).
+- [x] Fase 🔴 en el roadmap del frontend (página de seguimiento).
+
+**Cómo quedó (decisiones que el diseño de arriba no fijaba):**
+- **El token mal formado se rechaza antes de tocar la BD**, y no por ahorrarse la consulta: la
+  columna es `uuid`, así que un `WHERE "publicToken" = 'abc'` lo rechaza Postgres con un error de
+  sintaxis y el `errorHandler` lo degradaría a un **500 "Error interno del servidor"** — el mismo
+  problema que `parseId` resuelve para los `:id` numéricos, y encima delataría la causa. Con la
+  validación de formato, los tres casos (mal formado, inexistente, pedido borrado) responden el
+  **mismo 404 con el mismo mensaje**, que es lo que la regla anti-enumeración exige (misma regla
+  que `POST /api/auth/login` y `assertValidResetCode`).
+- **Qué queda fuera de la proyección, además de lo que el diseño ya listaba.** `labelUrl`: la
+  etiqueta imprimible es del dueño, trae los datos del remitente y no le sirve de nada a quien solo
+  quiere rastrear. Los ids de Skydropx (`skydropxShipmentId`/`skydropxQuotationId`/`skydropxRateId`)
+  por la misma razón. El propio `publicToken` (el cliente acaba de mandarlo). Y
+  `customerEmail`/`customerPhone`: no aportan nada a una página de rastreo y el link se comparte por
+  WhatsApp con facilidad. La **dirección sí va** — es lo que el comprador necesita verificar, y
+  corregir con el dueño a tiempo si se equivocó.
+- **`refundedAt` sí se expone** (no así `refundId`): un pedido cancelado tiene que poder decirle al
+  cliente *cuándo* se devolvió el dinero, que es la pregunta que sigue. El id del reembolso de
+  Stripe no le dice nada.
+- **La proyección se arma campo por campo y el `SELECT` también va acotado** (`attributes: [...]`),
+  así que las columnas excluidas ni siquiera salen de Postgres. Es a propósito para que el modo de
+  fallo sea el seguro: una columna nueva en `Order` no aparece hasta que alguien la agregue aquí, en
+  vez de filtrarse sola por olvidar sumarla a una lista de exclusiones.
+- **El token viaja también en la respuesta de `POST /api/orders`**, no solo en el correo. El pedido
+  es del comprador y así el front puede llevarlo a la página de seguimiento en cuanto paga, sin
+  depender de que le llegue el correo (que es justo lo que esta fase asume que puede fallar).
+- **El link va en los dos correos** (confirmación y "tu pedido va en camino"), no solo en el
+  primero: comparten `sendOrderEmail`, y el correo que el cliente conserva es impredecible.
+  `publicOrderUrl` devuelve `undefined` para un pedido sin token (filas anteriores a la columna) y
+  el bloque simplemente no se renderiza, en vez de mandar un link a un 404.
+- **La ruta del front es `/pedido/<token>`**, la única URL que este backend construye hacia el
+  frontend; si cambia allá, hay que cambiarla en `publicOrderUrl` (`payment.service.ts`).
+- **El backfill de la migración usa `gen_random_uuid()`** (nativo desde Postgres 13, sin extensión)
+  y el índice único se crea **después**, para que el `UPDATE` masivo no tenga que respetar la
+  unicidad fila por fila sin necesidad. El índice se declara además en `Order.init()`'s `indexes`
+  porque `tests/setup/db.ts` arma el esquema con `sync({ force: true })`, no con migraciones.
+- **Rate limiter propio, holgado** (`orderLookupRateLimiter`, 30 req/min). No es la defensa contra
+  adivinar tokens —un UUID no se fuerza bruta con ni sin límite—: es para que un script no martille
+  la ruta gratis y para acotar el daño de un token filtrado. El tope es amplio a propósito, porque
+  quien recarga esa página es un comprador esperando su pedido.
+- Tests: `tests/integration/orderLookup.test.ts` (11 casos, nivel 2 — HTTP contra Postgres real) y
+  `tests/unit/services/orderConfirmationTemplate.test.ts` (3 casos, nivel 1). El caso de "no filtra
+  nada" afirma campo por campo **y** hace un barrido sobre el JSON serializado completo, para que un
+  campo nuevo no se cuele con otro nombre en un nivel anidado.
 
 **Cómo verificar:** completar un checkout, abrir el link del correo → estado y tracking correctos;
 cambiar un carácter del token → `404` sin filtrar si la orden existe.
@@ -630,7 +674,7 @@ activo — hay que revisarlos **cerca del 1 de octubre**:
 - [x] **O.1** — `PATCH /api/admin/orders/:id/status` + tracking manual + correo de envío con guard único
 - [x] **O.2** — Idempotencia en `POST /api/orders` (devuelve el original, no `409`)
 - [x] **O.3** — Reintento de guía Skydropx + liberación del centinela huérfano
-- [ ] **O.4** — `GET /api/orders/lookup/:token` (consulta pública con token opaco)
+- [x] **O.4** — `GET /api/orders/lookup/:token` (consulta pública con token opaco)
 - [ ] **O.5** — `GET /health/ready` con chequeo real de BD
 
 **Bloque N — features de negocio**

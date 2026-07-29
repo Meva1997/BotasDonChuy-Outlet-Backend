@@ -1,5 +1,11 @@
 import { RateLimitRequestHandler, rateLimit } from "express-rate-limit";
 
+// Todos estos limitadores cuentan por `req.ip`, que detrás de un proxy es la IP del proxy
+// mientras Express no tenga `trust proxy`: en ese caso el tope no es por cliente, es uno solo
+// para toda la tienda. Se configura con la env `TRUST_PROXY` (ver `trustProxyEnv` en
+// `utils/env.ts`, donde está el porqué de que no venga activado por defecto). Si se despliega
+// detrás de un proxy sin definirla, estos números dejan de significar lo que dicen.
+
 export const authRateLimiter: RateLimitRequestHandler = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 10,
@@ -31,4 +37,19 @@ export const orderRateLimiter: RateLimitRequestHandler = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { message: "Demasiados pedidos. Intenta de nuevo en un momento." },
+});
+
+// GET /api/orders/lookup/:token es público y su token ES la credencial (Fase O.4). Adivinar un
+// UUID por fuerza bruta es inviable con o sin límite, así que esto no es la defensa contra eso:
+// es para que un script no pueda martillar la ruta gratis y de paso acota el daño de un token
+// filtrado. El tope es holgado a propósito — la página de seguimiento la recarga gente real
+// esperando su pedido, y un límite apretado castigaría justo al comprador ansioso.
+export const orderLookupRateLimiter: RateLimitRequestHandler = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    message: "Demasiadas consultas seguidas. Espera un momento y vuelve a intentar.",
+  },
 });

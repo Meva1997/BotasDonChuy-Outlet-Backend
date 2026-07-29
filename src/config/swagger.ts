@@ -608,12 +608,99 @@ const options: Options = {
               nullable: true,
               description: "Momento en que se aplicó el reembolso. null si la orden no se reembolsó.",
             },
+            publicToken: {
+              type: "string",
+              format: "uuid",
+              nullable: true,
+              description:
+                "Token opaco de consulta pública (Fase O.4): es la credencial de GET /api/orders/lookup/{token}, la ruta sin auth donde el comprador ve el estado y el rastreo de su pedido. Viaja como link en el correo de confirmación. Se devuelve al comprador en la respuesta del checkout (el pedido es suyo); null solo en pedidos anteriores a la columna.",
+              example: "3f1a9c7e-5d24-4b8e-9f01-2a6c8d4b7e13",
+            },
             items: {
               type: "array",
               items: { $ref: "#/components/schemas/OrderItem" },
             },
             createdAt: { type: "string", format: "date-time" },
             updatedAt: { type: "string", format: "date-time" },
+          },
+        },
+        // Proyección explícita de la consulta pública (Fase O.4). NO es `Order` con campos
+        // omitidos: se arma campo por campo en getOrderByPublicToken, así que una columna nueva
+        // en `Order` no se filtra sola por olvidar excluirla.
+        PublicOrderLookup: {
+          type: "object",
+          properties: {
+            id: { type: "integer", example: 5 },
+            status: {
+              type: "string",
+              enum: ["pending", "paid", "shipped", "delivered", "cancelled"],
+              example: "shipped",
+            },
+            paymentStatus: {
+              type: "string",
+              enum: ["unpaid", "processing", "paid", "failed", "refunded"],
+              example: "paid",
+            },
+            createdAt: { type: "string", format: "date-time" },
+            subtotal: { type: "number", format: "float", example: 1899.0 },
+            savings: { type: "number", format: "float", example: 400.0 },
+            shipping: { type: "number", format: "float", example: 160.0 },
+            total: { type: "number", format: "float", example: 1659.0 },
+            customerName: { type: "string", example: "Juan Pérez" },
+            shippingAddress: {
+              type: "object",
+              description:
+                "Dirección de entrega. Se incluye para que el comprador la verifique (y avise a tiempo si se equivocó); su correo y teléfono NO se devuelven.",
+              properties: {
+                street: { type: "string", example: "Av. Reforma 123" },
+                neighborhood: { type: "string", example: "Centro" },
+                city: { type: "string", example: "Celaya" },
+                state: { type: "string", example: "Guanajuato" },
+                postalCode: { type: "string", example: "38000" },
+                references: { type: "string", nullable: true, example: "Casa azul, portón negro." },
+              },
+            },
+            shippingCarrier: { type: "string", nullable: true, example: "Estafeta" },
+            trackingNumber: {
+              type: "string",
+              nullable: true,
+              description:
+                "Número de guía. null mientras el pedido no se haya enviado (o si la guía todavía no la reporta el webhook de Skydropx).",
+              example: "ESF1234567890",
+            },
+            trackingUrl: {
+              type: "string",
+              nullable: true,
+              example: "https://www.estafeta.com/Rastreo/ESF1234567890",
+            },
+            shipmentStatus: {
+              type: "string",
+              nullable: true,
+              description: "Último estado crudo reportado por la paquetería.",
+              example: "in_transit",
+            },
+            refundedAt: {
+              type: "string",
+              format: "date-time",
+              nullable: true,
+              description:
+                "Momento del reembolso, cuando el pedido se canceló y se devolvió el dinero. El id del reembolso NO se expone aquí.",
+            },
+            items: {
+              type: "array",
+              description:
+                "Renglones con los precios CONGELADOS de la compra. Sin `unitCost` ni ids internos.",
+              items: {
+                type: "object",
+                properties: {
+                  nameSnapshot: { type: "string", example: "Bota vaquera de cuero" },
+                  size: { type: "integer", example: 26 },
+                  quantity: { type: "integer", example: 1 },
+                  unitOriginalPrice: { type: "number", format: "float", example: 1899.0 },
+                  unitSalePrice: { type: "number", format: "float", example: 1499.0 },
+                },
+              },
+            },
           },
         },
         OrderResponse: {

@@ -24,6 +24,7 @@ import adminUserRoutes from "./routes/adminUser.routes";
 import accountRoutes from "./routes/account.routes";
 import shippingRoutes from "./routes/shipping.routes";
 import { errorHandler } from "./middlewares/errorHandler";
+import { trustProxyEnv } from "./utils/env";
 import {
   startPendingOrderSweeper,
   stopPendingOrderSweeper,
@@ -44,6 +45,15 @@ dotenv.config({ quiet: true });
 
 const app: Express = express();
 const PORT = process.env.PORT || 4000;
+
+// Detrás de un proxy, `req.ip` es la IP del proxy salvo que Express sepa en cuántos saltos
+// confiar — y de `req.ip` cuelgan TODOS los rate limiters (ver utils/env.ts para por qué esto
+// no se activa solo). Se aplica antes de montar cualquier ruta.
+const trustProxy = trustProxyEnv();
+if (trustProxy !== undefined) {
+  app.set("trust proxy", trustProxy);
+  logger.info({ trustProxy }, "trust proxy configurado (req.ip viene de X-Forwarded-For)");
+}
 
 // El arranque real (conexión a la BD, sweeper, servidor HTTP y apagado ordenado) vive
 // al final del archivo, gateado por `NODE_ENV !== "test"`: Supertest importa este `app`

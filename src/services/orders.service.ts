@@ -1,8 +1,9 @@
+import { randomUUID } from "crypto";
 import { Op } from "sequelize";
 import { sequelize } from "../config/database";
 import { Product } from "../models/Product";
 import { ProductSize } from "../models/ProductSize";
-import { Order } from "../models/Order";
+import { Order, type OrderAttributes } from "../models/Order";
 import { OrderItem } from "../models/OrderItem";
 import { AppError } from "../middlewares/AppError";
 import { computeTotals, type CartLineItem } from "./cart";
@@ -212,6 +213,10 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
         // Solo se sabe con cotización en vivo; en tarifa plana de respaldo queda
         // null (no aplica: la tienda no manda por Skydropx en ese caso).
         shippingRequiresDropoff: shippingOverride?.requiresDropoff ?? undefined,
+        // Credencial de la consulta pública (Fase O.4). Se genera aquí, con el resto de la
+        // orden, para que exista desde el primer instante: el correo de confirmación lo manda
+        // como link y la respuesta del checkout lo devuelve al comprador.
+        publicToken: randomUUID(),
       },
       { transaction: t },
     );
@@ -434,6 +439,143 @@ async function executeCheckout(
  */
 export function resetCheckoutIdempotency(): void {
   recentCheckouts.clear();
+}
+
+// ── Consulta pública de pedido (Fase O.4) ─────────────────────────────────────
+
+/**
+ * Lo que ve el comprador en la página de seguimiento. Es una **proyección explícita**, no un
+ * `toJSON()` con exclusiones: en una ruta pública, una columna nueva en `Order` no debe filtrarse
+ * sola por olvidar agregarla a una lista de exclusiones — aquí, al revés, un campo nuevo no
+ * aparece hasta que alguien decide ponerlo.
+ *
+ * Deliberadamente **fuera**: `unitCost` (costo/margen, regla de siempre), `paymentIntentId` y
+ * `refundId` (identificadores de Stripe), `shippingRequiresDropoff` (bandera operativa del dueño),
+ * `labelUrl` (la etiqueta imprimible es del dueño, no del comprador; trae los datos del remitente
+ * y no le sirve de nada a quien solo quiere rastrear), los ids de Skydropx, y el propio
+ * `publicToken` (el cliente ya lo tiene: es lo que acaba de mandar).
+ *
+ * También fuera `customerEmail`/`customerPhone`: no aportan nada a una página de rastreo y el link
+ * se comparte por WhatsApp con facilidad. La dirección sí va — es lo que el comprador necesita
+ * verificar (y corregir con el dueño a tiempo si se equivocó).
+ */
+export interface PublicOrderView {
+  id: number;
+  status: OrderAttributes["status"];
+  paymentStatus: OrderAttributes["paymentStatus"];
+  createdAt: Date;
+  subtotal: number;
+  savings: number;
+  shipping: number;
+  total: number;
+  customerName: string;
+  shippingAddress: {
+    street: string;
+    neighborhood: string;
+    city: string;
+    state: string;
+    postalCode: string;
+    references: string | null;
+  };
+  shippingCarrier: string | null;
+  trackingNumber: string | null;
+  trackingUrl: string | null;
+  shipmentStatus: string | null;
+  refundedAt: Date | null;
+  items: Array<{
+    nameSnapshot: string;
+    size: number;
+    quantity: number;
+    unitOriginalPrice: number;
+    unitSalePrice: number;
+  }>;
+}
+
+/** Un token que no es un UUID no puede existir en la BD; ni siquiera se consulta (ver abajo). */
+const PUBLIC_TOKEN_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Mensaje **único** para todo lo que no resuelve: token mal formado, inexistente o de una orden
+ * borrada. Misma regla anti-enumeración que `POST /api/auth/login` y `assertValidResetCode`: si el
+ * mensaje (o el status) cambiara según la causa, la ruta confirmaría qué tokens existen.
+ */
+const LOOKUP_NOT_FOUND_MESSAGE =
+  "No encontramos ningún pedido con ese enlace. Revisa que esté completo o busca el correo de confirmación que te enviamos.";
+
+/**
+ * Consulta pública de un pedido por su token opaco (Fase O.4).
+ *
+ * **Por qué existe:** no hay cuentas de cliente ni ninguna otra lectura pública de órdenes. Tras
+ * pagar, lo único que tenía el comprador era el correo de confirmación; si lo borraba o le caía en
+ * spam, cada "¿ya salió mi pedido?" era trabajo manual del dueño por WhatsApp.
+ *
+ * El token mal formado se rechaza **antes** de tocar la BD, y no por ahorrarse la consulta: la
+ * columna es `uuid`, así que Postgres rechazaría un `WHERE publicToken = 'abc'` con un error de
+ * sintaxis y el errorHandler lo degradaría a un **500** — el mismo problema que `parseId` resuelve
+ * para los `:id` numéricos. El 404 tiene que verse idéntico venga de donde venga.
+ */
+export async function getOrderByPublicToken(token: string): Promise<PublicOrderView> {
+  if (!PUBLIC_TOKEN_PATTERN.test(token)) {
+    throw new AppError(LOOKUP_NOT_FOUND_MESSAGE, 404);
+  }
+
+  // `attributes` acotado: los campos excluidos no salen siquiera de Postgres, así que no hay
+  // manera de que un `res.json` descuidado más adelante los alcance.
+  const order = await Order.findOne({
+    where: { publicToken: token },
+    attributes: [
+      "id", "status", "paymentStatus", "createdAt",
+      "subtotal", "savings", "shipping", "total",
+      "customerName", "street", "neighborhood", "city", "state", "postalCode", "references",
+      "shippingCarrier", "trackingNumber", "trackingUrl", "shipmentStatus", "refundedAt",
+    ],
+    include: [
+      {
+        model: OrderItem,
+        as: "items",
+        attributes: [
+          "nameSnapshot", "size", "quantity", "unitOriginalPrice", "unitSalePrice",
+        ],
+      },
+    ],
+  });
+
+  if (!order) {
+    throw new AppError(LOOKUP_NOT_FOUND_MESSAGE, 404);
+  }
+
+  return {
+    id: order.id,
+    status: order.status,
+    paymentStatus: order.paymentStatus,
+    createdAt: order.createdAt,
+    subtotal: order.subtotal,
+    savings: order.savings,
+    shipping: order.shipping,
+    total: order.total,
+    customerName: order.customerName,
+    shippingAddress: {
+      street: order.street,
+      neighborhood: order.neighborhood,
+      city: order.city,
+      state: order.state,
+      postalCode: order.postalCode,
+      references: order.references ?? null,
+    },
+    shippingCarrier: order.shippingCarrier ?? null,
+    trackingNumber: order.trackingNumber,
+    trackingUrl: order.trackingUrl,
+    shipmentStatus: order.shipmentStatus,
+    refundedAt: order.refundedAt,
+    items: (order.items ?? []).map((it) => ({
+      nameSnapshot: it.nameSnapshot,
+      size: it.size,
+      quantity: it.quantity,
+      unitOriginalPrice: it.unitOriginalPrice,
+      unitSalePrice: it.unitSalePrice,
+    })),
+  };
 }
 
 /**

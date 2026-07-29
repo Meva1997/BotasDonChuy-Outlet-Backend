@@ -61,6 +61,12 @@ export interface OrderAttributes {
   // cualquier otro caso. Ver `cancelOrderByAdmin` en orders.service.ts.
   refundId: string | null;
   refundedAt: Date | null;
+  // Token opaco de consulta pública (Fase O.4). Es la ÚNICA credencial de
+  // `GET /api/orders/lookup/:token`, la ruta que deja al cliente ver el estado y el rastreo de
+  // su pedido sin cuenta ni contraseña — de ahí que sea un UUID aleatorio con índice único y no
+  // el par `id + email` (ids secuenciales + correo adivinable = enumerable). Se genera en
+  // `createOrder`; nullable solo por las filas anteriores a la columna (la migración las rellenó).
+  publicToken: string | null;
 }
 
 interface OrderCreationAttributes extends Optional<
@@ -81,6 +87,7 @@ interface OrderCreationAttributes extends Optional<
   | "shipmentStatus"
   | "refundId"
   | "refundedAt"
+  | "publicToken"
 > {}
 
 export class Order
@@ -116,6 +123,7 @@ export class Order
   declare shipmentStatus: string | null;
   declare refundId: string | null;
   declare refundedAt: Date | null;
+  declare publicToken: string | null;
   declare readonly createdAt: Date;
   declare readonly updatedAt: Date;
   declare items?: OrderItem[];
@@ -276,10 +284,22 @@ Order.init(
       allowNull: true,
       defaultValue: null,
     },
+    publicToken: {
+      type: DataTypes.UUID,
+      allowNull: true,
+      defaultValue: null,
+    },
   },
   {
     sequelize,
     tableName: "orders",
     timestamps: true,
+    // El índice se declara aquí ADEMÁS de en su migración (Fase O.4) porque
+    // `tests/setup/db.ts` arma el esquema con `sync({ force: true })`, no con migraciones:
+    // sin esto, la unicidad del token —la única garantía de que un token no resuelva a dos
+    // pedidos— no existiría en la BD de test. Mismo motivo que el índice de `product_sizes`.
+    indexes: [
+      { unique: true, fields: ["publicToken"], name: "orders_public_token_unique" },
+    ],
   },
 );

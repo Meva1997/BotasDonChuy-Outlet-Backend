@@ -12,7 +12,7 @@ import {
   SHIP_FROM_STREET,
   SHIPMENT_RETRY_DELAY_MINUTES,
 } from "../config/skydropx";
-import { EMAIL_FROM } from "../config/resend";
+import { EMAIL_FROM, FRONTEND_URL } from "../config/resend";
 import { sendEmail } from "./email.service";
 import { sendAlertEmail } from "./alert.service";
 import { orderConfirmationTemplate } from "./email/templates/orderConfirmation";
@@ -806,6 +806,19 @@ export async function retryShipmentFromSweeper(order: Order): Promise<ShipmentAt
 }
 
 /**
+ * Link a la página pública de seguimiento (Fase O.4). `undefined` cuando el pedido no tiene token
+ * (filas anteriores a la columna): en ese caso el correo simplemente no lleva el botón, en vez de
+ * mandar un link roto a una página que respondería 404.
+ *
+ * La ruta `/pedido/<token>` es la que el frontend registra para esta fase; si cambia allá, cambia
+ * aquí — es la única URL que este backend construye hacia el front.
+ */
+function publicOrderUrl(publicToken: string | null): string | undefined {
+  if (!publicToken) return undefined;
+  return `${FRONTEND_URL.replace(/\/+$/, "")}/pedido/${publicToken}`;
+}
+
+/**
  * Recarga la orden con sus `items` (sin `unitCost`) y le manda un correo con el mismo
  * `orderConfirmationTemplate`. Aislado y con try/catch propio para poder dispararse en segundo
  * plano (fire-and-forget) desde los webhooks sin bloquear su respuesta ni propagar errores.
@@ -857,6 +870,7 @@ async function sendOrderEmail(
         },
         shippingCarrier: order.shippingCarrier,
         tracking: opts.tracking,
+        trackingPageUrl: publicOrderUrl(order.publicToken),
       }),
       idempotencyKey: opts.idempotencyKey,
     });
