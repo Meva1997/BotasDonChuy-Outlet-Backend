@@ -1030,6 +1030,320 @@ const options: Options = {
             expiresAt: { type: "string", format: "date-time", nullable: true },
           },
         },
+        // ── Gastos (Fase N.3) ──────────────────────────────────────────────────
+        ExpenseAmountVersion: {
+          type: "object",
+          description:
+            "Una versión del monto. El monto NO es una columna del gasto: se guarda versionado por fecha de vigencia, y eso es lo que hace que subir un precio hoy no reescriba lo que costaba en meses pasados.",
+          properties: {
+            id: { type: "integer", example: 7 },
+            amount: { type: "number", format: "float", example: 290.0 },
+            effectiveFrom: {
+              type: "string",
+              description: "Desde qué día rige este monto (AAAA-MM-DD).",
+              example: "2026-08-01",
+            },
+            note: {
+              type: "string",
+              nullable: true,
+              description: "Por qué cambió. El monto solo dice cuánto.",
+              example: "Subió el dólar",
+            },
+          },
+        },
+        Expense: {
+          type: "object",
+          properties: {
+            id: { type: "integer", example: 3 },
+            concept: { type: "string", maxLength: 120, example: "Render — Web Service" },
+            vendor: { type: "string", maxLength: 60, nullable: true, example: "Render" },
+            category: {
+              type: "string",
+              enum: [
+                "infraestructura",
+                "software",
+                "renta",
+                "servicios",
+                "paqueteria",
+                "publicidad",
+                "nomina",
+                "impuestos",
+                "otro",
+              ],
+              example: "infraestructura",
+            },
+            frequency: {
+              type: "string",
+              enum: [
+                "once",
+                "weekly",
+                "monthly",
+                "bimonthly",
+                "quarterly",
+                "semiannual",
+                "yearly",
+              ],
+              description: "`once` es un gasto de una sola vez: cuenta completo en su mes y no entra en la carga mensual recurrente.",
+              example: "monthly",
+            },
+            startsAt: {
+              type: "string",
+              description: "Fecha del primer cargo (AAAA-MM-DD). Y el único, si `frequency: once`.",
+              example: "2026-03-15",
+            },
+            endsAt: {
+              type: "string",
+              nullable: true,
+              description:
+                "Se canceló: deja de generar cargos desde esa fecha, pero el historial pasado se conserva.",
+              example: null,
+            },
+            active: { type: "boolean", example: true },
+            notes: { type: "string", maxLength: 300, nullable: true },
+            currentAmount: {
+              type: "number",
+              format: "float",
+              description: "Monto vigente hoy, CALCULADO a partir de las versiones.",
+              example: 290.0,
+            },
+            monthlyRunRate: {
+              type: "number",
+              format: "float",
+              description:
+                "Equivalente mensual de este gasto (0 para los de única vez y los ya terminados).",
+              example: 290.0,
+            },
+            nextChargeDate: {
+              type: "string",
+              nullable: true,
+              description: "Próximo cargo a partir de hoy, o null si ya no habrá más.",
+              example: "2026-09-15",
+            },
+            amounts: {
+              type: "array",
+              description: "Historial de precios del gasto, del más antiguo al más reciente.",
+              items: { $ref: "#/components/schemas/ExpenseAmountVersion" },
+            },
+          },
+        },
+        ExpenseInput: {
+          type: "object",
+          required: ["concept", "category", "frequency", "startsAt", "amount"],
+          properties: {
+            concept: { type: "string", maxLength: 120, example: "Render — Web Service" },
+            vendor: { type: "string", maxLength: 60, nullable: true, example: "Render" },
+            category: {
+              type: "string",
+              enum: [
+                "infraestructura",
+                "software",
+                "renta",
+                "servicios",
+                "paqueteria",
+                "publicidad",
+                "nomina",
+                "impuestos",
+                "otro",
+              ],
+              example: "infraestructura",
+            },
+            frequency: {
+              type: "string",
+              enum: [
+                "once",
+                "weekly",
+                "monthly",
+                "bimonthly",
+                "quarterly",
+                "semiannual",
+                "yearly",
+              ],
+              example: "monthly",
+            },
+            startsAt: { type: "string", example: "2026-03-15" },
+            endsAt: {
+              type: "string",
+              nullable: true,
+              description: "No se acepta junto con `frequency: once` (sería una contradicción).",
+              example: null,
+            },
+            active: { type: "boolean", example: true },
+            notes: { type: "string", maxLength: 300, nullable: true },
+            amount: {
+              type: "number",
+              format: "float",
+              description: "En pesos. Lo que realmente se paga: no hay conversión de divisa.",
+              example: 290.0,
+            },
+            amountEffectiveFrom: {
+              type: "string",
+              description:
+                "Desde cuándo rige el monto. Por defecto `startsAt`, no hoy: si se registra en agosto una suscripción que empezó en marzo, los cargos de marzo a julio tienen que valer ese monto.",
+              example: "2026-03-15",
+            },
+            amountNote: { type: "string", maxLength: 200, nullable: true },
+          },
+        },
+        ExpenseUpdateInput: {
+          type: "object",
+          description:
+            "Todos los campos son opcionales. Mandar `amount` AGREGA una versión de monto en vez de sobrescribir la anterior (salvo que ya exista una con la misma fecha de vigencia, o que el monto no haya cambiado).",
+          properties: {
+            concept: { type: "string", maxLength: 120 },
+            vendor: { type: "string", maxLength: 60, nullable: true },
+            category: {
+              type: "string",
+              enum: [
+                "infraestructura",
+                "software",
+                "renta",
+                "servicios",
+                "paqueteria",
+                "publicidad",
+                "nomina",
+                "impuestos",
+                "otro",
+              ],
+            },
+            frequency: {
+              type: "string",
+              enum: [
+                "once",
+                "weekly",
+                "monthly",
+                "bimonthly",
+                "quarterly",
+                "semiannual",
+                "yearly",
+              ],
+            },
+            startsAt: { type: "string", example: "2026-03-15" },
+            endsAt: { type: "string", nullable: true, example: "2026-12-31" },
+            active: { type: "boolean", example: false },
+            notes: { type: "string", maxLength: 300, nullable: true },
+            amount: { type: "number", format: "float", example: 340.0 },
+            amountEffectiveFrom: { type: "string", example: "2026-09-01" },
+            amountNote: { type: "string", maxLength: 200, nullable: true, example: "Cambio a plan Pro" },
+          },
+        },
+        ExpenseSummary: {
+          type: "object",
+          properties: {
+            monthlyRunRate: {
+              type: "number",
+              format: "float",
+              description:
+                "Lo que hay que retirar cada mes de lo ganado para cubrir los gastos recurrentes vivos. Una anualidad cuenta 1/12 y una semanal 52/12.",
+              example: 1310.83,
+            },
+            annualRunRate: { type: "number", format: "float", example: 15730.0 },
+            activeCount: {
+              type: "integer",
+              description: "Gastos que siguen generando cargos (no solo la bandera `active`).",
+              example: 4,
+            },
+            byCategory: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  category: { type: "string", example: "infraestructura" },
+                  count: { type: "integer", example: 3 },
+                  monthlyRunRate: { type: "number", format: "float", example: 1020.83 },
+                },
+              },
+            },
+            byFrequency: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  frequency: { type: "string", example: "monthly" },
+                  count: { type: "integer", example: 3 },
+                  monthlyRunRate: { type: "number", format: "float", example: 1290.0 },
+                },
+              },
+            },
+            upcomingDays: { type: "integer", example: 60 },
+            upcomingTotal: { type: "number", format: "float", example: 830.0 },
+            upcomingCharges: {
+              type: "array",
+              description: "Qué se cobra, de cuánto y en qué fecha, ordenado por fecha.",
+              items: {
+                type: "object",
+                properties: {
+                  expenseId: { type: "integer", example: 3 },
+                  concept: { type: "string", example: "Render — Web Service" },
+                  vendor: { type: "string", nullable: true, example: "Render" },
+                  category: { type: "string", example: "infraestructura" },
+                  frequency: { type: "string", example: "monthly" },
+                  date: { type: "string", example: "2026-08-15" },
+                  amount: { type: "number", format: "float", example: 290.0 },
+                },
+              },
+            },
+          },
+        },
+        ExpenseMonth: {
+          type: "object",
+          properties: {
+            isoMonth: { type: "string", example: "2026-08" },
+            label: { type: "string", example: "Agosto 2026" },
+            partial: {
+              type: "boolean",
+              description: "El mes en curso todavía no termina: su total puede crecer.",
+              example: true,
+            },
+            total: { type: "number", format: "float", example: 2540.0 },
+            byCategory: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  category: { type: "string", example: "infraestructura" },
+                  amount: { type: "number", format: "float", example: 540.0 },
+                },
+              },
+            },
+            byExpense: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  expenseId: { type: "integer", example: 3 },
+                  concept: { type: "string", example: "Render — Web Service" },
+                  vendor: { type: "string", nullable: true, example: "Render" },
+                  category: { type: "string", example: "infraestructura" },
+                  frequency: { type: "string", example: "monthly" },
+                  occurrences: {
+                    type: "integer",
+                    description: "Cuántos cargos cayeron en el mes (más de 1 solo en semanales).",
+                    example: 1,
+                  },
+                  amount: { type: "number", format: "float", example: 290.0 },
+                },
+              },
+            },
+            changes: {
+              type: "array",
+              description:
+                "Los cambios de precio que entraron en vigor este mes. ESTE arreglo es la respuesta a \"¿algo cambió?\": sin él, un aumento solo se nota como un total más alto sin causa visible. Se devuelve crudo — el delta y el % los calcula el front.",
+              items: {
+                type: "object",
+                properties: {
+                  expenseId: { type: "integer", example: 3 },
+                  concept: { type: "string", example: "Render — Web Service" },
+                  vendor: { type: "string", nullable: true, example: "Render" },
+                  category: { type: "string", example: "infraestructura" },
+                  effectiveFrom: { type: "string", example: "2026-08-01" },
+                  previousAmount: { type: "number", format: "float", example: 290.0 },
+                  amount: { type: "number", format: "float", example: 340.0 },
+                  note: { type: "string", nullable: true, example: "Subió el dólar" },
+                },
+              },
+            },
+          },
+        },
         ShippingRatesInput: {
           type: "object",
           required: ["customer", "items"],

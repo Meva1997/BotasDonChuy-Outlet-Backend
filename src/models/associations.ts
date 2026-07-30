@@ -4,6 +4,8 @@ import { Order } from "./Order";
 import { OrderItem } from "./OrderItem";
 import { Coupon } from "./Coupon";
 import { CouponRedemption } from "./CouponRedemption";
+import { Expense } from "./Expense";
+import { ExpenseAmount } from "./ExpenseAmount";
 
 Product.hasMany(ProductSize, {
   as: "productSizes",
@@ -48,3 +50,14 @@ Order.hasOne(CouponRedemption, {
 // asociación —el `couponCode` congelado es lo que se muestra—, se declara para que
 // `sync({ force: true })` cree la FK en la BD de test igual que la crea la migración en prod.
 Order.belongsTo(Coupon, { as: "coupon", foreignKey: "couponId" });
+
+// Gastos (Fase N.3). El monto vive SOLO en `expense_amounts`, versionado por fecha de vigencia:
+// el gasto es la identidad y el calendario, sus versiones son cuánto costaba en cada momento.
+// `CASCADE` porque una versión de monto no significa nada sin su gasto, y borrar un gasto solo se
+// permite cuando nunca generó un cargo (si generó, se desactiva — ver `deleteExpense`).
+Expense.hasMany(ExpenseAmount, {
+  as: "amounts",
+  foreignKey: "expenseId",
+  onDelete: "CASCADE",
+});
+ExpenseAmount.belongsTo(Expense, { foreignKey: "expenseId" });

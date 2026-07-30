@@ -25,6 +25,7 @@ import accountRoutes from "./routes/account.routes";
 import shippingRoutes from "./routes/shipping.routes";
 import couponRoutes from "./routes/coupon.routes";
 import adminCouponRoutes from "./routes/adminCoupon.routes";
+import adminExpenseRoutes from "./routes/adminExpense.routes";
 import { errorHandler } from "./middlewares/errorHandler";
 import { trustProxyEnv } from "./utils/env";
 import { checkReadiness, markDraining } from "./services/readiness";
@@ -44,6 +45,8 @@ import "./models/OrderItem";
 import "./models/BrandSettings";
 import "./models/Coupon";
 import "./models/CouponRedemption";
+import "./models/Expense";
+import "./models/ExpenseAmount";
 import "./models/associations";
 
 dotenv.config({ quiet: true });
@@ -100,6 +103,7 @@ app.use("/api/admin/brand", brandRoutes); // GET pública, PUT protegido dentro 
 app.use("/api/admin/users", adminUserRoutes);
 app.use("/api/admin/account", accountRoutes);
 app.use("/api/admin/coupons", adminCouponRoutes);
+app.use("/api/admin/expenses", adminExpenseRoutes);
 app.use("/api/orders", orderRoutes); // checkout público
 app.use("/api/shipping", shippingRoutes); // cotización en vivo, pública
 app.use("/api/coupons", couponRoutes); // validación del cupón sin canjear, pública

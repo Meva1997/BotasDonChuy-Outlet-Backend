@@ -789,24 +789,80 @@ mismo correo puede volver a comprar.
 
 ---
 
-### Fase N.3 — Gastos reales (sustituye `GASTOS_FIJOS`)
+### Fase N.3 — Gastos reales (sustituye `GASTOS_FIJOS`) ✅ *(completada)*
 
 **Objetivo:** que el KPI de utilidad del dashboard use gastos capturados, no una constante.
 
-**Por qué:** `GASTOS_FIJOS = $2,000` está hardcodeado en `dashboard.service.ts` con el comentario
-"no existe un modelo de gastos". Mientras siga ahí, `profitKpisByPeriod` es un número inventado, y
+**Por qué:** `GASTOS_FIJOS = $2,000` estaba hardcodeado en `dashboard.service.ts` con el comentario
+"no existe un modelo de gastos". Mientras siguió ahí, `profitKpisByPeriod` fue un número inventado, y
 es justo el número que el dueño usa para decidir si el negocio gana dinero.
 
 **Tareas:**
-- [ ] Modelo `Expense` (`concept`, `amount`, `date`, `category`, `recurring: boolean`) + migración.
-- [ ] CRUD `/api/admin/expenses` `[auth]` con filtro por rango de fechas.
-- [ ] `dashboard.service.ts`: sustituir la constante por la suma real, prorrateada por ventana con
-  la misma lógica que hoy (`× windowDays/30`). Los gastos `recurring` cuentan cada mes; los de una
+- [x] Modelos `Expense` + `ExpenseAmount` + migración.
+- [x] CRUD `/api/admin/expenses` `[auth]` con filtro por rango de fechas, más `/summary` y
+  `/history`.
+- [x] `dashboard.service.ts`: sustituir la constante por la suma real, prorrateada por ventana con
+  la misma lógica que hoy (`× windowDays/30`). Los gastos recurrentes cuentan cada mes; los de una
   sola vez, solo en su mes.
-- [ ] Seed: migrar los `$2,000` actuales a una fila de gasto recurrente, para que el dashboard no
-  cambie de golpe el día del deploy.
-- [ ] Tests de la agregación (nivel 1, sin BD, como el resto de `dashboard.service`).
-- [ ] Fase 🔴 en el roadmap del frontend.
+- [x] Seed: migrar los `$2,000` actuales a una fila de gasto recurrente.
+- [x] Tests de la agregación (nivel 1, sin BD) + suite de integración del CRUD.
+- [x] Fase 🔴 en el roadmap del frontend (Fase 20).
+
+**Lo que cambió respecto al plan original de esta fase.** El roadmap pedía un modelo plano
+(`concept`, `amount`, `date`, `category`, `recurring: boolean`); el alcance real que pidió el dueño
+—"cada cuánto se paga, cuánto hay que retirar en total, y un historial mes con mes para saber si algo
+cambió"— exige dos cosas que ese modelo no puede dar:
+
+- **`frequency` en vez de `recurring: boolean`** (`once · weekly · monthly · bimonthly · quarterly ·
+  semiannual · yearly`). Con un booleano, una anualidad de dominio y una mensualidad de Render son
+  "lo mismo", y no hay forma de calcular ni cuándo se cobra ni cuánto apartar por mes.
+- **El monto versionado en `expense_amounts`, no como columna del gasto.** Es lo que hace que el
+  historial sea honesto: subir Render de $290 a $340 hoy **no reescribe** lo que costaba en julio, y
+  el "¿algo cambió?" sale consultable del propio versionado (`changes` por mes) en vez de ser una
+  corazonada sobre un total más alto. Un `amount` en `expenses` habría dejado dos fuentes de verdad
+  (misma trampa que `redeemedCount` vs `activeRedemptions`).
+
+Decisiones acordadas con el dueño antes de escribir código: **todo en MXN** (Render/Vercel cobran en
+USD, pero se captura lo que cobró la tarjeta — un movimiento del dólar es un cambio de monto fechado,
+no una conversión que se desactualiza en silencio); **categorías ENUM fijas** con `otro` (con texto
+libre, `"Infra"`/`"infraestructura"`/`"INFRA"` serían tres grupos en la misma gráfica); y el KPI
+renombrado de `GASTOS FIJOS` a **`GASTOS`** con el desglose en el subtítulo, porque con gastos de
+única vez adentro "fijos" sería falso.
+
+**Los dos números que no hay que confundir:** el **gasto real de un mes** se calcula generando las
+fechas de cargo y atribuyendo cada una a su mes con el monto vigente en esa fecha (una anualidad cae
+completa en su mes de renovación, no untada en el año), y la **carga mensual normalizada**
+(`yearly ÷ 12`, `weekly × 52/12` — no `× 4`, el año tiene 52 semanas) responde "cuánto retirar" y es
+lo que el dashboard prorratea. Los `once` valen 0 en el run-rate y cuentan completos en su mes.
+
+**Trampas que costaron y quedaron cubiertas por tests:** las fechas son `DATEONLY` (un cargo es un
+día de calendario — esquiva el problema de zona horaria que los cupones resolvieron con un offset
+fijo) y Sequelize las devuelve como **string**, no `Date`; las ocurrencias se generan **por índice**
+desde `startsAt` y no iterando, porque `setUTCMonth(+1)` desde el 31 de enero desborda al 3 de marzo
+y, si se itera sobre el resultado clampeado, el día 31 se pierde para siempre (31 ene → 28 feb → **31
+mar** es el comportamiento correcto); `monthlyRunRate` consulta `active` directo, porque `endsAt` es
+inclusivo y sin eso una suscripción recién cancelada seguía sumando a "cuánto retirar" todo su último
+día; y apagar un gasto **escribe `endsAt`** en vez de dejar que "hasta cuándo cobró" se infiera de
+`updatedAt`, que cualquier otra escritura bumpea (la lección de `shipmentClaimedAt`, Fase O.3).
+
+**La forma de `DashboardData` no cambió** (los KPIs siguen siendo `{label, value, trend, subtitle}`
+genéricos), así que el panel no se rompe con este deploy, y el seed crea la fila de `$2,000/mes` para
+que la GANANCIA NETA tampoco dé un salto.
+
+- Tests: 2 suites nuevas y +38 casos — `tests/unit/services/expenses.test.ts` (21, nivel 1: el clamp
+  de fin de mes, que un aumento no reescriba el pasado, los factores de run-rate, el historial sin
+  huecos y `changes`) y `tests/integration/adminExpenses.test.ts` (17, nivel 2: el versionado de
+  punta a punta, la corrección en su lugar por el índice único, y desactivar-vs-borrar), más los
+  casos de `GASTOS` reescritos en `dashboard.test.ts`. Total del repo: **39 suites / 453 tests**.
+
+**Cómo verificar:** `pnpm migrate` y `pnpm seed` → `GET /api/admin/dashboard` sigue mostrando los
+$2,000 prorrateados, idéntico a antes. Dar de alta Render mensual $290 y un dominio anual $250 →
+`GET /api/admin/expenses/summary` da `monthlyRunRate ≈ 310.83` y los próximos cargos con su fecha.
+Subir Render a $340 con vigencia del mes en curso → `GET /api/admin/expenses/history` conserva $290
+en los meses anteriores y trae la fila en `changes` con `previousAmount: 290`. Un gasto de única vez
+de $1,500 de hace tres días entra completo en la ventana de 7 días del KPI `GASTOS` y el subtítulo lo
+separa de los recurrentes. Borrarlo responde `deactivated: true` y su gasto pasado sigue en el
+historial.
 
 ---
 
@@ -901,9 +957,9 @@ activo — hay que revisarlos **cerca del 1 de octubre**:
 - **O.1 + O.2 + O.3 son las de mayor relación impacto/esfuerzo.** Ninguna necesita dependencias
   nuevas y solo O.4 requiere migración. Entre las tres tapan los tres estados en que el dueño se
   queda atorado.
-- **El bloque N no está ordenado por valor**, sino agrupado. De las que quedan, **N.3 (gastos)** es la
-  que más corrige lo que el dueño ya está viendo mal hoy — `profitKpisByPeriod` sigue restando una
-  constante inventada. (N.1 y N.2, las dos que más movían ventas, ya están cerradas.)
+- **El bloque N no está ordenado por valor**, sino agrupado. N.1, N.2 y N.3 ya están cerradas —con
+  N.3, `profitKpisByPeriod` dejó de restar una constante inventada—. De las que quedan, **N.4 (aviso
+  de venta)** es la de mayor relación impacto/esfuerzo: no necesita modelo nuevo ni migración.
 - **N.6 (CFDI) puede volverse urgente por razones ajenas al código.** Si el negocio lo necesita,
   brinca la fila entera.
 
@@ -923,7 +979,7 @@ activo — hay que revisarlos **cerca del 1 de octubre**:
 
 - [x] **N.1** — Búsqueda (`q`), orden y rango de precio en el catálogo
 - [x] **N.2** — Cupones (modelo + validación + canje atómico + congelado en la orden)
-- [ ] **N.3** — Gastos reales sustituyendo `GASTOS_FIJOS`
+- [x] **N.3** — Gastos reales sustituyendo `GASTOS_FIJOS`
 - [ ] **N.4** — Aviso de venta nueva al dueño
 - [ ] **N.5** — Bitácora de auditoría admin
 - [ ] **N.6** — Facturación CFDI (evaluar primero)

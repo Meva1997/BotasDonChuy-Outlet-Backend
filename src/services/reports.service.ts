@@ -2,7 +2,7 @@ import { Order } from "../models/Order";
 import { OrderItem } from "../models/OrderItem";
 import { Product } from "../models/Product";
 import { productSizesInclude } from "../utils/productSizesInclude";
-import { isoMonth, formatMonthLabel, utcMonthStart } from "../utils/date";
+import { isoMonth, formatMonthLabel, monthRange, utcMonthStart } from "../utils/date";
 import {
   computeForecast,
   type Confidence,
@@ -66,22 +66,6 @@ const PRIORITY_RANK: Record<ReplenishmentRow["priority"], number> = {
   pronto: 1,
   ok: 2,
 };
-
-// Lista de primeros-de-mes (UTC) desde `from` hasta `to` inclusive, sin huecos.
-// Si `from` queda después de `to` (drift de reloj entre DB/app, o un `createdAt`
-// corrupto/futuro), se recorta a `to` en vez de devolver un rango vacío: preferimos
-// mostrar solo el mes en curso a devolver `[]` en silencio, que en getMonthlyReport/
-// getReplenishmentReport se ve como "sin datos" aunque sí haya órdenes pagadas.
-function monthRange(from: Date, to: Date): Date[] {
-  const months: Date[] = [];
-  const cursor = utcMonthStart(from > to ? to : from);
-  const end = utcMonthStart(to);
-  while (cursor <= end) {
-    months.push(new Date(cursor));
-    cursor.setUTCMonth(cursor.getUTCMonth() + 1);
-  }
-  return months;
-}
 
 // Vida del cache de loadReportData. No hay tablas de agregación en este backend (ver
 // CLAUDE.md) y ambos reportes recorren el historial completo de órdenes pagadas en cada

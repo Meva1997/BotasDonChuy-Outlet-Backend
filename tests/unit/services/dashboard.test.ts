@@ -10,6 +10,8 @@ import { Order } from "../../../src/models/Order";
 import { OrderItem } from "../../../src/models/OrderItem";
 import { Product } from "../../../src/models/Product";
 import { ProductSize } from "../../../src/models/ProductSize";
+import { Expense } from "../../../src/models/Expense";
+import { ExpenseAmount } from "../../../src/models/ExpenseAmount";
 import { getDashboardData } from "../../../src/services/dashboard.service";
 import { formatMoney } from "../../../src/utils/formatMoney";
 
@@ -89,12 +91,50 @@ function buildProduct(overrides: {
   return product;
 }
 
-/** Encola las 3 respuestas que `getDashboardData` espera de `Promise.all`, en el
- * mismo orden en que las llama: ordersHistory, recentOrders, products. */
-function mockQueries(ordersHistory: Order[], recentOrders: Order[], products: Product[]) {
+/** Un gasto con una sola versión de monto, armado como lo hace `expenses.test.ts`:
+ *  `Model.build` + `.amounts` asignado a mano (es lo que el servicio lee). */
+function buildExpense(overrides: {
+  id?: number;
+  frequency?: string;
+  startsAt?: string;
+  amount?: number;
+}): Expense {
+  const startsAt = overrides.startsAt ?? "2026-01-01";
+  const expense = Expense.build({
+    id: overrides.id ?? 1,
+    concept: "Gasto de prueba",
+    vendor: null,
+    category: "infraestructura",
+    frequency: overrides.frequency ?? "monthly",
+    startsAt,
+    endsAt: null,
+    active: true,
+    notes: null,
+  } as any);
+  expense.amounts = [
+    ExpenseAmount.build({
+      id: 1,
+      expenseId: expense.id,
+      amount: overrides.amount ?? 2000,
+      effectiveFrom: startsAt,
+      note: null,
+    } as any),
+  ];
+  return expense;
+}
+
+/** Encola las 4 respuestas que `getDashboardData` espera de `Promise.all`, en el
+ * mismo orden en que las llama: ordersHistory, recentOrders, products, expenses. */
+function mockQueries(
+  ordersHistory: Order[],
+  recentOrders: Order[],
+  products: Product[],
+  expenses: Expense[] = [],
+) {
   const orderSpy = jest.spyOn(Order, "findAll") as unknown as jest.Mock;
   orderSpy.mockResolvedValueOnce(ordersHistory).mockResolvedValueOnce(recentOrders);
   jest.spyOn(Product, "findAll").mockResolvedValue(products as any);
+  jest.spyOn(Expense, "findAll").mockResolvedValue(expenses as any);
   return orderSpy;
 }
 
@@ -171,18 +211,69 @@ describe("dashboard.service — getDashboardData (Parte 10)", () => {
     expect(ingresos30.trend).toBeUndefined(); // ventana previa de 30 días vacía → sin trend
   });
 
-  it("GASTOS FIJOS se prorratea por windowDays/30 en cada ventana", async () => {
+  // ── Gastos (Fase N.3) ───────────────────────────────────────────────────────
+  // Hasta esta fase el KPI restaba una constante de $2,000 hardcodeada en el servicio.
+  // Ahora sale de la tabla `expenses`, y estos casos fijan que la semántica de prorrateo
+  // (× windowDays/30) sobrevivió al cambio.
+
+  const gastosKpi = (data: Awaited<ReturnType<typeof getDashboardData>>, period: "7" | "30" | "90") =>
+    data.profitKpisByPeriod[period].find((k) => k.label === "GASTOS")!;
+
+  it("GASTOS se prorratea por windowDays/30 desde la carga mensual real", async () => {
     jest.useFakeTimers().setSystemTime(new Date("2026-07-20T12:00:00Z"));
-    mockQueries([], [], []);
+    mockQueries([], [], [], [buildExpense({ frequency: "monthly", amount: 2000 })]);
 
     const data = await getDashboardData();
 
-    const gastos = (period: "7" | "30" | "90") =>
-      data.profitKpisByPeriod[period].find((k) => k.label === "GASTOS FIJOS")!.value;
+    expect(gastosKpi(data, "7").value).toBe(formatMoney(2000 * (7 / 30)));
+    expect(gastosKpi(data, "30").value).toBe(formatMoney(2000));
+    expect(gastosKpi(data, "90").value).toBe(formatMoney(2000 * (90 / 30)));
+  });
 
-    expect(gastos("7")).toBe(formatMoney(2000 * (7 / 30)));
-    expect(gastos("30")).toBe(formatMoney(2000));
-    expect(gastos("90")).toBe(formatMoney(2000 * (90 / 30)));
+  it("una anualidad cuenta 1/12 en la carga mensual, no completa", async () => {
+    jest.useFakeTimers().setSystemTime(new Date("2026-07-20T12:00:00Z"));
+    mockQueries([], [], [], [buildExpense({ frequency: "yearly", amount: 1200 })]);
+
+    const data = await getDashboardData();
+
+    expect(gastosKpi(data, "30").value).toBe(formatMoney(100));
+  });
+
+  it("un gasto de única vez cuenta completo, y SOLO si su fecha cae en la ventana", async () => {
+    jest.useFakeTimers().setSystemTime(new Date("2026-07-20T12:00:00Z"));
+    mockQueries(
+      [],
+      [],
+      [],
+      [buildExpense({ frequency: "once", startsAt: "2026-07-01", amount: 1500 })],
+    );
+
+    const data = await getDashboardData();
+
+    // Ventana de 7 días (14–20 de julio): el gasto del día 1 queda fuera.
+    expect(gastosKpi(data, "7").value).toBe(formatMoney(0));
+    // Ventana de 30 días: entra completo, sin prorratear.
+    expect(gastosKpi(data, "30").value).toBe(formatMoney(1500));
+    expect(gastosKpi(data, "30").subtitle).toContain("de única vez");
+  });
+
+  it("sin gastos capturados el KPI es $0 y GANANCIA NETA iguala a la BRUTA", async () => {
+    jest.useFakeTimers().setSystemTime(new Date("2026-07-20T12:00:00Z"));
+    const order = buildOrder({
+      id: 1,
+      createdAt: new Date("2026-07-18T12:00:00Z"),
+      total: 1000,
+      items: [buildOrderItem({ unitCost: 400, quantity: 1 })],
+    });
+    mockQueries([order], [], [], []);
+
+    const data = await getDashboardData();
+
+    const kpi = (label: string) =>
+      data.profitKpisByPeriod["30"].find((k) => k.label === label)!.value;
+
+    expect(gastosKpi(data, "30").value).toBe(formatMoney(0));
+    expect(kpi("GANANCIA NETA")).toBe(kpi("GANANCIA BRUTA"));
   });
 
   it("inventory incluye el valor de cada producto (stock resuelto vía productSizes)", async () => {

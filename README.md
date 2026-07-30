@@ -181,6 +181,12 @@ pnpm migrate:status   # verifica qué quedó aplicado
 | `POST`   | `/api/admin/coupons`          | ✅   | Crea un cupón de descuento |
 | `PUT`    | `/api/admin/coupons/:id`      | ✅   | Edita un cupón (`active: false` lo cancela; `code` y usos no se editan) |
 | `DELETE` | `/api/admin/coupons/:id`      | ✅   | Borra un cupón (lo desactiva si ya lo usó algún pedido) |
+| `GET`    | `/api/admin/expenses`         | ✅   | Lista los gastos con su monto vigente, carga mensual y próximo cargo |
+| `GET`    | `/api/admin/expenses/summary` | ✅   | Cuánto hay que retirar cada mes + los próximos cargos con su fecha |
+| `GET`    | `/api/admin/expenses/history` | ✅   | Historial de gastos mes con mes, con los cambios de precio del mes |
+| `POST`   | `/api/admin/expenses`         | ✅   | Da de alta un gasto (con su primera versión de monto) |
+| `PUT`    | `/api/admin/expenses/:id`     | ✅   | Edita un gasto (mandar `amount` **agrega una versión**, no sobrescribe) |
+| `DELETE` | `/api/admin/expenses/:id`     | ✅   | Borra un gasto (lo desactiva si ya generó algún cargo) |
 | `GET`    | `/api/admin/dashboard`        | ✅   | Métricas agregadas del panel (KPIs, ingresos, ventas recientes, inventario) |
 | `GET`    | `/api/admin/orders`           | ✅   | Lista paginada de pedidos con sus items (incl. `unitCost`) |
 | `POST`   | `/api/admin/orders/:id/cancel` | ✅  | Cancela manualmente un pedido `pending`/`paid` (reembolso real vía Stripe si ya estaba pagado) |
@@ -464,6 +470,52 @@ desactiva en vez de borrar cuando ya hay pedidos que usaron el cupón, para no r
 tienda (`America/Mexico_City`), con el vencimiento al final del día: un `2026-08-31` leído como UTC
 habría matado la promoción la tarde del 30 en México.
 
+### Gastos y suscripciones (Fase N.3)
+
+Da de alta cualquier gasto —Render, Vercel, la base de datos, la renta, publicidad— con **cada cuánto
+se paga** y **cuánto**, y responde las dos preguntas que el panel no podía contestar: *¿cuánto tengo
+que retirar de lo ganado?* y *¿cuánto gasté cada mes, y cambió algo?*. Sustituye la constante
+`GASTOS_FIJOS = $2,000` que el dashboard restaba para calcular la GANANCIA NETA — el KPI más
+importante del panel era, hasta esta fase, un número inventado.
+
+**El monto no es una columna del gasto: se guarda versionado por fecha de vigencia.** Cuando Render
+sube de $290 a $340, se agrega una versión nueva y julio **sigue valiendo $290** en el historial: los
+meses cerrados nunca se reescriben. Esa misma lista de versiones es lo que alimenta el arreglo
+`changes` de cada mes en `/history`, o sea la respuesta consultable a "¿algo cambió?". Guardar además
+un "monto actual" en el gasto habría dejado dos fuentes de verdad que se desincronizan con el primer
+edit mal hecho, así que `currentAmount` se **calcula**.
+
+**Todo en pesos.** Render y Vercel cobran en USD, pero lo que se captura es lo que cobró la tarjeta:
+si el dólar sube y el cargo pasa de $130 a $145, eso **es** un cambio de monto y queda en el
+historial. Sin API de tipo de cambio que se desactualice en silencio.
+
+**Dos números distintos, y confundirlos es el error caro:**
+
+- **El gasto real de un mes** (`/history`) se calcula generando las fechas de cargo y atribuyendo
+  cada una a su mes con el monto vigente **en esa fecha**. Una anualidad de dominio aparece completa
+  en su mes de renovación, no untada a lo largo del año. Los meses van sin huecos (los meses sin
+  gasto salen en `$0`) y el mes en curso trae `partial: true`.
+- **La carga mensual normalizada** (`monthlyRunRate` en `/summary` y en cada fila del listado)
+  convierte cada gasto recurrente a su equivalente por mes: anual ÷ 12, trimestral ÷ 3, semanal
+  × 52/12 (no × 4 — el año tiene 52 semanas, y usar 4 subestimaría el gasto anual en casi un mes).
+  Es lo que responde "cuánto retirar" y lo que el dashboard prorratea por ventana. Los gastos de
+  única vez **no** entran aquí: cuentan completos en su mes y nunca más.
+
+`/summary` completa la respuesta con `upcomingCharges`: qué se cobra, de cuánto y **en qué fecha**
+durante los próximos 60 días.
+
+Detalles que muerden y ya están resueltos: las fechas son `DATEONLY` (un cargo es un día de
+calendario, no un instante — esquiva el problema de zona horaria que los cupones tuvieron que
+resolver con un offset fijo); una suscripción que arranca el **31** genera 31 de enero → 28 de
+febrero → **31 de marzo**, sin arrastrar el clamp; apagar un gasto le fija `endsAt` en hoy, para que
+"hasta cuándo cobró" sea un dato y no una inferencia sobre `updatedAt`; y `DELETE` **desactiva** en
+vez de borrar si el gasto ya generó algún cargo, porque ese dinero se gastó y borrarlo dejaría el
+historial mintiendo sobre meses cerrados.
+
+El seed crea una fila recurrente de `$2,000/mes` equivalente a la constante vieja, para que la
+GANANCIA NETA no dé un salto el día del deploy. Es una fila normal: se edita, se parte en gastos
+reales o se borra.
+
 ### `GET /api/admin/dashboard` y `GET /api/admin/orders` (panel admin)
 
 `GET /api/admin/dashboard` calcula todo en memoria a partir de `Order`/`OrderItem`/`Product`
@@ -473,8 +525,11 @@ habría matado la promoción la tarde del 30 en México.
   `"7" | "30" | "90"` juntas, cada una comparada contra su propio periodo anterior (p. ej. "30"
   compara `hoy-29d..hoy` vs los 30 días previos) para el `trend`. El frontend alterna en cliente
   (`DataSection`), sin query params. Valores monetarios formateados en `es-MX` (`"$13,531.00"`).
-  `GASTOS FIJOS` es una constante mensual hardcodeada (`$2,000.00`, no existe un modelo de gastos)
-  prorrateada a la ventana seleccionada (`$2,000 × ventana/30`).
+  `GASTOS` sale de los gastos capturados en `/api/admin/expenses` (Fase N.3, antes era una
+  constante de `$2,000` hardcodeada): los recurrentes como carga mensual prorrateada a la ventana
+  (`× ventana/30`) más los de única vez que caigan dentro de ella, y el subtítulo separa las dos
+  mitades. Cada ventana suma **sus propios** gastos de única vez, así que el `trend` de
+  `GANANCIA NETA` compara periodos de verdad.
 - `revenueByPeriod`: las tres series `"7" | "30" | "90"` juntas, un punto por día (incluye días en
   `$0`, no se omiten). El agrupamiento y el formateo de fechas son **ambos en UTC** (`timeZone:
   "UTC"` explícito), para que el resultado no dependa de la zona horaria del host donde corre el

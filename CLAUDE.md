@@ -320,6 +320,93 @@ que los dos reportes son estructuralmente ciegos al cupón; su `totalRevenue` ya
 cupón ensancha esa brecha, y **no** se "arregla" pasándolo a `order.total` porque rompería el
 desglose por producto/categoría.
 
+**Gastos y suscripciones** (Fase N.3, `roadmap-operacion-y-negocio.md` — `src/models/Expense.ts`,
+`src/models/ExpenseAmount.ts`, `src/services/expenses.service.ts`, `src/schemas/expense.ts`, CRUD +
+`/summary` + `/history` en `/api/admin/expenses` `[auth]`): sustituye la constante
+`GASTOS_FIJOS = 2000` que `dashboard.service.ts` restaba para calcular **GANANCIA NETA** — el KPI que
+el dueño usa para decidir si el negocio gana dinero era, hasta esta fase, un número inventado.
+
+**El monto NO es una columna de `expenses`: vive versionado en `expense_amounts`**
+(`amount`, `effectiveFrom DATEONLY`, `note`), y esa separación es toda la fase. El monto vigente es
+*la versión con el `effectiveFrom` más grande que ya empezó* y el de julio es *la vigente en julio*,
+así que subir Render de $290 a $340 **no reescribe** lo que costaba en meses cerrados. Guardar además
+un `expenses.amount` "actual" habría dejado dos fuentes de verdad que se desincronizan con el primer
+edit mal hecho (mismo riesgo que `redeemedCount` vs `activeRedemptions`); las tablas son de decenas
+de filas, así que `currentAmount` se **calcula** en memoria. El **índice único parcial**
+`(expenseId, effectiveFrom)` —declarado en `Model.init` además de en la migración, por
+`sync({ force: true })`— no es contabilidad: es lo que convierte "re-editar el monto que capturé hoy"
+en una **corrección en su lugar** en vez de una versión duplicada que dejaría el historial ambiguo.
+Esa misma lista de versiones alimenta el arreglo **`changes`** de cada mes en `/history`, o sea la
+respuesta consultable a "¿algo cambió?" — sin él un aumento solo se nota como un total más alto sin
+causa visible.
+
+**Todo en MXN**, sin `currency` ni tipo de cambio: Render y Vercel cobran en USD, pero lo que se
+captura es lo que cobró la tarjeta, así que un movimiento del dólar **es** un cambio de monto y queda
+fechado en el historial. Un `fxRate` por gasto se descartó porque se desactualiza en silencio y
+volvería el KPI del dashboard un número que ya no es el gasto real.
+
+**Dos números distintos, los dos necesarios, y confundirlos es el error caro:** (1) el **gasto real
+de un mes** (`buildHistory`) se calcula **generando las fechas de cargo** desde `startsAt` acotadas
+por `endsAt`/`active`, atribuyendo cada ocurrencia a su mes con el monto vigente **en esa fecha** —
+así una anualidad cae completa en su mes de renovación y no untada en el año, que es lo correcto para
+"¿cuánto gasté en julio?"; (2) la **carga mensual normalizada** (`monthlyRunRate`) convierte cada
+recurrente a su equivalente por mes vía `MONTHLY_FACTOR` (`yearly ÷ 12`, `quarterly ÷ 3`,
+**`weekly × 52/12` y no `× 4`** — usar 4 subestima el año en casi un mes completo), responde "cuánto
+retirar cada mes" y es lo que el dashboard prorratea por `windowDays/30`. Los `once` valen 0 en el
+run-rate: cuentan completos en su mes y nunca más.
+
+**Trampas ya resueltas.** Las fechas son **`DATEONLY`** porque un cargo es un día de calendario, no
+un instante — esquiva de raíz el problema de zona horaria que `couponDateSchema` tuvo que resolver
+con `MEXICO_CITY_OFFSET`; **ojo, Sequelize las devuelve como string `"YYYY-MM-DD"`, no como `Date`**
+(de ahí `utcDayFromIso` en `src/utils/date.ts`, y que las comparaciones sean de strings, que para ese
+formato ya son cronológicas). Las ocurrencias se generan **por índice** desde `startsAt`
+(`addMonthsClamped(anchor, n × paso)`) y **nunca iterando sobre la fecha ya calculada**: iterar con
+`setUTCMonth(+1)` desde el 31 de enero desborda al 3 de marzo, y si se itera sobre el resultado
+clampeado (28 feb → 28 mar) el día 31 se pierde para siempre; por índice sale 31 ene → 28 feb → **31
+mar**. `monthlyRunRate` consulta `active` **directamente** y no vía `effectiveEnd`: apagar un gasto le
+fija `endsAt` en hoy y, como `endsAt` es inclusivo (un cargo fechado ese día sí cuenta, y así debe
+ser para las ocurrencias), sin ese guard la suscripción recién cancelada seguiría sumando a "cuánto
+retirar" el día entero de su cancelación. Y **apagar escribe `endsAt`** en vez de dejar que "hasta
+cuándo cobró" se infiera de `updatedAt`, que cualquier otra escritura bumpea — la lección de
+`shipmentClaimedAt` (Fase O.3); reactivar limpia un `endsAt` viejo salvo que el body mande uno, o
+quedaría un gasto "activo" que no cobra nada.
+
+**`monthRange` se movió de `reports.service.ts` a `src/utils/date.ts`** y ahora la comparten el
+reporte mensual de ventas y el historial de gastos: los dos necesitan el mismo rango sin huecos y el
+mismo clamp de `from > to`.
+
+**Reglas del CRUD.** `PUT` con `amount` **agrega una versión** (con `amountEffectiveFrom` o hoy),
+salvo que ya exista una con esa misma vigencia (se corrige en su lugar) o que el monto no haya
+cambiado (no se escribe nada — editar el concepto no debe ensuciar el historial de precios). La
+primera versión de un alta rige desde **`startsAt`, no desde hoy**: registrar en agosto una
+suscripción que empezó en marzo tiene que dejar cubiertos los cargos de marzo a julio. `DELETE` sigue
+el criterio de `deleteCoupon`/`adminDeleteProduct`: **desactiva** (con `endsAt` en hoy) si el gasto ya
+generó algún cargo —ese dinero se gastó y borrarlo dejaría el historial mintiendo sobre meses
+cerrados— y solo borra de verdad lo que nunca cobró nada. El filtro `from`/`to` del listado es por
+**fecha de cargo y no por alta**: un gasto dado de alta en enero y vigente desde entonces tiene que
+salir al consultar agosto. Los parámetros inválidos aquí son **`400`, no se ignoran** (la inversión
+deliberada de la regla del catálogo público: quien consulta es el dueño, y un filtro que no aplicó le
+haría leer mal sus propios números). Las categorías son un **ENUM fijo** (`infraestructura`,
+`software`, `renta`, `servicios`, `paqueteria`, `publicidad`, `nomina`, `impuestos`, `otro`) y no
+texto libre, porque con texto libre `"Infra"`/`"infraestructura"`/`"INFRA"` serían tres grupos
+distintos en la misma gráfica; agregar una es un `ALTER TYPE ... ADD VALUE`, y los catálogos se
+repiten literales en la migración (no se importan de `models/Expense.ts`, que arrastraría
+`config/database.ts` a un proceso que no debe abrir una segunda conexión) — **al agregar un valor,
+tocar los dos lados**.
+
+**En el dashboard**, `buildKpisForWindow` recibe el run-rate y un `Map<isoDay, amount>` de gastos de
+única vez (`oneTimeExpensesByDay`) y los suma en **el mismo recorrido día-por-día que ya hacía** sobre
+la ventana actual y la previa. El KPI pasó de `GASTOS FIJOS` a **`GASTOS`** (con gastos de única vez
+adentro, "fijos" sería falso) y su `subtitle` separa las dos mitades, porque un pico tiene dos causas
+muy distintas —subió una suscripción vs. hubo una compra puntual— y el dueño debe distinguirlas sin
+abrir el historial. La ventana previa ahora suma **sus propios** gastos de única vez: antes restaba
+exactamente los mismos que la actual porque la constante no tenía cómo variar, y eso volvía el
+`trend` de GANANCIA NETA una comparación a medias. **La forma de `DashboardData` no cambia** (los KPIs
+siguen siendo `{label, value, trend, subtitle}` genéricos que `DataSection.tsx` pinta tal cual), así
+que el panel no se rompe con el deploy. `src/seed.ts` crea una fila recurrente de `$2,000/mes`
+equivalente a la constante vieja para que la GANANCIA NETA no dé un salto ese día; es una fila normal
+y editable, no un valor especial.
+
 Because the seed inserts rows with explicit `id`s, Postgres SERIAL sequences are left behind;
 `src/seed.ts` resyncs each one (`setval(pg_get_serial_sequence(table,'id'), MAX(id))`) at the
 end of the transaction so later `id DEFAULT` inserts (e.g. `POST /api/admin/products`) don't
@@ -896,10 +983,11 @@ itself displays. `revenueByPeriod` returns all three `"7"|"30"|"90"` series toge
 day-label formatting (`formatShortDate`) are **both pinned to UTC** (`timeZone: "UTC"` on every
 `toLocaleDateString`/`toLocaleTimeString` call) so the output doesn't depend on the host's local
 timezone — omitting that option silently rolls the label back a day on hosts west of UTC (caught
-during manual testing on a `America/Mexico_City` dev machine). `GASTOS FIJOS` in `profitKpis` is a
-hardcoded `$2,000.00` **monthly** constant (`GASTOS_FIJOS` in `dashboard.service.ts`, no expenses
-model exists) prorated to each window (`GASTOS_FIJOS × windowDays/30`) so `"7"`/`"90"` don't
-subtract a flat month of fixed costs from a week's or a quarter's gross profit. `recentSales` caps
+during manual testing on a `America/Mexico_City` dev machine). `GASTOS` in `profitKpis` (Fase N.3,
+formerly the hardcoded `GASTOS_FIJOS = 2000`) comes from the `expenses` table — see **Gastos y
+suscripciones**: the recurring monthly run-rate prorated to each window (`× windowDays/30`, so
+`"7"`/`"90"` don't subtract a flat month from a week's or a quarter's gross profit) plus whatever
+one-time expenses fall inside that window, each window summing its own. `recentSales` caps
 at the 20 most recent paid orders; `savings`/`total`
 per row reuse `Order.savings`/`Order.total` directly (already computed by the `cart` service at
 checkout) rather than recomputing from items. `inventory` includes every non-soft-deleted product
@@ -1345,7 +1433,12 @@ nullable password-reset columns in Fase 9 (`resetPasswordCodeHash`, `resetPasswo
 `CouponRedemption` (Fase N.2) add the discount-coupon pair; the latter's **partial unique index**
 (`(couponId, emailNormalized) WHERE releasedAt IS NULL AND enforced`) is not bookkeeping but the
 entire "one use per customer" guarantee, so it's declared in `Model.init` as well as in the
-migration. `src/seed.ts`
+migration. `Expense` and `ExpenseAmount` (Fase N.3) are the expense pair, and the split is the whole
+point: `Expense` is the identity + schedule (`concept`, `vendor`, `category`, `frequency`,
+`startsAt`/`endsAt` as **`DATEONLY`**, `active`, `notes`) and carries **no `amount` column** — the
+money lives in `ExpenseAmount`, versioned by `effectiveFrom`, with its unique
+`(expenseId, effectiveFrom)` index likewise declared in `Model.init`. See **Gastos y suscripciones**.
+`src/seed.ts`
 (`pnpm seed`) populates all of the above from the frontend's mock data.
 
 **Logging y monitoreo** (Fase H.4 — `roadmaps-completados/roadmap-hardening.md`): `src/config/logger.ts` exports a
@@ -1392,13 +1485,14 @@ root and adds `types: [jest, node]`). `roadmaps-completados/roadmap-testing.md` 
 parts** (0 = infra; 0.5 = dedicated test DB; 1 = pure services; 2 = auth; 3 = checkout; 4 = webhook
 idempotency; 5 = manual cancel/refund/release; 6 = live shipping rates; 7 = Skydropx HTTP client;
 8 = admin product CRUD + images; 9 = brand/admin users; 10 = dashboard/reports aggregations) —
-**all twelve are done** as of this phase (37 suites / 412 tests, latest count — grows as tests are
+**all twelve are done** as of this phase (39 suites / 453 tests, latest count — grows as tests are
 added part by part; new phases add their own suite, e.g. `adminOrderStatus.test.ts` for Fase O.1,
 `checkoutIdempotency.test.ts` + `pendingOrderSweeper.test.ts` for Fase O.2,
 `shipmentRetry.test.ts` for Fase O.3, `orderLookup.test.ts` +
 `unit/services/orderConfirmationTemplate.test.ts` for Fase O.4, and `coupons.test.ts` +
 `adminCoupons.test.ts` + `couponRelease.test.ts` + `unit/services/couponDiscount.test.ts` +
-`unit/services/chargeableTotal.test.ts` + `unit/utils/emailIdentity.test.ts` for Fase N.2).
+`unit/services/chargeableTotal.test.ts` + `unit/utils/emailIdentity.test.ts` for Fase N.2, and
+`adminExpenses.test.ts` + `unit/services/expenses.test.ts` for Fase N.3).
 Keep adding
 new tests **part by part** (one behavior area at a time), marking `[x]` in `roadmaps-completados/roadmap-testing.md` as
 each closes, and don't touch `src/` from a test change unless a test reveals a real bug.
