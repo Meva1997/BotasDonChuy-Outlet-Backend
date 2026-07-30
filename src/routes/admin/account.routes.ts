@@ -1,6 +1,6 @@
 import { Router } from "express";
-import { updateOwnAccount } from "../controllers/adminUser.controller";
-import { requireAuth } from "../middlewares/requireAuth";
+import { updateOwnAccount } from "../../controllers/adminUser.controller";
+import { requireAuth } from "../../middlewares/requireAuth";
 
 const router: Router = Router();
 

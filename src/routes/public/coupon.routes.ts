@@ -1,6 +1,6 @@
 import { Router } from "express";
-import { validateCoupon } from "../controllers/coupon.controller";
-import { couponRateLimiter } from "../middlewares/rateLimit";
+import { validateCoupon } from "../../controllers/coupon.controller";
+import { couponRateLimiter } from "../../middlewares/rateLimit";
 
 const router: Router = Router();
 

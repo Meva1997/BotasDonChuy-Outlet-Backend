@@ -1,6 +1,6 @@
 import { Router } from "express";
-import { createOrder, lookupOrder } from "../controllers/order.controller";
-import { orderRateLimiter, orderLookupRateLimiter } from "../middlewares/rateLimit";
+import { createOrder, lookupOrder } from "../../controllers/order.controller";
+import { orderRateLimiter, orderLookupRateLimiter } from "../../middlewares/rateLimit";
 
 const router: Router = Router();
 

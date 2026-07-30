@@ -11,21 +11,21 @@ import "./config/resend"; // valida RESEND_API_KEY + EMAIL_FROM al arrancar (fai
 import "./config/skydropx"; // valida SKYDROPX_CLIENT_ID + SKYDROPX_CLIENT_SECRET al arrancar (fail-fast)
 import "./config/zod"; // mensajes por defecto de zod en español (los pinta el front)
 import { swaggerSpec } from "./config/swagger";
-import productRoutes from "./routes/product.routes";
-import authRoutes from "./routes/auth.routes";
-import adminProductRoutes from "./routes/adminProduct.routes";
-import orderRoutes from "./routes/order.routes";
-import webhookRoutes from "./routes/webhook.routes";
-import adminDashboardRoutes from "./routes/adminDashboard.routes";
-import adminOrderRoutes from "./routes/adminOrder.routes";
-import adminReportsRoutes from "./routes/adminReports.routes";
-import brandRoutes from "./routes/brand.routes";
-import adminUserRoutes from "./routes/adminUser.routes";
-import accountRoutes from "./routes/account.routes";
-import shippingRoutes from "./routes/shipping.routes";
-import couponRoutes from "./routes/coupon.routes";
-import adminCouponRoutes from "./routes/adminCoupon.routes";
-import adminExpenseRoutes from "./routes/adminExpense.routes";
+import productRoutes from "./routes/public/product.routes";
+import authRoutes from "./routes/auth/auth.routes";
+import adminProductRoutes from "./routes/admin/adminProduct.routes";
+import orderRoutes from "./routes/public/order.routes";
+import webhookRoutes from "./routes/webhooks/webhook.routes";
+import adminDashboardRoutes from "./routes/admin/adminDashboard.routes";
+import adminOrderRoutes from "./routes/admin/adminOrder.routes";
+import adminReportsRoutes from "./routes/admin/adminReports.routes";
+import brandRoutes from "./routes/admin/brand.routes";
+import adminUserRoutes from "./routes/admin/adminUser.routes";
+import accountRoutes from "./routes/admin/account.routes";
+import shippingRoutes from "./routes/public/shipping.routes";
+import couponRoutes from "./routes/public/coupon.routes";
+import adminCouponRoutes from "./routes/admin/adminCoupon.routes";
+import adminExpenseRoutes from "./routes/admin/adminExpense.routes";
 import { errorHandler } from "./middlewares/errorHandler";
 import { trustProxyEnv } from "./utils/env";
 import { checkReadiness, markDraining } from "./services/readiness";

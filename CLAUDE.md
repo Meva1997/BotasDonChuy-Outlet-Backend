@@ -105,7 +105,18 @@ is no `alter: true` fallback to replicate it anywhere, dev included.** Run `pnpm
 
 **HTTP layer** (`src/routes/`, `src/controllers/`): routers are mounted in `src/app.ts`
 under a base path (e.g. `app.use("/api/products", productRoutes)`). Each route file builds an
-Express `Router` and delegates to handlers in the matching `*.controller.ts`. Product reads
+Express `Router` and delegates to handlers in the matching `*.controller.ts`. `src/routes/` is
+split into subfolders **by access/responsibility, not by resource**: `admin/` (every router with
+`requireAuth` on some or all of its routes — `adminProduct`, `adminDashboard`, `adminOrder`,
+`adminReports`, `adminUser`, `adminCoupon`, `adminExpense`, `account`, and `brand`, whose `GET` is
+public but whose `PUT`/logo routes aren't, so it lives here rather than in `public/`), `public/`
+(no auth anywhere in the file — `product`, `order` [checkout + public lookup], `shipping`,
+`coupon`), `auth/` (`auth.routes.ts` — authentication itself, neither an admin resource nor a
+storefront one), and `webhooks/` (`webhook.routes.ts` — third-party callbacks from Stripe/Skydropx,
+verified by signature rather than a JWT). `src/config/swagger.ts`'s `apis` glob is
+`./src/routes/**/*.ts` (and the `dist/` equivalent) precisely so it keeps finding `@openapi` blocks
+regardless of which subfolder a route file lives in. **When adding a new resource, put its
+`*.routes.ts` in the subfolder matching its access level** and mount it in `src/app.ts`. Product reads
 only expose rows with `visible: true` and exclude the `unitCost` field via Sequelize
 `attributes: { exclude: [...] }`. `GET /api/products` filters (`categoria` → `type`; `talla` →
 a `WHERE id IN (SELECT "productId" FROM product_sizes WHERE size = N AND stock > 0)` subquery,
@@ -162,7 +173,7 @@ never offers a size that would return zero products under the active search. Its
 **hand-maintained copy** of the shared `where` (it's raw SQL, not the same object) — a new filter
 has to be added on **both** sides. Every value goes through `replacements`, never interpolation:
 unlike `talla` (an already-validated integer), `q` is an arbitrary client string.
-The admin CRUD lives in `src/routes/adminProduct.routes.ts` (mounted at `/api/admin/products`,
+The admin CRUD lives in `src/routes/admin/adminProduct.routes.ts` (mounted at `/api/admin/products`,
 `router.use(requireAuth)` so every route needs a JWT) and reuses `product.controller.ts`
 (`adminGetProducts`/`adminCreateProduct`/`adminUpdateProduct`/`adminDeleteProduct`). Unlike the
 public reads it exposes non-visible rows and `unitCost`. Create/update validate the body with
@@ -498,7 +509,7 @@ raw JSON at `/api/docs.json`. **When adding a new resource, document each endpoi
 `@openapi` JSDoc block above its `router.<method>(...)` in `*.routes.ts`, referencing shared
 schemas via `$ref: '#/components/schemas/...'` (add new schemas to `src/config/swagger.ts`).**
 
-**Auth** (`src/routes/auth.routes.ts`, `src/controllers/auth.controller.ts`): mounted at
+**Auth** (`src/routes/auth/auth.routes.ts`, `src/controllers/auth.controller.ts`): mounted at
 `/api/auth`. `POST /api/auth/login` validates the body with `loginSchema` (zod), looks up
 `AdminUser` by email, compares bcrypt hash, and returns `{ token, user }`; an unknown email and a
 wrong password return the **same** `401` message (see **Error handling** — anti-enumeration).
@@ -570,7 +581,7 @@ not escaped.
 Resend only delivers to the account owner's address (`403` to anyone else — swallowed by
 `sendEmail`); production needs a verified domain (manual DNS step, no code).
 
-**Checkout** (`src/routes/order.routes.ts`, `src/controllers/order.controller.ts`,
+**Checkout** (`src/routes/public/order.routes.ts`, `src/controllers/order.controller.ts`,
 `src/services/orders.service.ts`): `POST /api/orders` is **public** (mounted at `/api/orders`).
 The body `{ items: [{ productId, size, quantity }], customer, shippingCarrier?, quotationId?,
 rateId?, couponCode? }` is validated with `createOrderSchema` (zod, `src/schemas/checkout.ts`).
@@ -738,7 +749,7 @@ and a failed email/reload can never propagate. Right after that `affectedCount =
 **Envío en vivo / Skydropx** section for its own idempotency guard, since the shipment id isn't
 known until after the Skydropx call and can't reuse this same `paymentStatus` guard directly).
 
-`POST /api/webhooks/stripe` (`src/routes/webhook.routes.ts` → `stripeWebhook`): mounted in
+`POST /api/webhooks/stripe` (`src/routes/webhooks/webhook.routes.ts` → `stripeWebhook`): mounted in
 `src/app.ts` with `express.raw({ type: "application/json" })` **before** the global
 `express.json()` (so `req.body` is the raw `Buffer` that `stripe.webhooks.constructEvent` needs to
 verify the `Stripe-Signature` header against `STRIPE_WEBHOOK_SECRET`). A missing/invalid signature
@@ -774,7 +785,7 @@ order can never be paid. `sweepOnce` is exported for `tests/integration/pendingO
 **Envío en vivo / Skydropx** (Fase 8.1–8.7, activo — cotización en vivo, órdenes con tarifa real,
 guía automática al pagar, webhook de estado de envío y Swagger de los endpoints nuevos, ver
 `roadmaps-completados/roadmap-skydropx.md`):
-`POST /api/shipping/rates` `[público]` (`src/routes/shipping.routes.ts` →
+`POST /api/shipping/rates` `[público]` (`src/routes/public/shipping.routes.ts` →
 `shipping.controller.ts`'s `getShippingRates`) cotiza el envío en vivo contra Skydropx Pro para el
 checkout, con la tarifa plana existente (`cart.ts`'s `computeShipping`) como **fallback** — la
 tienda nunca debe dejar de cotizar porque la paquetería esté caída o responda mal. `src/config/
@@ -883,7 +894,7 @@ Fase 8.5 por la misma razón: no hay `tracking_number` que mostrar todavía; ese
 webhook de la Fase 8.6.
 
 **Webhook de estado de envío** (Fase 8.5↔8.6 completado — `POST /api/webhooks/skydropx`,
-`src/routes/webhook.routes.ts` → `order.controller.ts`'s `skydropxWebhook`): montado bajo el mismo
+`src/routes/webhooks/webhook.routes.ts` → `order.controller.ts`'s `skydropxWebhook`): montado bajo el mismo
 `/api/webhooks` con `express.raw` que el de Stripe (antes del `express.json()` global), así que
 `req.body` es el `Buffer` crudo que exige la verificación de firma. `verifySkydropxWebhookSignature`
 (`skydropx.service.ts`) valida la firma **HMAC-SHA512** del header `Authorization: HMAC <firma>`
@@ -1037,7 +1048,7 @@ ignorando la bandera: ahí ya hay (o puede haber) dinero de por medio.
 `unreconciled:`, la fila queda en `"creating"` y a los 15 min el barrido podría pagar una segunda
 guía. Por eso la alerta de ese caso es incondicional y `fatal`.
 
-**Dashboard** (`src/routes/adminDashboard.routes.ts`, `src/routes/adminOrder.routes.ts`,
+**Dashboard** (`src/routes/admin/adminDashboard.routes.ts`, `src/routes/admin/adminOrder.routes.ts`,
 `src/controllers/dashboard.controller.ts`, `src/controllers/order.controller.ts`,
 `src/services/dashboard.service.ts`): `GET /api/admin/dashboard` `[auth]` returns `DashboardData`
 (`kpisByPeriod`, `profitKpisByPeriod`, `revenueByPeriod`, `recentSales`, `inventory`) computed **in
@@ -1134,7 +1145,7 @@ one being serialized back — `sendOrderEmail` `reload()`s what it's given, and 
 response object would mutate it mid-serialization. This is the first import of `payment.service` from
 `orders.service` (no cycle: `payment.service` never imports `orders.service`).
 
-**Reports** (`src/routes/adminReports.routes.ts`, `src/controllers/reports.controller.ts`,
+**Reports** (`src/routes/admin/adminReports.routes.ts`, `src/controllers/reports.controller.ts`,
 `src/services/reports.service.ts`): mounted at `/api/admin/reports` (`router.use(requireAuth)`).
 Both endpoints are computed **in memory** from a single shared fetch (`loadReportData`) of
 `status: "paid"` orders (with `items`, `attributes` trimmed to `id`/`createdAt` on `Order` and
@@ -1198,8 +1209,8 @@ admin routes. The per-product series extraction transposes each month's `byProdu
 `Map<productId, unitsSold>` once (`unitsByMonthMaps`) rather than doing a `.find()` per
 product×month pair, keeping it O(months×products) instead of O(months×products²).
 
-**Marca y usuarios** (`src/routes/brand.routes.ts`, `src/routes/adminUser.routes.ts`,
-`src/routes/account.routes.ts`, `src/controllers/brand.controller.ts`,
+**Marca y usuarios** (`src/routes/admin/brand.routes.ts`, `src/routes/admin/adminUser.routes.ts`,
+`src/routes/admin/account.routes.ts`, `src/controllers/brand.controller.ts`,
 `src/controllers/adminUser.controller.ts`): Fase 7. `GET /api/admin/brand` `[public]` and `PUT
 /api/admin/brand` `[auth]` share one router but **not** a blanket `router.use(requireAuth)` —
 `requireAuth` is applied directly on the `PUT` route only, since the `GET` must stay public (the

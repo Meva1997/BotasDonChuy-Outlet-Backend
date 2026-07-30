@@ -1720,7 +1720,8 @@ const options: Options = {
     },
   },
   // Globs relativos al cwd (raíz del backend) — válidos en dev (src/*.ts) y en prod (dist/*.js).
-  apis: ["./src/routes/*.ts", "./src/app.ts", "./dist/routes/*.js", "./dist/app.js"],
+  // "**" cubre las subcarpetas admin/public/auth/webhooks en las que se organizan las rutas.
+  apis: ["./src/routes/**/*.ts", "./src/app.ts", "./dist/routes/**/*.js", "./dist/app.js"],
 };
 
 export const swaggerSpec = swaggerJsdoc(options);

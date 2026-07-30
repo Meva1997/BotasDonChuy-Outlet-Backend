@@ -2,8 +2,8 @@ import { Router } from "express";
 import {
   getMonthlyReport,
   getReplenishmentReport,
-} from "../controllers/reports.controller";
-import { requireAuth } from "../middlewares/requireAuth";
+} from "../../controllers/reports.controller";
+import { requireAuth } from "../../middlewares/requireAuth";
 
 const router: Router = Router();
 

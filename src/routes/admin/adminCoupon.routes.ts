@@ -4,8 +4,8 @@ import {
   adminCreateCoupon,
   adminUpdateCoupon,
   adminDeleteCoupon,
-} from "../controllers/coupon.controller";
-import { requireAuth } from "../middlewares/requireAuth";
+} from "../../controllers/coupon.controller";
+import { requireAuth } from "../../middlewares/requireAuth";
 
 const router: Router = Router();
 

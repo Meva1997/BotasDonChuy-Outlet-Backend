@@ -1,6 +1,6 @@
 import { Router } from "express";
-import { getShippingRates } from "../controllers/shipping.controller";
-import { shippingRateLimiter } from "../middlewares/rateLimit";
+import { getShippingRates } from "../../controllers/shipping.controller";
+import { shippingRateLimiter } from "../../middlewares/rateLimit";
 
 const router: Router = Router();
 

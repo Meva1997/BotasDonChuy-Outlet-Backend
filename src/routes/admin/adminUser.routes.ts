@@ -3,8 +3,8 @@ import {
   listAdminUsers,
   createAdminUser,
   deleteAdminUser,
-} from "../controllers/adminUser.controller";
-import { requireAuth } from "../middlewares/requireAuth";
+} from "../../controllers/adminUser.controller";
+import { requireAuth } from "../../middlewares/requireAuth";
 
 const router: Router = Router();
 

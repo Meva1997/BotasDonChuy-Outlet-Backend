@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { stripeWebhook, skydropxWebhook } from "../controllers/order.controller";
+import { stripeWebhook, skydropxWebhook } from "../../controllers/order.controller";
 
 const router: Router = Router();
 

@@ -4,8 +4,8 @@ import {
   adminCancelOrder,
   adminUpdateOrderStatus,
   adminRetryShipment,
-} from "../controllers/order.controller";
-import { requireAuth } from "../middlewares/requireAuth";
+} from "../../controllers/order.controller";
+import { requireAuth } from "../../middlewares/requireAuth";
 
 const router: Router = Router();
 

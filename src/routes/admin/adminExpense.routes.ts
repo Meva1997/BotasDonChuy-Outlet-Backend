@@ -6,8 +6,8 @@ import {
   adminCreateExpense,
   adminUpdateExpense,
   adminDeleteExpense,
-} from "../controllers/expense.controller";
-import { requireAuth } from "../middlewares/requireAuth";
+} from "../../controllers/expense.controller";
+import { requireAuth } from "../../middlewares/requireAuth";
 
 const router: Router = Router();
 
