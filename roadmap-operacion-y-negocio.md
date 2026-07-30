@@ -41,7 +41,6 @@ orden se queda en `paid` para siempre, sin correo de "va en camino" y sin forma 
 | Cupones / códigos de descuento | ✅ **Fase N.2** (`POST /api/coupons/validate` + CRUD admin + canje atómico) | — (falta el campo en el checkout y la sección del panel: Fase 19 del roadmap del frontend) |
 | Gastos reales (vs. `GASTOS_FIJOS` hardcodeado) | ✅ **Fase N.3** (`/api/admin/expenses` + monto versionado) | — (falta la sección del panel: Fase 20 del roadmap del frontend) |
 | Aviso al dueño de venta nueva | ✅ **Fase N.4** (correo por venta + resumen diario) | — (solo falta poner `OWNER_NOTIFICATION_EMAIL` en el `.env` del deploy) |
-| Bitácora de auditoría admin | ❌ ausente | `owner` y `admin` tienen permisos idénticos y no queda rastro de quién borró o canceló qué |
 | Facturación CFDI | ❌ ausente | En México se la van a pedir tarde o temprano |
 
 ---
@@ -988,28 +987,7 @@ apareciendo en `GET /api/admin/dashboard` y en `GET /api/admin/reports/monthly` 
 
 ---
 
-### Fase N.5 — Bitácora de auditoría
-
-**Objetivo:** saber quién hizo qué en el panel.
-
-**Por qué:** `owner` y `admin` tienen permisos idénticos por diseño (no hay `requireRole` en ninguna
-ruta) y varias acciones son destructivas e irreversibles: borrar un producto, cancelar un pedido con
-reembolso real, borrar un usuario, aplicar un import masivo que **suma** stock sin deshacer. Con más
-de una persona en el panel, no queda ningún rastro de quién lo hizo.
-
-**Tareas:**
-- [ ] Modelo `AuditLog` (`adminUserId`, `action`, `entity`, `entityId`, `before`/`after` en `JSONB`,
-  `ip`, `createdAt`) + migración.
-- [ ] Registrar en los puntos destructivos, con llamadas explícitas (no un middleware genérico: el
-  valor está en el `before`/`after`, que solo el controlador conoce): delete de producto, cancel de
-  orden, `PATCH` de estado (O.1), delete de usuario, commit de import masivo, cambios de precio.
-- [ ] `GET /api/admin/audit` `[auth]` paginado y filtrable por entidad/usuario.
-- [ ] Definir retención (¿90 días? ¿un año?) y si se purga con un cron o se deja crecer.
-- [ ] Tests + `@openapi` + fase 🔴 en el roadmap del frontend.
-
----
-
-### Fase N.6 — Facturación CFDI `[evaluar antes de comprometer]`
+### Fase N.5 — Facturación CFDI `[evaluar antes de comprometer]`
 
 **Objetivo:** emitir factura fiscal cuando el cliente la pida.
 
@@ -1060,10 +1038,12 @@ activo — hay que revisarlos **cerca del 1 de octubre**:
   queda atorado.
 - **El bloque N no está ordenado por valor**, sino agrupado. N.1, N.2, N.3 y N.4 ya están cerradas
   —con N.3, `profitKpisByPeriod` dejó de restar una constante inventada; con N.4, el dueño se entera
-  de cada venta sin abrir el panel **y** el panel dejó de perder los pedidos ya despachados—. De las
-  que quedan, **N.5 (bitácora)** solo empieza a importar cuando haya más de una persona en el panel.
-- **N.6 (CFDI) puede volverse urgente por razones ajenas al código.** Si el negocio lo necesita,
+  de cada venta sin abrir el panel **y** el panel dejó de perder los pedidos ya despachados—.
+- **N.5 (CFDI) puede volverse urgente por razones ajenas al código.** Si el negocio lo necesita,
   brinca la fila entera.
+- **No hay bitácora de auditoría (`AuditLog`) y es decisión deliberada**: la tienda la maneja el
+  dueño y una sola persona más (`owner`/`admin` con permisos idénticos por diseño), así que no hay
+  para quién auditar. Revisar si eso cambia.
 
 ---
 
@@ -1083,8 +1063,7 @@ activo — hay que revisarlos **cerca del 1 de octubre**:
 - [x] **N.2** — Cupones (modelo + validación + canje atómico + congelado en la orden)
 - [x] **N.3** — Gastos reales sustituyendo `GASTOS_FIJOS`
 - [x] **N.4** — Aviso de venta nueva al dueño (correo por venta + resumen diario)
-- [ ] **N.5** — Bitácora de auditoría admin
-- [ ] **N.6** — Facturación CFDI (evaluar primero)
+- [ ] **N.5** — Facturación CFDI (evaluar primero)
 
 **Heredados**
 
