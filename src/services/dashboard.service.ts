@@ -293,15 +293,23 @@ export async function getDashboardData(): Promise<DashboardData> {
 
   const [ordersHistory, recentOrders, products, expenses] = await Promise.all([
     Order.findAll({
+      // `paymentStatus` y NO `status` (arreglo de la Fase N.4): `Order.status` avanza a
+      // `shipped`/`delivered` en cuanto la guía reporta actividad (o el dueño lo marca a mano con
+      // el `PATCH /status` de la Fase O.1), así que con `status: "paid"` **un pedido salía de los
+      // ingresos, de los KPIs y de `recentSales` justo al despacharlo** — el panel iba a
+      // subcontar desde el primer envío del lanzamiento. `paymentStatus: "paid"` significa "el
+      // dinero entró y no se ha devuelto": sobrevive a `shipped`/`delivered` y solo cambia a
+      // `refunded` (reembolso real) o `failed` (pendiente liberado), que es exactamente lo que NO
+      // debe contar como venta.
       where: {
-        status: "paid",
+        paymentStatus: "paid",
         createdAt: { [Op.gte]: sinceHistory },
       } as WhereOptions<OrderAttributes>,
       include: [{ model: OrderItem, as: "items" }],
       order: [["createdAt", "ASC"]],
     }),
     Order.findAll({
-      where: { status: "paid" },
+      where: { paymentStatus: "paid" },
       include: [{ model: OrderItem, as: "items" }],
       order: [["createdAt", "DESC"]],
       limit: RECENT_SALES_LIMIT,

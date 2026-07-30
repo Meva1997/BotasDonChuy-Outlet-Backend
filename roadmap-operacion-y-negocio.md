@@ -39,8 +39,8 @@ orden se queda en `paid` para siempre, sin correo de "va en camino" y sin forma 
 | Readiness real en `/health` | ✅ **Fase O.5** (`GET /health/ready`) | — (falta apuntar el probe del orquestador a la ruta nueva al desplegar) |
 | Búsqueda/orden en el catálogo | ✅ **Fase N.1** (`q`, `orden`, `precioMin`/`precioMax`) | — (falta cablear buscador y selector de orden en el front: Fase 18 del roadmap del frontend) |
 | Cupones / códigos de descuento | ✅ **Fase N.2** (`POST /api/coupons/validate` + CRUD admin + canje atómico) | — (falta el campo en el checkout y la sección del panel: Fase 19 del roadmap del frontend) |
-| Gastos reales (vs. `GASTOS_FIJOS` hardcodeado) | ❌ constante de `$2,000` | El KPI de utilidad del dashboard es ficción |
-| Aviso al dueño de venta nueva | ❌ solo hay alertas de falla | Se entera de un pedido pagado hasta que abre el panel |
+| Gastos reales (vs. `GASTOS_FIJOS` hardcodeado) | ✅ **Fase N.3** (`/api/admin/expenses` + monto versionado) | — (falta la sección del panel: Fase 20 del roadmap del frontend) |
+| Aviso al dueño de venta nueva | ✅ **Fase N.4** (correo por venta + resumen diario) | — (solo falta poner `OWNER_NOTIFICATION_EMAIL` en el `.env` del deploy) |
 | Bitácora de auditoría admin | ❌ ausente | `owner` y `admin` tienen permisos idénticos y no queda rastro de quién borró o canceló qué |
 | Facturación CFDI | ❌ ausente | En México se la van a pedir tarde o temprano |
 
@@ -866,7 +866,7 @@ historial.
 
 ---
 
-### Fase N.4 — Aviso al dueño de venta nueva
+### Fase N.4 — Aviso al dueño de venta nueva ✅
 
 **Objetivo:** enterarse de un pedido pagado sin abrir el panel.
 
@@ -874,16 +874,117 @@ historial.
 con fallas repetidas). No hay nada para el evento más importante del negocio: una venta.
 
 **Tareas:**
-- [ ] Template `newOrderNotificationTemplate` (resumen del pedido + tallas + dirección + si requiere
+- [x] Template `newOrderNotificationTemplate` (resumen del pedido + tallas + dirección + si requiere
   dropoff, que es dato operativo del dueño y aquí **sí** va).
-- [ ] Disparo **fire-and-forget** desde `markOrderPaidFromWebhook`, bajo el mismo guard
+- [x] Disparo **fire-and-forget** desde `markOrderPaidFromWebhook`, bajo el mismo guard
   `affected === 1` que ya protege el correo de confirmación — así no puede duplicarse ni bloquear el
   `200` del webhook.
-- [ ] Destino: reusar `ALERT_EMAIL_TO` o una env var propia (`OWNER_NOTIFICATION_EMAIL`) para poder
-  separar alertas técnicas de avisos de venta.
-- [ ] WhatsApp (evaluar, no comprometido): requiere proveedor (Twilio / WhatsApp Cloud API), cuenta
-  de negocio verificada y costo por mensaje. Vale la pena solo si el correo no basta en la práctica.
-- [ ] Tests: un pedido pagado dispara un aviso; webhook y sweeper concurrentes → uno solo.
+- [x] Destino: env var propia `OWNER_NOTIFICATION_EMAIL` **con fallback a `ALERT_EMAIL_TO`**.
+- [x] **Resumen diario de ventas** (no estaba en el plan original, ver abajo).
+- [x] WhatsApp **descartado** para esta fase: requiere proveedor (Twilio / WhatsApp Cloud API),
+  cuenta de negocio verificada y costo por mensaje, para un problema que el correo resuelve al
+  volumen esperado al lanzamiento. Se revisa solo si el correo no basta en la práctica.
+- [x] Tests: un pedido pagado dispara un aviso; webhook y sweeper concurrentes → uno solo.
+
+**La pregunta que abrió la fase: ¿un correo por venta no es demasiado?** Se implementaron **las dos
+cosas** porque no son la misma:
+
+- El **correo por venta es un disparador de acción** ("empaca esto"): tallas, dirección, contacto y
+  las dos condiciones operativas que obligan a hacer algo a mano. Solo sirve si llega en el momento.
+- El **resumen diario es reconciliación** ("cómo cerró el día"). No dispara ninguna acción, así que
+  no puede sustituir al anterior: con solo el resumen, un pedido de las 3pm no se conocería hasta el
+  corte del día siguiente — hasta un día de retraso en despachar, justo cuando la rapidez es la
+  ventaja de la tienda.
+
+El volumen no era el argumento que parecía: Resend regala 3,000 correos/mes y cada pedido ya manda
+1–2 al cliente, así que el costo es cero. El ruido empezaría hacia 20–30 ventas diarias, y ahí la
+solución no es quitar el correo sino que **el asunto se lea sin abrirlo** — está diseñado así desde
+ahora (`Venta #142 — $1,850.00 — 3 piezas — GUÍA MANUAL`), de modo que escala solo.
+
+**Cómo quedó (decisiones que el diseño de arriba no fijaba):**
+
+- **Esta fase funciona hoy sin dominio verificado en Resend**, a diferencia de todos los demás
+  correos. Sin dominio, Resend solo entrega al correo del dueño de la cuenta — que aquí *es* el
+  destinatario. El pendiente heredado no la bloquea.
+- **El bug que salió al diseñar la ventana del resumen, y que esta fase arregla.**
+  `dashboard.service.ts` y `reports.service.ts` filtraban las ventas con **`status: "paid"`**. Pero
+  `Order.status` avanza a `shipped`/`delivered` —desde `applyShipmentUpdateFromWebhook` o desde el
+  `PATCH /status` de la Fase O.1—, así que **en cuanto un pedido se marcaba como enviado desaparecía**
+  de los KPIs de ingreso, de `recentSales` y del reporte mensual. No se había notado porque todavía
+  no hay pedidos enviados; a partir del lanzamiento el panel habría subcontado desde el primer
+  despacho. El predicado correcto es **`paymentStatus: "paid"`** ("el dinero entró y no se ha
+  devuelto"): sobrevive a `shipped`/`delivered` y solo cambia a `refunded` (reembolso real) o
+  `failed` (pendiente liberado). Se arregló aquí y no se dejó como pendiente porque el resumen
+  **tiene** que usar ese predicado —si no, le faltarían justo los pedidos despachados ese mismo día—
+  y dejar el panel con el filtro viejo habría hecho que los dos números se contradijeran desde el
+  primer envío. **No se tocó** el `status: "paid"` de `pendingShipmentWhere` (`payment.service.ts`):
+  ahí significa literalmente "pagado y todavía sin enviar", que es lo correcto para el barrido de
+  guías. Los dos tests que afirmaban el filtro viejo se reescribieron como regresión, incluida la
+  aserción de que **ninguna** de las consultas puede volver a acotar `status`.
+- **El aviso NO espera a `createShipmentForOrder`.** Los dos datos operativos que lleva
+  (`skydropxRateId` y `shippingRequiresDropoff`) se persisten en el checkout, no al generar la guía,
+  así que encadenarlo solo habría retrasado el aviso —o lo habría perdido si Skydropx falla— sin
+  agregar una sola línea de información.
+- **El aviso recarga el pedido en una instancia NUEVA (`findByPk`), nunca con `order.reload()`.** El
+  correo de confirmación al cliente se dispara en paralelo sobre esa misma instancia y también la
+  recarga, con otro juego de `attributes`: dos `reload()` concurrentes sobre el mismo objeto se pisan
+  a media renderización. Es la misma familia de bug que obligó, en `updateOrderStatusByAdmin`, a no
+  pasarle a `sendShipmentEmail` la instancia que se está serializando de vuelta.
+- **`escapeHtml` se extrajo a `templates/escapeHtml.ts`.** Estaba local en `orderConfirmation.ts` —lo
+  correcto mientras hubo una sola plantilla—; con tres, tres copias de una función de escape es
+  exactamente lo que se desincroniza y abre el hueco que venía a tapar.
+- **El correo del dueño tampoco lleva `unitCost` ni margen**, aunque sea suyo: un correo no está
+  autenticado, se reenvía y vive en una bandeja. La regla del repo (costos solo en rutas admin con
+  JWT) se respeta igual, y el margen ya está en el dashboard. Hay un test que barre el HTML completo.
+
+**El resumen diario, decisiones propias:**
+
+- **8:00 hora de Celaya, cubriendo el día anterior COMPLETO.** Un corte a las 21:00 habría sido más
+  inmediato pero truncado: las ventas de 21:00 a medianoche no caerían en ningún resumen o se
+  contarían al día siguiente. Con el día ya cerrado, los números cuadran con el panel sin asteriscos.
+- **La ventana es un día LOCAL, no UTC**, y por eso existe `src/utils/storeDay.ts` (aparte de
+  `src/utils/date.ts`, cuyo encabezado garantiza que todo lo suyo está fijado a UTC). Un "ayer"
+  calculado en UTC cubriría de las 18:00 de antier a las 18:00 de ayer y **se comería la tarde-noche**,
+  que es horario pico de compra. Offset fijo `-06:00`, mismo criterio y misma justificación que los
+  cupones (México no tiene DST desde 2022); `MEXICO_CITY_OFFSET` ahora se comparte en vez de estar
+  declarado dos veces.
+- **Se manda también los días sin ventas.** Un correo que no llega es ambiguo —¿día flojo o cron
+  muerto?— y al lanzamiento sirve además de latido de que el sistema está vivo.
+- **Dos capas de idempotencia, y la segunda no es memoria.** `lastSentDay` en memoria (misma decisión
+  y misma limitación asumida que los mapas de los otros dos crons) **no sobrevive a un redeploy**, y
+  un redeploy a las 8:05 habría mandado el resumen dos veces. La segunda capa es el
+  **`idempotencyKey: daily-sales/<día>` de Resend**, cuya ventana de 24 h coincide exactamente con la
+  cadencia diaria: cubre el redeploy *y* varias instancias sin columna ni tabla nuevas.
+- **La ventana se mide sobre `createdAt`** y no sobre "cuándo se pagó", porque **no existe columna
+  `paidAt`**: agregarla exigiría una migración con un backfill imposible de reconstruir y dejaría al
+  resumen midiendo algo distinto del dashboard, que también agrupa por `createdAt`. Consecuencia
+  asumida: un pedido creado 11:55pm y pagado 00:05 cuenta en el día anterior.
+- **Tras una caída de varios días manda solo el más reciente, no un backfill**: el histórico completo
+  vive en el dashboard y una ráfaga de resúmenes viejos al volver no le sirve a nadie.
+- **`lastSentDay` se marca ANTES de mandar.** `sendDailySalesDigest` nunca lanza, así que un fallo de
+  correo no debe provocar un reintento en cada tick de los siguientes 15 min repitiendo las consultas;
+  el día siguiente vuelve a intentar.
+- **Es un cron gemelo** (`src/services/dailySalesDigest.ts`), arrancado y detenido en `app.ts` junto a
+  los otros dos, saltado bajo `NODE_ENV=test` y con el timer `unref()`ado. `runDigestTick(now?)` acepta
+  el instante para poder situarse a una hora concreta en los tests sin timers falsos, y
+  `resetDailySalesDigestState()` se exporta solo para ellos (igual que `resetCheckoutIdempotency`).
+- **Sin migración, sin columnas, sin rutas nuevas** ⇒ sin `@openapi` y **sin fase en el roadmap del
+  frontend**: los correos los lee el dueño en su bandeja, y el arreglo del filtro no cambia la forma
+  de `DashboardData` ni de los reportes, solo corrige sus números.
+- Tests: 4 suites nuevas y +42 casos — `tests/integration/newOrderNotification.test.ts` (7, nivel 3:
+  el aviso único bajo webhook+sweeper concurrentes, el fallback de destinatario y el barrido de que no
+  se filtra el costo), `tests/integration/dailySalesDigest.test.ts` (13, nivel 2/3: el pedido de las
+  23:30 dentro y el de las 00:30 fuera, el pedido `shipped` que sí cuenta, y los ticks repetidos),
+  `tests/unit/utils/storeDay.test.ts` (10) y
+  `tests/unit/services/newOrderNotificationTemplate.test.ts` (11), más los dos casos de regresión del
+  filtro en `dashboard.test.ts`/`reports.test.ts`. Total del repo: **43 suites / 495 tests**.
+
+**Cómo verificar:** poner `OWNER_NOTIFICATION_EMAIL` en el `.env`, completar un checkout y pagarlo con
+`stripe trigger payment_intent.succeeded` → llega **un** aviso con tallas, dirección y total, y el
+asunto se entiende sin abrirlo; reenviar el mismo evento → no llega un segundo. Forzar un pedido con
+tarifa plana (Skydropx apagado al cotizar) → el aviso trae el bloque "guía manual" y el sufijo en el
+asunto. Marcar un pedido pagado como `shipped` con `PATCH /api/admin/orders/:id/status` → **sigue**
+apareciendo en `GET /api/admin/dashboard` y en `GET /api/admin/reports/monthly` (antes desaparecía).
 
 ---
 
@@ -957,9 +1058,10 @@ activo — hay que revisarlos **cerca del 1 de octubre**:
 - **O.1 + O.2 + O.3 son las de mayor relación impacto/esfuerzo.** Ninguna necesita dependencias
   nuevas y solo O.4 requiere migración. Entre las tres tapan los tres estados en que el dueño se
   queda atorado.
-- **El bloque N no está ordenado por valor**, sino agrupado. N.1, N.2 y N.3 ya están cerradas —con
-  N.3, `profitKpisByPeriod` dejó de restar una constante inventada—. De las que quedan, **N.4 (aviso
-  de venta)** es la de mayor relación impacto/esfuerzo: no necesita modelo nuevo ni migración.
+- **El bloque N no está ordenado por valor**, sino agrupado. N.1, N.2, N.3 y N.4 ya están cerradas
+  —con N.3, `profitKpisByPeriod` dejó de restar una constante inventada; con N.4, el dueño se entera
+  de cada venta sin abrir el panel **y** el panel dejó de perder los pedidos ya despachados—. De las
+  que quedan, **N.5 (bitácora)** solo empieza a importar cuando haya más de una persona en el panel.
 - **N.6 (CFDI) puede volverse urgente por razones ajenas al código.** Si el negocio lo necesita,
   brinca la fila entera.
 
@@ -980,7 +1082,7 @@ activo — hay que revisarlos **cerca del 1 de octubre**:
 - [x] **N.1** — Búsqueda (`q`), orden y rango de precio en el catálogo
 - [x] **N.2** — Cupones (modelo + validación + canje atómico + congelado en la orden)
 - [x] **N.3** — Gastos reales sustituyendo `GASTOS_FIJOS`
-- [ ] **N.4** — Aviso de venta nueva al dueño
+- [x] **N.4** — Aviso de venta nueva al dueño (correo por venta + resumen diario)
 - [ ] **N.5** — Bitácora de auditoría admin
 - [ ] **N.6** — Facturación CFDI (evaluar primero)
 

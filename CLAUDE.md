@@ -407,6 +407,82 @@ que el panel no se rompe con el deploy. `src/seed.ts` crea una fila recurrente d
 equivalente a la constante vieja para que la GANANCIA NETA no dé un salto ese día; es una fila normal
 y editable, no un valor especial.
 
+**Aviso de venta al dueño** (Fase N.4, `roadmap-operacion-y-negocio.md` —
+`src/services/ownerNotification.service.ts`, `src/services/dailySalesDigest.ts`,
+`src/services/email/templates/newOrderNotification.ts` + `dailySalesDigest.ts`,
+`src/utils/storeDay.ts`): hasta esta fase `alert.service.ts` solo mandaba correo cuando algo
+**fallaba**, y no había nada para el evento más importante del negocio — una venta. Son **dos correos
+que responden preguntas distintas** y por eso existen los dos: el **aviso por venta** es un
+*disparador de acción* ("empaca esto") y el **resumen diario** es *reconciliación* ("cómo cerró el
+día"). Con solo el resumen, un pedido de las 3pm no se conocería hasta el corte del día siguiente —
+hasta un día de retraso en despachar. Van a `OWNER_NOTIFICATION_EMAIL` con **fallback a
+`ALERT_EMAIL_TO`** (resuelto en cada llamada, no al cargar el módulo, igual que `sendAlertEmail`);
+**sin ninguna de las dos la fase queda apagada**, y ese es su interruptor — no hay env booleana
+aparte. Sin dominio verificado en Resend esta fase **sí funciona**, a diferencia de los correos al
+cliente: el destinatario *es* el dueño de la cuenta.
+
+**El aviso por venta** se dispara fire-and-forget desde `markOrderPaidFromWebhook` **dentro del guard
+`affected === 1`**, junto al correo de confirmación: ese `UPDATE` condicional ya serializa a nivel de
+BD el webhook de Stripe y `pendingOrderSweeper`, así que sale exactamente una vez sin lógica de dedup
+propia (`idempotencyKey: new-order/${id}` es el segundo cinturón). **No espera a
+`createShipmentForOrder`**: los dos datos operativos que lleva (`skydropxRateId` y
+`shippingRequiresDropoff`) se persisten en el checkout, así que encadenarlo solo retrasaría el aviso —
+o lo perdería si Skydropx falla— sin agregar información. **Recarga el pedido en una instancia nueva
+(`Order.findByPk`), nunca con `order.reload()`**: el correo de confirmación se dispara en paralelo
+sobre esa misma instancia y también la recarga con otros `attributes`, y dos `reload()` concurrentes
+sobre el mismo objeto se pisan a media renderización (misma familia de bug que en
+`updateOrderStatusByAdmin`). El **asunto es autocontenido a propósito**
+(`Venta #142 — $1,850.00 — 3 piezas`, con sufijo ` — GUÍA MANUAL` cuando `!skydropxRateId`): al
+volumen de lanzamiento un correo por venta no es ruido, y para que siga sin serlo a 20–30 diarias
+tiene que poder leerse **sin abrirlo**. El cuerpo lleva tallas, cantidades, dirección con referencias
+y **el contacto completo del cliente** (a diferencia de `PublicOrderView`: este correo es del dueño y
+son los datos con los que resuelve un problema de entrega), más los dos **bloques de acción** que son
+su razón de ser: `!skydropxRateId` ("se cobró con tarifa plana, genera la guía a mano" — mismo texto
+que el `409` de `retryShipmentForOrder`) y `shippingRequiresDropoff` ("hay que llevarlo a la
+sucursal"). **Nunca `unitCost` ni margen**, aunque el correo sea del dueño: un correo no está
+autenticado, se reenvía y vive en una bandeja; el margen ya está en el dashboard.
+
+**El resumen diario** (`startDailySalesDigest`/`stopDailySalesDigest` en `app.ts` junto a los otros
+dos crons, saltado bajo `NODE_ENV=test`, timer `unref()`ado) sale a las **`DAILY_DIGEST_HOUR` (8) hora
+de Celaya y cubre el día anterior COMPLETO**: un corte a las 21:00 sería más inmediato pero truncado,
+y las ventas de la noche no caerían en ningún resumen. Cada `DAILY_DIGEST_CHECK_INTERVAL_MINUTES` (15)
+`runDigestTick` mira la hora local y, pasada la hora, manda el resumen de ayer si no lo ha mandado.
+**La ventana es un día LOCAL, no UTC**, y de ahí `src/utils/storeDay.ts` — aparte de
+`src/utils/date.ts`, cuyo encabezado garantiza que todo lo suyo está fijado a UTC para estabilidad de
+agregación: un "ayer" en UTC cubriría de las 18:00 de antier a las 18:00 de ayer y **se comería la
+tarde-noche**, horario pico de compra. Offset fijo `-06:00` (México no tiene DST desde 2022);
+`MEXICO_CITY_OFFSET` se comparte ahora con `src/schemas/coupon.ts` en vez de estar declarado dos
+veces. Ojo con `storeHour`: usa **`hourCycle: "h23"` y no `hour12: false`**, porque con este último
+varias versiones de ICU formatean la medianoche como `"24"` y el resumen saldría a medianoche.
+**Dos capas de idempotencia, y la segunda no es memoria**: `lastSentDay` vive en el módulo (misma
+decisión y limitación asumida que los mapas de los otros crons) y **no sobrevive a un redeploy**, así
+que la segunda es el **`idempotencyKey: daily-sales/<día>` de Resend**, cuya ventana de 24 h coincide
+exactamente con la cadencia diaria y cubre el redeploy *y* varias instancias sin columna nueva. Se
+marca `lastSentDay` **antes** de mandar (la función nunca lanza; reintentar en cada tick solo repetiría
+las consultas). **Se manda también los días sin ventas** — un correo que no llega es ambiguo (¿día
+flojo o cron muerto?) y sirve de latido. Tras una caída de varios días manda **solo el más reciente**,
+no un backfill. La ventana se mide sobre **`createdAt`** porque **no existe columna `paidAt`** y
+agregarla exigiría un backfill imposible de reconstruir, además de que el dashboard también agrupa por
+`createdAt`; consecuencia asumida: un pedido creado 11:55pm y pagado 00:05 cuenta en el día anterior.
+El resumen filtra **`paymentStatus: "paid"`** — ver **Dashboard**: filtrar por `status` le quitaría
+justo los pedidos despachados ese mismo día, lo peor que le puede pasar a un correo de reconciliación,
+y es lo que destapó (y esta fase arregló) el bug del panel. Trae totales del día, tabla por pedido con
+su hora local, comparación contra el día anterior **en pesos y no en porcentaje** (con un día previo
+en cero el porcentaje sería una división entre cero) y una sección **"requieren acción"** con los
+pedidos sin guía (`skydropxShipmentId` en `null` o el centinela) o con dropoff.
+`runDigestTick(now?)` acepta el instante para poder situarse a una hora concreta en los tests sin
+timers falsos, y `resetDailySalesDigestState()` se exporta **solo para tests** (estado de módulo que
+sobrevive a `truncateAll`, igual que `resetCheckoutIdempotency()`).
+
+`escapeHtml` se extrajo de `orderConfirmation.ts` a
+**`src/services/email/templates/escapeHtml.ts`**: estaba local —lo correcto mientras hubo una sola
+plantilla— y con tres, tres copias de una función de escape es exactamente lo que se desincroniza.
+**Sin migración, sin columnas y sin rutas nuevas** ⇒ sin `@openapi` y **sin fase en el roadmap del
+frontend**: los correos los lee el dueño en su bandeja y el arreglo del filtro no cambia la forma de
+`DashboardData` ni de los reportes, solo corrige sus números. WhatsApp/Twilio **descartado** en esta
+fase (proveedor, cuenta de negocio verificada y costo por mensaje para un problema que el correo
+resuelve a este volumen).
+
 Because the seed inserts rows with explicit `id`s, Postgres SERIAL sequences are left behind;
 `src/seed.ts` resyncs each one (`setval(pg_get_serial_sequence(table,'id'), MAX(id))`) at the
 end of the transaction so later `id DEFAULT` inserts (e.g. `POST /api/admin/products`) don't
@@ -965,9 +1041,18 @@ guía. Por eso la alerta de ese caso es incondicional y `fatal`.
 `src/controllers/dashboard.controller.ts`, `src/controllers/order.controller.ts`,
 `src/services/dashboard.service.ts`): `GET /api/admin/dashboard` `[auth]` returns `DashboardData`
 (`kpisByPeriod`, `profitKpisByPeriod`, `revenueByPeriod`, `recentSales`, `inventory`) computed **in
-memory** from `Order`/`OrderItem`/`Product` — no aggregation tables. Only orders with
-`status: "paid"` count as sales (not `paymentStatus`, which the seed leaves at `"unpaid"` — see
-`src/seed.ts`). `kpisByPeriod`/`profitKpisByPeriod` follow the same shape as `revenueByPeriod`: all
+memory** from `Order`/`OrderItem`/`Product` — no aggregation tables. Sales are the orders with
+**`paymentStatus: "paid"`** — **not `status: "paid"`**, which is what this used to filter on and was a
+real bug fixed in Fase N.4: `Order.status` advances to `shipped`/`delivered` (from
+`applyShipmentUpdateFromWebhook` or the Fase O.1 `PATCH /status`), so an order **dropped out of
+revenue, the KPIs and `recentSales` the moment it was dispatched**. `paymentStatus: "paid"` means "the
+money came in and hasn't gone back": it survives `shipped`/`delivered` and only changes to `refunded`
+(real refund) or `failed` (released pending order), which is exactly what must *not* count as a sale.
+`reports.service.ts`'s `loadReportData` carries the same predicate for the same reason; the
+`status: "paid"` in `pendingShipmentWhere` (`payment.service.ts`) is **not** the same thing and stays —
+there it literally means "paid and not yet shipped". Both `dashboard.test.ts` and `reports.test.ts`
+assert the `WHERE` never constrains `status` again.
+`kpisByPeriod`/`profitKpisByPeriod` follow the same shape as `revenueByPeriod`: all
 three `"7"|"30"|"90"` windows computed together in one response (no query param — the frontend
 alternates client-side in `DataSection`), via `buildKpisForWindow(dailyAgg, windowDays, todayStart)`.
 Per-order aggregation (revenue/COGS/pieces/order-count) is folded into a single day-bucketed pass
@@ -1473,7 +1558,10 @@ operational alert, not a correctness guarantee). `email.service.ts`'s own two fa
 (Resend returned an error / the send threw) stay log-only, by design — routing them through
 `sendAlertEmail` would create a loop where a Resend outage tries to alert about itself over the
 same broken channel. `src/seed.ts`'s `console.log` calls are unchanged (a one-off CLI script, not
-server request-path code — out of scope for this phase).
+server request-path code — out of scope for this phase). **`alert.service.ts` is for failures only** —
+the *business* notifications (a new sale, the daily digest) live in
+`src/services/ownerNotification.service.ts` with their own recipient, so the owner can filter, mute or
+redirect "you sold something" separately from "something broke"; see **Aviso de venta al dueño**.
 
 **Testing** (Fase H.1 — `roadmaps-completados/roadmap-testing.md`): the suite runs on **`jest` + `ts-jest` +
 `supertest`** and lives in **`tests/`**, deliberately **outside `src/`** — `tsc` compiles `src/`→
@@ -1485,14 +1573,16 @@ root and adds `types: [jest, node]`). `roadmaps-completados/roadmap-testing.md` 
 parts** (0 = infra; 0.5 = dedicated test DB; 1 = pure services; 2 = auth; 3 = checkout; 4 = webhook
 idempotency; 5 = manual cancel/refund/release; 6 = live shipping rates; 7 = Skydropx HTTP client;
 8 = admin product CRUD + images; 9 = brand/admin users; 10 = dashboard/reports aggregations) —
-**all twelve are done** as of this phase (39 suites / 453 tests, latest count — grows as tests are
+**all twelve are done** as of this phase (43 suites / 495 tests, latest count — grows as tests are
 added part by part; new phases add their own suite, e.g. `adminOrderStatus.test.ts` for Fase O.1,
 `checkoutIdempotency.test.ts` + `pendingOrderSweeper.test.ts` for Fase O.2,
 `shipmentRetry.test.ts` for Fase O.3, `orderLookup.test.ts` +
 `unit/services/orderConfirmationTemplate.test.ts` for Fase O.4, and `coupons.test.ts` +
 `adminCoupons.test.ts` + `couponRelease.test.ts` + `unit/services/couponDiscount.test.ts` +
 `unit/services/chargeableTotal.test.ts` + `unit/utils/emailIdentity.test.ts` for Fase N.2, and
-`adminExpenses.test.ts` + `unit/services/expenses.test.ts` for Fase N.3).
+`adminExpenses.test.ts` + `unit/services/expenses.test.ts` for Fase N.3, and
+`newOrderNotification.test.ts` + `dailySalesDigest.test.ts` + `unit/utils/storeDay.test.ts` +
+`unit/services/newOrderNotificationTemplate.test.ts` for Fase N.4).
 Keep adding
 new tests **part by part** (one behavior area at a time), marking `[x]` in `roadmaps-completados/roadmap-testing.md` as
 each closes, and don't touch `src/` from a test change unless a test reveals a real bug.
@@ -1553,14 +1643,21 @@ contention.
   (3000) — the DB-check budget of `GET /health/ready` (Fase O.5, see **Healthchecks**) — and optional
   `MIN_CHARGE_MXN` (10) — the smallest total the checkout will accept, guarding against a coupon
   that leaves an amount Stripe would reject (Fase N.2; it lives in `coupon.service.ts`, **not** in
-  `config/stripe.ts`, see **Cupones y códigos de descuento** for why). These go through
+  `config/stripe.ts`, see **Cupones y códigos de descuento** for why), plus the Fase N.4 digest knobs
+  `DAILY_DIGEST_HOUR` (8) and `DAILY_DIGEST_CHECK_INTERVAL_MINUTES` (15) — see **Aviso de venta al
+  dueño**; they live in `src/services/dailySalesDigest.ts` and **not** in a `config/*`, same
+  documented reason as `MIN_CHARGE_MXN`. Note `positiveNumberEnv` rejects `0`, so the valid digest
+  hour is 1–23 (a known, costless limitation — nobody reads a midnight digest). These go through
   `positiveNumberEnv` (`src/utils/env.ts`) instead of a bare `Number(process.env.X ?? default)`:
   `??` only falls back on `undefined`, so a blank line in `.env` parses as `0` and a typo as `NaN`,
   and here a `0` retry margin means a sentinel claimed milliseconds ago counts as orphaned — a
   concurrent retry would then pay for a second label. **Use it for any new numeric env knob.**
   `FRONTEND_URL`, `SENTRY_DSN` (optional — enables Sentry error tracking if set, see the
   **Logging y monitoreo** section below), `ALERT_EMAIL_TO` (optional — destination for
-  operational alert emails, same section), `LOG_LEVEL` (optional — overrides the pino
+  operational alert emails, same section), `OWNER_NOTIFICATION_EMAIL` (optional — destination for the
+  **business** notifications of Fase N.4: the per-sale email and the daily digest; falls back to
+  `ALERT_EMAIL_TO`, and with neither set the whole phase is off, which is deliberately its only
+  switch — see **Aviso de venta al dueño**), `LOG_LEVEL` (optional — overrides the pino
   logger's level, defaults to `info` in production / `debug` otherwise), and `TRUST_PROXY`
   (optional — the value handed to `app.set("trust proxy", ...)`, parsed by `trustProxyEnv` in
   `src/utils/env.ts`: `undefined` when unset/blank so `app.ts` never calls `app.set` at all, an

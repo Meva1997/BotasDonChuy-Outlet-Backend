@@ -144,15 +144,25 @@ describe("dashboard.service — getDashboardData (Parte 10)", () => {
     jest.restoreAllMocks();
   });
 
-  it("solo consulta órdenes con status paid (no paymentStatus, que el seed deja en unpaid)", async () => {
+  // Regresión de la Fase N.4. Este test afirmaba lo contrario (`where.status === "paid"`), que era
+  // justo el bug: `Order.status` avanza a `shipped`/`delivered` en cuanto la guía reporta actividad
+  // —o el dueño lo marca a mano con el `PATCH /status` de la Fase O.1—, así que filtrar por `status`
+  // hacía que **un pedido saliera de los ingresos, los KPIs y `recentSales` al despacharlo**. El
+  // predicado correcto es `paymentStatus: "paid"`: "el dinero entró y no se ha devuelto".
+  it("consulta las ventas por paymentStatus, no por status (un pedido enviado sigue contando)", async () => {
     jest.useFakeTimers().setSystemTime(new Date("2026-07-20T12:00:00Z"));
     const orderSpy = mockQueries([], [], []);
 
     await getDashboardData();
 
     expect(orderSpy).toHaveBeenCalledTimes(2);
-    expect((orderSpy.mock.calls[0][0] as any).where.status).toBe("paid");
-    expect((orderSpy.mock.calls[1][0] as any).where.status).toBe("paid");
+    for (const call of orderSpy.mock.calls) {
+      const where = (call[0] as any).where;
+      expect(where.paymentStatus).toBe("paid");
+      // Lo que blinda la regresión: NINGUNA de las dos consultas puede volver a acotar `status`,
+      // o los pedidos `shipped`/`delivered` desaparecerían otra vez.
+      expect(where.status).toBeUndefined();
+    }
   });
 
   it("revenueByPeriod incluye días en $0 sin saltarlos", async () => {

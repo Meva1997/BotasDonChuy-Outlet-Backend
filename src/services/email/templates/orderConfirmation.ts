@@ -1,4 +1,5 @@
 import { formatMoney } from "../../../utils/formatMoney";
+import { escapeHtml } from "./escapeHtml";
 
 interface OrderConfirmationItem {
   nameSnapshot: string;
@@ -48,26 +49,6 @@ interface OrderConfirmationInput {
   trackingPageUrl?: string;
 }
 
-/**
- * Escapa los metacaracteres HTML de un texto controlado por el usuario (nombre, dirección,
- * nombre de producto) antes de interpolarlo en el correo. Sin esto, un `&`/`<`/`>` legítimo
- * en una dirección rompe el render y un valor malicioso inyectaría markup. Se define local
- * (plantilla autónoma, igual que `formatMoney`).
- */
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-/**
- * Formatea un número como moneda es-MX: `$1,920.50`. Se duplica el helper privado de
- * `dashboard.service.ts` (no está exportado) para que este módulo de plantilla se
- * mantenga autónomo, igual que `passwordResetCode.ts`.
- */
 /**
  * Fecha legible del pedido, p. ej. "14 de julio de 2026". Se fija a
  * `America/Mexico_City` (no UTC): a diferencia de `src/utils/date.ts` —que usa UTC para

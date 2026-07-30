@@ -94,7 +94,13 @@ function loadReportData(): Promise<{ orders: Order[]; products: Product[] }> {
   cacheExpiresAt = now + REPORT_CACHE_TTL_MS;
   cachedReportData = Promise.all([
     Order.findAll({
-      where: { status: "paid" },
+      // `paymentStatus` y NO `status` (arreglo de la Fase N.4): `Order.status` avanza a
+      // `shipped`/`delivered` en cuanto la guía reporta actividad (o el dueño lo marca a mano con
+      // el `PATCH /status` de la Fase O.1), así que filtrar por `status: "paid"` hacía que **un
+      // pedido desapareciera de los reportes al despacharse**. `paymentStatus: "paid"` significa
+      // "el dinero entró y no se ha devuelto": sobrevive a `shipped`/`delivered` y solo cambia a
+      // `refunded` (reembolso real) o `failed` (pendiente liberado).
+      where: { paymentStatus: "paid" },
       attributes: ["id", "createdAt"],
       include: [{ model: OrderItem, as: "items", attributes: ["productId", "quantity"] }],
       order: [["createdAt", "ASC"]],

@@ -15,6 +15,7 @@ import {
 import { EMAIL_FROM, FRONTEND_URL } from "../config/resend";
 import { sendEmail } from "./email.service";
 import { sendAlertEmail } from "./alert.service";
+import { sendNewOrderNotification } from "./ownerNotification.service";
 import { orderConfirmationTemplate } from "./email/templates/orderConfirmation";
 import { buildParcel, type ParcelLineItem } from "./packing";
 import {
@@ -127,6 +128,13 @@ export async function markOrderPaidFromWebhook(
   // en bucle. La orden ya está `paid`; el envío ocurre en segundo plano y su propio
   // try/catch garantiza que un fallo (correo o recarga) nunca propague.
   void sendOrderConfirmationEmail(order);
+
+  // Aviso de venta al dueño (Fase N.4), mismo disparo fire-and-forget y bajo el mismo guard
+  // `affected === 1`, que es lo que garantiza que salga UNA vez por pedido aunque el webhook de
+  // Stripe y `pendingOrderSweeper` lleguen a la vez. No espera a `createShipmentForOrder`: los dos
+  // datos operativos que lleva (`skydropxRateId` y `shippingRequiresDropoff`) se persisten en el
+  // checkout, así que encadenarlo solo retrasaría el aviso sin agregar información.
+  void sendNewOrderNotification(order);
 
   // Guía automática (Fase 8.5), mismo disparo fire-and-forget y misma razón: crear la guía
   // contra Skydropx puede tardar y no debe bloquear el 200 del webhook. Solo llega aquí UNA

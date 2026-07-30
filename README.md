@@ -92,6 +92,13 @@ HEALTH_READY_TIMEOUT_MS=3000             # margen del chequeo de BD en /health/r
 
 # Cupones (Fase N.2) — opcional
 MIN_CHARGE_MXN=10                        # total mínimo que acepta el checkout (default 10, el mínimo de Stripe en MXN)
+
+# Avisos de venta al dueño (Fase N.4) — opcionales, pero SIN destinatario la fase queda apagada
+OWNER_NOTIFICATION_EMAIL=duenio@ejemplo.com  # destino del aviso por venta y del resumen diario;
+                                             # si falta, cae a ALERT_EMAIL_TO. Ponerlo aparte permite
+                                             # filtrar "vendiste" de "algo se rompió".
+DAILY_DIGEST_HOUR=8                      # hora local (Celaya) del resumen del día anterior (default 8; válido 1–23)
+DAILY_DIGEST_CHECK_INTERVAL_MINUTES=15   # cada cuánto se revisa si ya toca mandarlo (default 15)
 ```
 
 > **`TRUST_PROXY` cuando la API va detrás de un proxy** (Render, Railway, Fly, nginx,
@@ -852,14 +859,38 @@ operativos, no un sistema de reintentos automáticos — con una excepción: des
 fallida **sí** se reintenta sola (`shipmentRetrySweeper`), y por eso ese camino apaga la alerta por
 intento y manda una sola al agotar los 3.
 
+## Avisos de venta al dueño (Fase N.4)
+
+`alert.service.ts` solo avisa cuando algo **falla**. Los avisos de **negocio** viven aparte, en
+`src/services/ownerNotification.service.ts` y `src/services/dailySalesDigest.ts`, y van a
+`OWNER_NOTIFICATION_EMAIL` (con fallback a `ALERT_EMAIL_TO`). **Si ninguna de las dos está definida,
+no se manda nada** — ese es el interruptor de la función, no hay una variable booleana aparte.
+
+Son dos correos que responden preguntas distintas:
+
+- **Aviso por venta.** Sale al confirmarse el pago, bajo el mismo guard atómico que el correo de
+  confirmación al cliente, así que llega **exactamente una vez** por pedido. Trae tallas, cantidades,
+  dirección y contacto, y avisa de las dos cosas que obligan a actuar a mano: que el pedido se cobró
+  con la tarifa plana de respaldo (**no habrá guía automática**) y que la paquetería no recoge a
+  domicilio. El asunto es autocontenido (`Venta #142 — $1,850.00 — 3 piezas — GUÍA MANUAL`) para poder
+  leerse sin abrir el correo.
+- **Resumen diario.** A las `DAILY_DIGEST_HOUR` (8:00 hora de Celaya) con el **día anterior completo**:
+  totales, tabla por pedido, comparación contra el día previo y una sección de pedidos que requieren
+  acción. Se manda **también los días sin ventas**, para que un día flojo no se confunda con un cron
+  caído.
+
+Nota de despliegue: a diferencia de los correos al cliente, esta función **ya sirve sin dominio
+verificado en Resend**, porque el destinatario es el propio dueño de la cuenta de Resend.
+
 ## Apagado ordenado (graceful shutdown)
 
 `SIGTERM`/`SIGINT` disparan un `gracefulShutdown` compartido en `src/app.ts` que: (0) pone el
 readiness en rojo (`markDraining()`, Fase O.5) — a partir de ahí `GET /health/ready` responde `503`
 con `reason: "draining"` sin consultar la BD, así ningún sondeo que llegue mientras se drena recibe
 un `200` que ya no es cierto (ver el [alcance real](#get-health-y-get-healthready-probes-del-despliegue-fase-o5)
-de esa ventana); (1) detiene los dos
-barridos —`pendingOrderSweeper` y `shipmentRetrySweeper`— (dejan de abrir trabajo nuevo), (2) `server.close()` — deja de aceptar
+de esa ventana); (1) detiene los tres crons
+—`pendingOrderSweeper`, `shipmentRetrySweeper` y el resumen diario de ventas— (dejan de abrir trabajo
+nuevo), (2) `server.close()` — deja de aceptar
 conexiones nuevas y espera a que terminen las que están en vuelo, (3) cierra el pool de Sequelize.
 Así un redeploy no corta una transacción de checkout a medias. Señales repetidas se ignoran, y un
 timeout de 10s (`unref()`ado) fuerza `process.exit(1)` si alguna conexión colgada bloquea el cierre.

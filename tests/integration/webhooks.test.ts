@@ -32,7 +32,15 @@ import {
   applyShipmentUpdateFromWebhook,
 } from "../../src/services/payment.service";
 
-beforeAll(setupTestDatabase);
+beforeAll(async () => {
+  // Desde la Fase N.4, `markOrderPaidFromWebhook` también manda el aviso de venta al dueño — pero
+  // solo si hay destinatario configurado. Los asserts de esta suite cuentan correos exactos
+  // (`toHaveBeenCalledTimes(1)` para "un solo correo de confirmación"), así que se apaga
+  // explícitamente en vez de depender de que `.env.test` no traiga estas variables.
+  delete process.env.OWNER_NOTIFICATION_EMAIL;
+  delete process.env.ALERT_EMAIL_TO;
+  await setupTestDatabase();
+});
 afterEach(truncateAll);
 afterAll(closeTestDatabase);
 

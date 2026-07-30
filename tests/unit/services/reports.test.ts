@@ -108,6 +108,21 @@ function mockLoad(orders: OrderType[], products: ProductType[]) {
 }
 
 describe("reports.service — monthRange / getMonthlyReport (Parte 10)", () => {
+  // Regresión de la Fase N.4, gemela de la de dashboard.test.ts: `Order.status` avanza a
+  // `shipped`/`delivered` al despacharse, así que filtrar las ventas por `status` borraba del
+  // reporte mensual todo pedido ya enviado. El predicado correcto es `paymentStatus: "paid"`.
+  it("carga las ventas por paymentStatus, no por status (un pedido enviado sigue contando)", async () => {
+    jest.useFakeTimers().setSystemTime(new Date("2026-07-15T12:00:00Z"));
+    const { orderSpy } = mockLoad([], []);
+
+    await reports.getMonthlyReport();
+
+    expect(orderSpy).toHaveBeenCalledTimes(1);
+    const where = (orderSpy.mock.calls[0][0] as any).where;
+    expect(where.paymentStatus).toBe("paid");
+    expect(where.status).toBeUndefined();
+  });
+
   it("sin huecos entre el mes de la primera orden pagada y el mes UTC actual", async () => {
     jest.useFakeTimers().setSystemTime(new Date("2026-07-15T12:00:00Z"));
     const order = buildOrder({

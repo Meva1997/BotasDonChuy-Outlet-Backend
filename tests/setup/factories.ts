@@ -96,9 +96,21 @@ interface OrderOverrides {
   paymentIntentId?: string | null;
   paymentStatus?: string;
   customerEmail?: string;
+  customerName?: string;
   couponId?: number | null;
   couponCode?: string | null;
   couponDiscount?: number;
+  /**
+   * Momento de creación explícito. Lo necesita el resumen diario (Fase N.4): su ventana es un día
+   * de calendario en hora de la tienda, así que los casos que importan son pedidos situados a una
+   * hora concreta (23:30 local dentro, 00:30 del día siguiente fuera).
+   */
+  createdAt?: Date;
+  /** `null` = el pedido cayó a la tarifa plana de respaldo y su guía se genera a mano. */
+  skydropxRateId?: string | null;
+  skydropxQuotationId?: string | null;
+  skydropxShipmentId?: string | null;
+  shippingRequiresDropoff?: boolean | null;
 }
 
 /** Crea una Order con totales y datos de cliente por defecto (status `pending`). */
@@ -115,7 +127,7 @@ export async function createOrder(overrides: OrderOverrides = {}): Promise<Order
     // El descuento del cupón entra en el total por defecto, o cualquier fixture con cupón
     // quedaría con una aritmética que contradice el invariante que la app mantiene.
     total: overrides.total ?? subtotal - savings - couponDiscount + shipping,
-    customerName: "Cliente de prueba",
+    customerName: overrides.customerName ?? "Cliente de prueba",
     customerEmail: overrides.customerEmail ?? "cliente@test.com",
     customerPhone: "4610000000",
     street: "Calle Falsa 123",
@@ -128,6 +140,12 @@ export async function createOrder(overrides: OrderOverrides = {}): Promise<Order
     couponId: overrides.couponId ?? null,
     couponCode: overrides.couponCode ?? null,
     couponDiscount,
+    skydropxQuotationId: overrides.skydropxQuotationId ?? null,
+    skydropxRateId: overrides.skydropxRateId ?? null,
+    skydropxShipmentId: overrides.skydropxShipmentId ?? null,
+    shippingRequiresDropoff: overrides.shippingRequiresDropoff ?? null,
+    // Solo se manda cuando el caso lo pide: si no, se deja que Sequelize ponga `now()`.
+    ...(overrides.createdAt ? { createdAt: overrides.createdAt } : {}),
   } as any);
 }
 

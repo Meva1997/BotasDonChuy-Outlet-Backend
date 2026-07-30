@@ -37,6 +37,10 @@ import {
   startShipmentRetrySweeper,
   stopShipmentRetrySweeper,
 } from "./services/shipmentRetrySweeper";
+import {
+  startDailySalesDigest,
+  stopDailySalesDigest,
+} from "./services/dailySalesDigest";
 import "./models/Product"; // register the model so sync() creates its table
 import "./models/ProductSize";
 import "./models/AdminUser";
@@ -221,6 +225,7 @@ if (process.env.NODE_ENV !== "test") {
   connectDB();
   startPendingOrderSweeper(); // libera stock de órdenes pending abandonadas (Stripe)
   startShipmentRetrySweeper(); // reintenta la guía de pedidos pagados que se quedaron sin ella
+  startDailySalesDigest(); // resumen de ventas del día anterior al dueño (Fase N.4)
 
   const server = app.listen(PORT, () => {
     logger.info(`Server running at http://localhost:${PORT}`);
@@ -255,7 +260,8 @@ if (process.env.NODE_ENV !== "test") {
     try {
       stopPendingOrderSweeper();
       stopShipmentRetrySweeper();
-      logger.info("Sweepers de pendientes y de guías detenidos");
+      stopDailySalesDigest();
+      logger.info("Crons de pendientes, guías y resumen diario detenidos");
 
       await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));

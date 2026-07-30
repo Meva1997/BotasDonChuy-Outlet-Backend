@@ -1,13 +1,9 @@
 import { z } from "zod";
 import { couponCodeSchema, orderItemSchema } from "./checkout";
-
-/**
- * Zona horaria de la tienda (Celaya, GTO). Offset FIJO a propósito: México abolió el horario de
- * verano en 2022, así que el centro del país está en UTC−6 todo el año y no hace falta una
- * librería de zonas. Si algún día se vende desde la franja fronteriza (que sí conserva DST),
- * esto hay que revisarlo.
- */
-const MEXICO_CITY_OFFSET = "-06:00";
+// Zona horaria de la tienda (Celaya, GTO), offset fijo. Vivía declarada aquí; desde la Fase N.4 la
+// comparte con el resumen diario de ventas, que necesita exactamente el mismo criterio de "qué día
+// es" — separarlas solo permitía que se contradijeran.
+import { MEXICO_CITY_OFFSET } from "../utils/storeDay";
 
 /** Una fecha sin hora, tal como la escribe un `<input type="date">` del panel. */
 const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
