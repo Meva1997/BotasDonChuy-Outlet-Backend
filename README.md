@@ -247,12 +247,27 @@ Solo expone productos con `visible: true` y oculta el campo `unitCost`.
 | ----------- | ------ | ------- | -------------------------------------------- |
 | `categoria` | string | —       | Filtra por `type` (`bota`, `sombrero`, `ropa`) |
 | `talla`     | number | —       | Filtra productos que incluyan esa talla      |
+| `q`         | string | —       | Busca en `name` y `code` (parcial, sin distinguir mayúsculas). Máx. 100 caracteres |
+| `orden`     | string | —       | `precio_asc` · `precio_desc` · `novedad`. Sin valor, ordena por `id` ascendente |
+| `precioMin` | number | —       | Precio de venta mínimo (inclusive)           |
+| `precioMax` | number | —       | Precio de venta máximo (inclusive)           |
 | `page`      | number | `1`     | Página (se ajusta al rango `[1, totalPages]`) |
 | `perPage`   | number | `9`     | Elementos por página                         |
 
+**Un parámetro inválido se ignora en silencio; nunca responde `400`.** Un enlace viejo o un bot con
+basura en la query string debe seguir viendo el catálogo, no un error. Aplica a un `orden`
+desconocido, a un precio no numérico o negativo y a una talla vacía o no entera. Un `precioMin`
+mayor que `precioMax` **no se invierte**: devuelve cero resultados, que es la respuesta honesta a lo
+que se pidió.
+
+En `q`, los comodines `%` y `_` se buscan como **texto literal** (`escapeLike`, ver
+`src/utils/escapeLike.ts`).
+
 Respuesta: `{ products, total, page, perPage, totalPages, availableSizes }`. `Product.sizes`
 (repetido por talla) y `Product.stock` (total) son campos `VIRTUAL` derivados de la tabla
-`ProductSize` cuando se incluye esa asociación.
+`ProductSize` cuando se incluye esa asociación. `availableSizes` se acota por `categoria`, `q` y el
+rango de precio, pero **nunca por `talla`**: si se acotara por la talla ya elegida, elegir una
+vaciaría el propio selector y no habría forma de cambiarla.
 
 ### `/api/admin/products` (CRUD admin, requiere JWT)
 

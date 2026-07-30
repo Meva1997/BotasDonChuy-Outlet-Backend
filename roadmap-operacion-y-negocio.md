@@ -37,7 +37,7 @@ orden se queda en `paid` para siempre, sin correo de "va en camino" y sin forma 
 | Idempotencia en `POST /api/orders` | ✅ **Fase O.2** (ventana de 60 s + header `Idempotency-Key`) | — (opcional: mandar el header desde `usePlaceOrder.ts`, Fase 15 del roadmap del frontend) |
 | Consulta de pedido por el cliente | ✅ **Fase O.4** (`GET /api/orders/lookup/:token`) | — (falta la página de seguimiento en el front: Fase 17 del roadmap del frontend) |
 | Readiness real en `/health` | ✅ **Fase O.5** (`GET /health/ready`) | — (falta apuntar el probe del orquestador a la ruta nueva al desplegar) |
-| Búsqueda/orden en el catálogo | ❌ solo `categoria`/`talla` | Con el catálogo creciendo por import masivo, el cliente no encuentra lo que busca |
+| Búsqueda/orden en el catálogo | ✅ **Fase N.1** (`q`, `orden`, `precioMin`/`precioMax`) | — (falta cablear buscador y selector de orden en el front: Fase 18 del roadmap del frontend) |
 | Cupones / códigos de descuento | ❌ ausente | Sin la palanca de marketing más barata que existe |
 | Gastos reales (vs. `GASTOS_FIJOS` hardcodeado) | ❌ constante de `$2,000` | El KPI de utilidad del dashboard es ficción |
 | Aviso al dueño de venta nueva | ❌ solo hay alertas de falla | Se entera de un pedido pagado hasta que abre el panel |
@@ -541,7 +541,7 @@ inmediato, sin esperar el timeout.
 
 # BLOQUE N — Features de negocio (sin orden obligatorio)
 
-### Fase N.1 — Búsqueda, orden y filtros en el catálogo
+### Fase N.1 — Búsqueda, orden y filtros en el catálogo ✅
 
 **Objetivo:** que `GET /api/products` sirva para encontrar productos, no solo para paginarlos.
 
@@ -550,17 +550,80 @@ ni rango de precios. Con el import masivo de Excel el catálogo va a crecer en l
 filas por archivo, y ahí un listado sin búsqueda deja de ser navegable rápido.
 
 **Tareas:**
-- [ ] `q`: busca en `name` y `code` con `ILIKE '%q%'`, **escapando `%` y `_` del valor del usuario**.
+- [x] `q`: busca en `name` y `code` con `ILIKE '%q%'`, **escapando `%` y `_` del valor del usuario**.
   Ya hay precedente documentado de este bug en el import (`iLike` sin escapar hacía que una fila
   `"Bota%Premium"` emparejara y **renombrara** otro producto) — mismo cuidado aquí.
-- [ ] `orden`: `precio_asc` · `precio_desc` · `novedad` (`id DESC`) · default actual (`id ASC`).
-- [ ] `precioMin` / `precioMax` sobre `salePrice`, validados como números antes de tocar SQL (misma
+- [x] `orden`: `precio_asc` · `precio_desc` · `novedad` (`id DESC`) · default actual (`id ASC`).
+- [x] `precioMin` / `precioMax` sobre `salePrice`, validados como números antes de tocar SQL (misma
   regla que `talla` con `Number.isInteger`).
-- [ ] Todo **en SQL**, con el `where` compartido entre el `count` y el `findAll` (como ya está hecho).
-- [ ] Índices en migración: `products(type)`, `products(salePrice)` y `pg_trgm` sobre `name` si la
-  búsqueda por texto se siente lenta con catálogo real.
-- [ ] Tests + `@openapi` (los query params nuevos van en el bloque existente).
-- [ ] Fase 🔴 en el roadmap del frontend.
+- [x] Todo **en SQL**, con el `where` compartido entre el `count` y el `findAll` (como ya está hecho).
+- [x] Índices en migración: `products(type)`, `products(salePrice)`; `pg_trgm` sobre `name`
+  **diferido a propósito** (ver abajo).
+- [x] Tests + `@openapi` (los query params nuevos van en el bloque existente).
+- [x] Fase 🔴 en el roadmap del frontend (Fase 18).
+
+**Cómo quedó (decisiones que el diseño de arriba no fijaba):**
+- **Hay que escapar la `\`, no solo `%` y `_`.** No es una nota de completitud: `\` es el carácter
+  de escape por defecto de `LIKE` en Postgres, así que un `?q=\` deja un escape colgante, Postgres
+  responde `22025 LIKE pattern must not end with escape character` y el `errorHandler` lo degrada a
+  un **500 provocable con un solo carácter en la query string**. `escapeLike`
+  (`src/utils/escapeLike.ts`) escapa los tres en **una sola pasada** (`/[\\%_]/g`): encadenar un
+  `.replace` por carácter volvería a escapar las barras que la pasada anterior acaba de introducir.
+  Como el escape por defecto ya es `\`, no hace falta cláusula `ESCAPE` explícita — que además
+  obligaría a armar la condición con `sequelize.literal` y perdería el binding.
+- **`Op.iLike` sí funciona con `Product.count`.** Era la duda razonable, porque es justo la
+  limitación que obliga a interpolar `talla` a mano (`count` no acepta `replacements`). Pero eso
+  solo aplica a `sequelize.literal` con binds nombrados: `Op.iLike` es un operador que el query
+  generator expande igual en `count` y en `findAll`.
+- **`precioMin`/`precioMax` se validan con `Number.isFinite`, NO con `Number.isInteger`** como
+  sugería la tarea: `salePrice` es `DECIMAL(10,2)` y `precioMax=1499.99` es un filtro legítimo que
+  `Number.isInteger` habría descartado en silencio.
+- **Los órdenes por precio llevan desempate por `id`,** que el diseño no pedía. Los precios empatan
+  todo el tiempo (números redondos, lotes importados con el mismo precio) y Postgres no garantiza
+  ningún orden entre filas empatadas: sin desempate, la página 2 repetía productos de la 1 y perdía
+  otros. El desempate va en la **misma dirección** que el precio para que `precio_desc` se resuelva
+  con un recorrido hacia atrás del mismo índice, sin sort.
+- **`products(salePrice)` no alcanza: tiene que ser `("salePrice", "id")`.** Un índice de una sola
+  columna no puede satisfacer `ORDER BY "salePrice", id` — obligaría a un sort incremental, que es
+  exactamente lo que el índice venía a evitar. Los dos índices son además **parciales** sobre
+  `visible = true AND "deletedAt" IS NULL`, el predicado que llevan textualmente todas las consultas
+  públicas; el único listado que no lo lleva (`adminGetProducts`) no tiene `WHERE` alguno, así que
+  ningún índice le sirve de todos modos.
+- **`availableSizes` sí se acota por `q` y por precio** (el diseño ni lo mencionaba, pese a que
+  viaja en la misma respuesta). Es el mismo callejón sin salida que motivó excluir `talla`, en el
+  otro eje: con una búsqueda activa, el selector ofrecía tallas que al elegirse daban cero
+  resultados. Se acota por `categoria`/`q`/precio y **sigue sin acotarse por `talla`** — si se
+  acotara por la talla ya elegida, elegir una vaciaría el propio selector. El `WHERE` de esa
+  consulta es una **copia a mano** del `where` compartido (es SQL crudo): un filtro nuevo hay que
+  agregarlo en los dos lados, y hay comentarios en ambos que lo advierten.
+- **`pg_trgm` diferido, pero no por el motivo que uno esperaría.** El índice GIN en sí *sí* se puede
+  declarar en `Model.init()` (Sequelize soporta `using` y `operator` por campo); lo que no se puede
+  es el `CREATE EXTENSION`, y `sync({ force: true })` nunca lo ejecutaría — la BD de pruebas y el
+  contenedor de Postgres de CI armarían un esquema donde la creación del índice revienta, y
+  arreglarlo pide superusuario. Con el tope de 500 filas por archivo de importación, un `ILIKE
+  '%x%'` sobre unos miles de filas no se nota. **Revisar** cuando el catálogo pase de ~20k filas o
+  la latencia del catálogo se degrade.
+- **Bug preexistente que salió al pasar por aquí:** `?talla=` (vacío) daba `Number("") === 0`, que
+  `Number.isInteger` acepta, así que filtraba por `size = 0` y devolvía el **catálogo vacío**. Se
+  arregló con el mismo guard que necesitaban los params nuevos (recortar, exigir no vacío y `> 0`),
+  con su test de regresión.
+- El `where` pasó de mutarse campo por campo a **un solo literal con spreads condicionales**:
+  `[Op.or]` es una clave `symbol` y asignarla por mutación sobre un `WhereOptions` obliga a un cast.
+  Sigue siendo el mismo objeto para `count` y `findAll`, que es el invariante que importa.
+- Tests: `tests/unit/utils/escapeLike.test.ts` (7 casos, nivel 1) y 18 casos nuevos en
+  `tests/integration/products.test.ts` (nivel 2 — HTTP contra Postgres real), incluidos los tres que
+  blindan lo caro: `%` y `_` como texto literal, `?q=\` que no revienta, y `availableSizes` acotado
+  por `q`/precio pero no por `talla`.
+
+**Queda pendiente (no lo abre esta fase):** `perPage` sigue sin tope superior, y ahora un
+`?orden=precio_asc&perPage=999999` fuerza un escaneo ordenado del catálogo completo en una ruta
+pública sin auth. Se junta con el pendiente heredado de "evaluar rate limiting en el catálogo
+público" del final de este documento.
+
+**Cómo verificar:** `curl 'localhost:4000/api/products?q=100%25'` no debe devolver el catálogo
+completo (el escapado funcionando de punta a punta); `?orden=precio_asc&precioMin=500&precioMax=1500`
+ordena y acota; `?q=charro&talla=25` devuelve un `availableSizes` sin tallas que no existan dentro de
+la búsqueda.
 
 ---
 
@@ -733,7 +796,7 @@ activo — hay que revisarlos **cerca del 1 de octubre**:
 
 **Bloque N — features de negocio**
 
-- [ ] **N.1** — Búsqueda (`q`), orden y rango de precio en el catálogo
+- [x] **N.1** — Búsqueda (`q`), orden y rango de precio en el catálogo
 - [ ] **N.2** — Cupones (modelo + validación + canje atómico + congelado en la orden)
 - [ ] **N.3** — Gastos reales sustituyendo `GASTOS_FIJOS`
 - [ ] **N.4** — Aviso de venta nueva al dueño

@@ -18,6 +18,8 @@ let emailCounter = 0;
 
 interface ProductOverrides {
   name?: string;
+  /** SKU. Nullable en el modelo, así que por defecto no se manda. */
+  code?: string;
   type?: "bota" | "sombrero" | "ropa";
   originalPrice?: number;
   salePrice?: number;

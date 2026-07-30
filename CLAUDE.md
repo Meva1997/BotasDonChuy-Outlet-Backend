@@ -109,14 +109,59 @@ Express `Router` and delegates to handlers in the matching `*.controller.ts`. Pr
 only expose rows with `visible: true` and exclude the `unitCost` field via Sequelize
 `attributes: { exclude: [...] }`. `GET /api/products` filters (`categoria` → `type`; `talla` →
 a `WHERE id IN (SELECT "productId" FROM product_sizes WHERE size = N AND stock > 0)` subquery,
-since "has this size in stock" isn't a plain column) and paginates (`page`/`perPage`, page clamped
+since "has this size in stock" isn't a plain column; plus `q`/`precioMin`/`precioMax` from Fase N.1,
+below), sorts (`orden`) and paginates (`page`/`perPage`, page clamped
 to `[1, totalPages]`) **in SQL**: `total` comes from a separate `Product.count({ where })`, and the
-page itself from `Product.findAll({ where, limit, offset, order: [["id","ASC"]] })` — Postgres only
+page itself from `Product.findAll({ where, limit, offset, order })` — Postgres only
 ever returns the rows for the requested page, not the full matching set (`talla` is validated with
-`Number.isInteger` before being interpolated into the subquery — it's never a raw client string).
-`availableSizes` (all sizes with stock > 0 for the `categoria`, independent of the `talla` already
-chosen) is a separate raw `sequelize.query` aggregate over `product_sizes` joined to `products`,
-since it needs to scan the whole category rather than just one page.
+`Number.isInteger` **and `> 0` on a trimmed non-empty string** before being interpolated into the
+subquery — it's never a raw client string; the emptiness check matters because `Number("") === 0`
+passes `Number.isInteger`, so `?talla=` used to filter by `size = 0` and return an **empty
+catalog**). The `where` is built as a **single object literal** with conditional spreads rather
+than mutated field by field, because `[Op.or]` is a `symbol` key that a `WhereOptions` won't accept
+by assignment without a cast; what matters is that `count` and `findAll` get **the same object**, or
+`total`/`totalPages` would contradict the page returned.
+
+**Catalog search, sort and price range** (Fase N.1, `roadmap-operacion-y-negocio.md`): `q` searches
+`name` and `code` with `Op.iLike` (`code` is nullable — a `NULL` simply doesn't match inside the
+`OR`), and the value **must** go through **`escapeLike` (`src/utils/escapeLike.ts`)**: Sequelize
+parameterizes the value but does **not** escape LIKE's `%`/`_`, so `?q=100%` would match the entire
+catalog. This repo already paid that bug once — in `productImport.service.ts` a row named
+`"Bota%Premium"` matched `"Bota Roja Premium"` and **renamed it**; there it was dodged with
+`lower(name) = lower(?)`, but a substring search can't dodge it. `escapeLike` also escapes `\`
+itself (LIKE's default escape char in Postgres, so no explicit `ESCAPE` clause is needed) — without
+that, `?q=\` would leave a dangling escape and Postgres's `22025` would surface as a **500**.
+`Op.iLike` is an operator, not a raw literal, so `Product.count` supports it fine — it doesn't
+repeat the limitation that forces `talla` to be interpolated by hand. `orden` accepts
+`precio_asc`/`precio_desc`/`novedad` (`id DESC`), defaulting to `id ASC`; the two price orders carry
+an **`id` tiebreaker in the same direction as the price**, both because prices tie constantly
+(round numbers, bulk-imported batches) and Postgres guarantees no stable order without it — page 2
+would repeat and drop rows — and so the `("salePrice", "id")` index serves `precio_desc` as a plain
+backward scan. `precioMin`/`precioMax` are validated with **`Number.isFinite` and `>= 0`, not
+`Number.isInteger`** (`salePrice` is `DECIMAL(10,2)`, so `precioMax=1499.99` is legitimate).
+**Every invalid param is silently ignored, never a `400`** — the precedent `talla` set in this same
+handler; a `precioMin` above `precioMax` is **not** swapped (zero results is the honest answer to
+what was asked). Two **partial** indexes back this (`src/migrations/20260729120000-products-catalog-indexes.ts`,
+mirrored in `Product.init()`'s `indexes` as the rule requires): `products_type_visible` on `type`
+and `products_sale_price_visible` on **`("salePrice", "id")`** — composite because a single-column
+index can't satisfy `ORDER BY "salePrice", id` without an incremental sort, which is the whole
+reason it exists. Both are partial on `visible = true AND "deletedAt" IS NULL`, the predicate every
+public query carries verbatim (the one listing that doesn't, `adminGetProducts`, has no `WHERE` at
+all, so no index helps it). A `pg_trgm` GIN index on `name` was **deliberately deferred**: the
+blocker isn't the index (Sequelize does support `using`/`operator` in `Model.init`) but
+`CREATE EXTENSION`, which `sync({ force: true })` never runs — the test DB and CI's Postgres
+container would build a schema where the GIN index fails. Revisit when the catalog is large enough
+for the seq-scan `ILIKE` to actually show up in latency.
+
+`availableSizes` (all sizes with stock > 0 matching `categoria`, `q` and the price range, but
+**independent of the `talla` already chosen**) is a separate raw `sequelize.query` aggregate over
+`product_sizes` joined to `products`, since it needs to scan the whole filtered set rather than just
+one page. The two halves of that rule are each guarding a different dead-end: excluding `talla`
+means picking a size never empties the size selector itself; including `q`/price means the selector
+never offers a size that would return zero products under the active search. Its predicates are a
+**hand-maintained copy** of the shared `where` (it's raw SQL, not the same object) — a new filter
+has to be added on **both** sides. Every value goes through `replacements`, never interpolation:
+unlike `talla` (an already-validated integer), `q` is an arbitrary client string.
 The admin CRUD lives in `src/routes/adminProduct.routes.ts` (mounted at `/api/admin/products`,
 `router.use(requireAuth)` so every route needs a JWT) and reuses `product.controller.ts`
 (`adminGetProducts`/`adminCreateProduct`/`adminUpdateProduct`/`adminDeleteProduct`). Unlike the

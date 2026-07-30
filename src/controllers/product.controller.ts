@@ -1,5 +1,5 @@
 import type { Request, RequestHandler, Response } from "express";
-import { Op, QueryTypes, type WhereOptions } from "sequelize";
+import { Op, QueryTypes, type Order, type WhereOptions } from "sequelize";
 import { Product, type ProductAttributes, type ProductImage } from "../models/Product";
 import { ProductSize } from "../models/ProductSize";
 import { productSizesInclude } from "../utils/productSizesInclude";
@@ -13,6 +13,7 @@ import {
 } from "../schemas/product";
 import { sequelize } from "../config/database";
 import { parseId } from "../utils/parseId";
+import { escapeLike } from "../utils/escapeLike";
 import { formatMoney } from "../utils/formatMoney";
 import { CLOUDINARY_PRODUCTS_FOLDER } from "../config/cloudinary";
 import { uploadImageBuffer, destroyImage } from "../services/image.service";
@@ -21,6 +22,43 @@ import { parseImportWorkbook, previewImport, commitImport } from "../services/pr
 import { productImportCommitSchema } from "../schemas/productImport";
 
 const MAX_IMAGES_PER_PRODUCT = 3;
+
+/** Largo máximo de `?q=`. Nadie busca frases más largas y acota el patrón que llega a Postgres. */
+const MAX_SEARCH_LENGTH = 100;
+
+/**
+ * Órdenes admitidas por `?orden=` en el catálogo público.
+ *
+ * `precio_asc`/`precio_desc` llevan `id` como desempate: sin él, dos productos al mismo precio
+ * pueden salir en distinto orden entre una página y la siguiente (Postgres no garantiza un orden
+ * estable) y el cliente vería uno repetido y otro perdido al paginar.
+ */
+const ORDENES = {
+  precio_asc: [
+    ["salePrice", "ASC"],
+    ["id", "ASC"],
+  ],
+  // El desempate va en la MISMA dirección que el precio a propósito: así el índice parcial
+  // ("salePrice", "id") resuelve también este orden con un recorrido hacia atrás, sin sort.
+  precio_desc: [
+    ["salePrice", "DESC"],
+    ["id", "DESC"],
+  ],
+  novedad: [["id", "DESC"]],
+} as const satisfies Record<string, ReadonlyArray<readonly [string, string]>>;
+
+const ORDEN_DEFAULT = [["id", "ASC"]] as const;
+
+/**
+ * Lee un precio de la query string. Devuelve `undefined` si no es un número finito y no negativo,
+ * para que un valor basura se ignore en vez de romper la consulta — misma regla permisiva que
+ * `talla` con `Number.isInteger`.
+ */
+function parsePrecio(raw: unknown): number | undefined {
+  if (typeof raw !== "string" || raw.trim() === "") return undefined;
+  const precio = Number(raw);
+  return Number.isFinite(precio) && precio >= 0 ? precio : undefined;
+}
 
 /**
  * Serializa un producto para las rutas PÚBLICAS: quita el `publicId` de cada
@@ -40,31 +78,77 @@ export const getProducts: RequestHandler = asyncHandler(async (req: Request, res
   // Talla inválida (no numérica/entera) se ignora en vez de colarse cruda a un
   // literal SQL: antes un valor basura solo dejaba `filtrados` vacío en memoria,
   // ahora rompería la subquery si no se descarta aquí.
-  const tallaRaw = req.query.talla !== undefined ? Number(req.query.talla) : undefined;
-  const talla = tallaRaw !== undefined && Number.isInteger(tallaRaw) ? tallaRaw : undefined;
+  // El `.trim()` y el `> 0` no son cosméticos: `?talla=` (vacío) daba `Number("") === 0`, que
+  // `Number.isInteger` acepta, así que filtraba por `size = 0` y devolvía el catálogo VACÍO.
+  const tallaRaw = typeof req.query.talla === "string" ? req.query.talla.trim() : "";
+  const tallaNum = tallaRaw !== "" ? Number(tallaRaw) : NaN;
+  const talla = Number.isInteger(tallaNum) && tallaNum > 0 ? tallaNum : undefined;
   const page = Math.max(1, Math.floor(Number(req.query.page)) || 1);
   const perPage = Math.max(1, Math.floor(Number(req.query.perPage)) || 9);
 
-  const where: WhereOptions<ProductAttributes> = { visible: true, deletedAt: { [Op.is]: null } };
-  if (categoria) where.type = categoria;
+  // Búsqueda por texto. Un `q` en blanco o de puros espacios no es un filtro, es un input vacío:
+  // se ignora en vez de buscar la cadena "" (que emparejaría con todo).
+  const qRaw =
+    typeof req.query.q === "string" ? req.query.q.trim().slice(0, MAX_SEARCH_LENGTH) : "";
+  // `escapeLike` es obligatorio aquí: Sequelize parametriza el valor pero no escapa `%`/`_`,
+  // así que sin él `?q=100%` devolvería el catálogo completo (ver src/utils/escapeLike.ts).
+  const patron = qRaw.length > 0 ? `%${escapeLike(qRaw)}%` : undefined;
 
-  // "¿Tiene talla X con stock?" no es una columna de Product, así que se resuelve
-  // como subquery contra product_sizes en vez de traer todo el catálogo a Node
-  // para filtrar con `sizes.includes(talla)` (ver CLAUDE.md — paginación en SQL).
-  // `talla` ya se validó como entero arriba, así que interpolarla directo en el
-  // literal es seguro (Product.count no soporta `replacements`, a diferencia de
-  // findAll/sequelize.query).
-  if (talla !== undefined) {
-    where.id = {
-      [Op.in]: sequelize.literal(
-        `(SELECT "productId" FROM product_sizes WHERE size = ${talla} AND stock > 0)`,
-      ),
-    };
-  }
+  // Rango de precio sobre salePrice. Si min > max no se corrige ni se intercambian: la consulta
+  // devuelve vacío, que es la respuesta honesta a lo que el cliente pidió.
+  const precioMin = parsePrecio(req.query.precioMin);
+  const precioMax = parsePrecio(req.query.precioMax);
+  const precioRange =
+    precioMin !== undefined || precioMax !== undefined
+      ? {
+          ...(precioMin !== undefined ? { [Op.gte]: precioMin } : {}),
+          ...(precioMax !== undefined ? { [Op.lte]: precioMax } : {}),
+        }
+      : undefined;
 
-  // availableSizes refleja las tallas disponibles para la categoría completa
-  // (no la talla ya elegida) para que el selector siga mostrando el resto de
-  // opciones — igual que antes, se calcula aparte del filtro por talla.
+  // Un `orden` no reconocido cae al orden por defecto en vez de dar 400, igual que una talla
+  // inválida: son filtros de un listado público, no datos que el cliente esté escribiendo.
+  const ordenKey = req.query.orden as keyof typeof ORDENES | undefined;
+  const orden = ordenKey && ordenKey in ORDENES ? ORDENES[ordenKey] : ORDEN_DEFAULT;
+
+  // El `where` se arma como un solo literal (en vez de mutarlo campo por campo) porque `Op.or`
+  // es una clave `symbol` y asignarla por mutación sobre un `WhereOptions` obliga a un cast.
+  // Lo que importa es que sea EL MISMO objeto para `count` y `findAll`, o `total`/`totalPages`
+  // mentirían respecto de la página devuelta.
+  const where: WhereOptions<ProductAttributes> = {
+    visible: true,
+    deletedAt: { [Op.is]: null },
+    ...(categoria ? { type: categoria } : {}),
+    // "¿Tiene talla X con stock?" no es una columna de Product, así que se resuelve
+    // como subquery contra product_sizes en vez de traer todo el catálogo a Node
+    // para filtrar con `sizes.includes(talla)` (ver CLAUDE.md — paginación en SQL).
+    // `talla` ya se validó como entero arriba, así que interpolarla directo en el
+    // literal es seguro (Product.count no soporta `replacements`, a diferencia de
+    // findAll/sequelize.query).
+    ...(talla !== undefined
+      ? {
+          id: {
+            [Op.in]: sequelize.literal(
+              `(SELECT "productId" FROM product_sizes WHERE size = ${talla} AND stock > 0)`,
+            ),
+          },
+        }
+      : {}),
+    // `Op.iLike` es un operador, no un literal crudo, así que `Product.count` lo soporta igual
+    // que `findAll` — no repite la limitación que obliga a interpolar `talla` a mano.
+    // `code` es nullable: en esas filas `code ILIKE ...` da NULL, y `NULL OR true` sigue siendo
+    // true, así que el OR se comporta bien sin un COALESCE.
+    ...(patron
+      ? { [Op.or]: [{ name: { [Op.iLike]: patron } }, { code: { [Op.iLike]: patron } }] }
+      : {}),
+    ...(precioRange ? { salePrice: precioRange } : {}),
+  };
+
+  // availableSizes alimenta el selector de tallas, así que se acota por los MISMOS filtros que
+  // la lista (categoría, búsqueda y precio) pero NO por la `talla` ya elegida: si se acotara por
+  // ella, elegir una talla vaciaría el propio selector y no habría forma de cambiarla. Al
+  // acotarlo por `q`/precio se evita el callejón contrario: ofrecer una talla que no existe
+  // dentro de la búsqueda actual y devolver cero resultados al elegirla.
   const availableSizesRows = await sequelize.query<{ size: number }>(
     `SELECT DISTINCT ps.size AS size
      FROM product_sizes ps
@@ -73,10 +157,20 @@ export const getProducts: RequestHandler = asyncHandler(async (req: Request, res
        AND p.visible = true
        AND p."deletedAt" IS NULL
        ${categoria ? `AND p.type = :categoria` : ""}
+       ${patron ? `AND (p.name ILIKE :patron OR p.code ILIKE :patron)` : ""}
+       ${precioMin !== undefined ? `AND p."salePrice" >= :precioMin` : ""}
+       ${precioMax !== undefined ? `AND p."salePrice" <= :precioMax` : ""}
      ORDER BY ps.size ASC`,
     {
       type: QueryTypes.SELECT,
-      replacements: categoria ? { categoria } : undefined,
+      // Todo por `replacements`, nunca interpolado: a diferencia de `talla` (un entero ya
+      // validado), `q` es una cadena arbitraria que manda el cliente.
+      replacements: {
+        ...(categoria ? { categoria } : {}),
+        ...(patron ? { patron } : {}),
+        ...(precioMin !== undefined ? { precioMin } : {}),
+        ...(precioMax !== undefined ? { precioMax } : {}),
+      },
     },
   );
   const availableSizes = availableSizesRows.map((r) => r.size);
@@ -90,7 +184,7 @@ export const getProducts: RequestHandler = asyncHandler(async (req: Request, res
     where,
     attributes: { exclude: ["unitCost"] },
     include: [productSizesInclude],
-    order: [["id", "ASC"]],
+    order: orden as unknown as Order,
     limit: perPage,
     offset,
   });
