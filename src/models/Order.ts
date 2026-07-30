@@ -67,6 +67,19 @@ export interface OrderAttributes {
   // el par `id + email` (ids secuenciales + correo adivinable = enumerable). Se genera en
   // `createOrder`; nullable solo por las filas anteriores a la columna (la migración las rellenó).
   publicToken: string | null;
+  // Cupón de descuento (Fase N.2). `couponId` apunta al cupón canjeado (FK con `RESTRICT`, así
+  // que un cupón con historia no se puede borrar y dejar la orden huérfana); `couponCode` es el
+  // texto **CONGELADO** al momento de la compra, igual que los precios del `OrderItem`: un cupón
+  // editado o desactivado después no altera el histórico. Los dos son `null` cuando no se usó
+  // cupón.
+  couponId: number | null;
+  couponCode: string | null;
+  // Descuento en pesos que aplicó el cupón. Columna APARTE de `savings` a propósito (regla
+  // explícita del roadmap): `savings` significa "ahorro outlet" (`originalPrice` vs `salePrice`)
+  // y sumar el cupón ahí falsearía el margen del dashboard. No es nullable —default `0`— para que
+  // todo consumidor que hace aritmética se ahorre el `?? 0` y una fila anterior al deploy lea 0.
+  // Invariante nuevo de toda la app: `total = subtotal − savings − couponDiscount + shipping`.
+  couponDiscount: number;
 }
 
 interface OrderCreationAttributes extends Optional<
@@ -88,6 +101,9 @@ interface OrderCreationAttributes extends Optional<
   | "refundId"
   | "refundedAt"
   | "publicToken"
+  | "couponId"
+  | "couponCode"
+  | "couponDiscount"
 > {}
 
 export class Order
@@ -124,6 +140,9 @@ export class Order
   declare refundId: string | null;
   declare refundedAt: Date | null;
   declare publicToken: string | null;
+  declare couponId: number | null;
+  declare couponCode: string | null;
+  declare couponDiscount: number;
   declare readonly createdAt: Date;
   declare readonly updatedAt: Date;
   declare items?: OrderItem[];
@@ -288,6 +307,25 @@ Order.init(
       type: DataTypes.UUID,
       allowNull: true,
       defaultValue: null,
+    },
+    couponId: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      defaultValue: null,
+    },
+    couponCode: {
+      type: DataTypes.STRING(32),
+      allowNull: true,
+      defaultValue: null,
+    },
+    couponDiscount: {
+      type: DataTypes.DECIMAL(10, 2),
+      allowNull: false,
+      defaultValue: 0,
+      get() {
+        const value = this.getDataValue("couponDiscount");
+        return value === null ? null : parseFloat(value as unknown as string);
+      },
     },
   },
   {

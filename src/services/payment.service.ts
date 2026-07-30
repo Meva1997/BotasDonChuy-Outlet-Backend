@@ -859,6 +859,10 @@ async function sendOrderEmail(
         subtotal: order.subtotal,
         savings: order.savings,
         shipping: order.shipping,
+        // Los dos correos (confirmación y "va en camino") comparten este helper, así que el
+        // cupón se ve en el que el comprador conserve, que es impredecible.
+        couponCode: order.couponCode,
+        couponDiscount: order.couponDiscount,
         total: order.total,
         shippingAddress: {
           street: order.street,

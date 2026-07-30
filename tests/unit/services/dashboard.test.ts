@@ -35,6 +35,8 @@ function buildOrder(overrides: {
   createdAt?: Date;
   total?: number;
   savings?: number;
+  couponCode?: string | null;
+  couponDiscount?: number;
   items?: OrderItem[];
 } = {}): Order {
   const total = overrides.total ?? 1000;
@@ -44,6 +46,8 @@ function buildOrder(overrides: {
     subtotal: total,
     savings: overrides.savings ?? 0,
     shipping: 0,
+    couponCode: overrides.couponCode ?? null,
+    couponDiscount: overrides.couponDiscount ?? 0,
     total,
     customerName: "Cliente de prueba",
     customerEmail: "cliente@test.com",
@@ -191,5 +195,72 @@ describe("dashboard.service — getDashboardData (Parte 10)", () => {
     expect(data.inventory).toEqual([
       expect.objectContaining({ id: 1, stock: 5, unitCost: 40, valorInventario: 200 }),
     ]);
+  });
+
+  // ── Cupones (Fase N.2) ──────────────────────────────────────────────────────
+  it("recentSales expone el cupón para que la fila cuadre", async () => {
+    // Sin estos dos campos la fila es irreconciliable en el panel: `savings` es solo el ahorro
+    // outlet y `total` ya viene neto de cupón, así que el faltante no tiene causa visible.
+    jest.useFakeTimers().setSystemTime(new Date("2026-07-20T12:00:00Z"));
+    const order = buildOrder({
+      id: 7,
+      createdAt: new Date("2026-07-20T10:00:00Z"),
+      total: 880,
+      savings: 200,
+      couponCode: "VERANO25",
+      couponDiscount: 120,
+      items: [buildOrderItem({ quantity: 1 })],
+    });
+    mockQueries([order], [order], []);
+
+    const data = await getDashboardData();
+
+    expect(data.recentSales[0]).toEqual(
+      expect.objectContaining({ couponCode: "VERANO25", couponDiscount: 120 }),
+    );
+  });
+
+  it("suma los descuentos por cupón en su propio KPI, sin tocar los ingresos", async () => {
+    jest.useFakeTimers().setSystemTime(new Date("2026-07-20T12:00:00Z"));
+    const orders = [
+      buildOrder({
+        id: 1,
+        createdAt: new Date("2026-07-20T10:00:00Z"),
+        total: 880,
+        couponDiscount: 120,
+        items: [buildOrderItem({ quantity: 1 })],
+      }),
+      buildOrder({
+        id: 2,
+        createdAt: new Date("2026-07-19T10:00:00Z"),
+        total: 950,
+        couponDiscount: 50,
+        items: [buildOrderItem({ quantity: 1 })],
+      }),
+    ];
+    mockQueries(orders, [], []);
+
+    const data = await getDashboardData();
+
+    const cupones = data.profitKpisByPeriod["7"].find(
+      (k) => k.label === "DESCUENTOS POR CUPÓN",
+    )!;
+    expect(cupones.value).toBe(formatMoney(170));
+    // `INGRESOS` sigue sumando el efectivo cobrado (los totales ya netos), no el bruto.
+    const ingresos = data.kpisByPeriod["7"].find((k) => k.label === "INGRESOS")!;
+    expect(ingresos.value).toBe(formatMoney(1830));
+  });
+
+  it("sin cupones el KPI queda en cero, no ausente", async () => {
+    jest.useFakeTimers().setSystemTime(new Date("2026-07-20T12:00:00Z"));
+    mockQueries([], [], []);
+
+    const data = await getDashboardData();
+
+    const cupones = data.profitKpisByPeriod["30"].find(
+      (k) => k.label === "DESCUENTOS POR CUPÓN",
+    );
+    expect(cupones).toBeDefined();
+    expect(cupones!.value).toBe(formatMoney(0));
   });
 });

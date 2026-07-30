@@ -26,6 +26,8 @@ import "../../src/models/AdminUser";
 import "../../src/models/Order";
 import "../../src/models/OrderItem";
 import "../../src/models/BrandSettings";
+import "../../src/models/Coupon";
+import "../../src/models/CouponRedemption";
 import "../../src/models/associations";
 
 /** Recrea el esquema completo. Llamar en `beforeAll` de cada suite de integración. */

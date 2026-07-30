@@ -38,7 +38,7 @@ orden se queda en `paid` para siempre, sin correo de "va en camino" y sin forma 
 | Consulta de pedido por el cliente | ✅ **Fase O.4** (`GET /api/orders/lookup/:token`) | — (falta la página de seguimiento en el front: Fase 17 del roadmap del frontend) |
 | Readiness real en `/health` | ✅ **Fase O.5** (`GET /health/ready`) | — (falta apuntar el probe del orquestador a la ruta nueva al desplegar) |
 | Búsqueda/orden en el catálogo | ✅ **Fase N.1** (`q`, `orden`, `precioMin`/`precioMax`) | — (falta cablear buscador y selector de orden en el front: Fase 18 del roadmap del frontend) |
-| Cupones / códigos de descuento | ❌ ausente | Sin la palanca de marketing más barata que existe |
+| Cupones / códigos de descuento | ✅ **Fase N.2** (`POST /api/coupons/validate` + CRUD admin + canje atómico) | — (falta el campo en el checkout y la sección del panel: Fase 19 del roadmap del frontend) |
 | Gastos reales (vs. `GASTOS_FIJOS` hardcodeado) | ❌ constante de `$2,000` | El KPI de utilidad del dashboard es ficción |
 | Aviso al dueño de venta nueva | ❌ solo hay alertas de falla | Se entera de un pedido pagado hasta que abre el panel |
 | Bitácora de auditoría admin | ❌ ausente | `owner` y `admin` tienen permisos idénticos y no queda rastro de quién borró o canceló qué |
@@ -627,7 +627,7 @@ la búsqueda.
 
 ---
 
-### Fase N.2 — Cupones y códigos de descuento
+### Fase N.2 — Cupones y códigos de descuento ✅
 
 **Objetivo:** poder lanzar una promoción sin repreciar producto por producto.
 
@@ -650,17 +650,142 @@ limpio en la arquitectura actual: el backend ya es la autoridad de precios.
   Columna aparte y decisión explícita de cómo lo reporta `dashboard.service.ts`.
 
 **Tareas:**
-- [ ] Modelo `Coupon` (`code` único, `type: percent|fixed`, `value`, `minSubtotal?`,
+- [x] Modelo `Coupon` (`code` único, `type: percent|fixed`, `value`, `minSubtotal?`,
   `maxRedemptions?`, `redeemedCount`, `startsAt?`, `expiresAt?`, `active`) + migración + asociación.
-- [ ] Columnas `couponCode`/`couponDiscount` en `Order` (misma migración o una gemela).
-- [ ] `POST /api/coupons/validate` `[público, rate-limited]` para que el checkout muestre el
+- [x] Columnas `couponCode`/`couponDiscount` en `Order` (misma migración o una gemela).
+- [x] `POST /api/coupons/validate` `[público, rate-limited]` para que el checkout muestre el
   descuento antes de pagar (validación, **sin** canjear).
-- [ ] CRUD admin `/api/admin/coupons` `[auth]`.
-- [ ] Aplicación real en `computeTotals` + canje atómico en `createOrder`.
-- [ ] Reflejarlo en `orderConfirmationTemplate` y decidir su tratamiento en dashboard/reportes.
-- [ ] Tests: cupón expirado/agotado/mínimo no alcanzado; canje concurrente del último uso → uno solo
+- [x] CRUD admin `/api/admin/coupons` `[auth]`.
+- [x] Aplicación real en `computeTotals` + canje atómico en `createOrder`.
+- [x] Reflejarlo en `orderConfirmationTemplate` y decidir su tratamiento en dashboard/reportes.
+- [x] Tests: cupón expirado/agotado/mínimo no alcanzado; canje concurrente del último uso → uno solo
   gana; el descuento se recalcula server-side aunque el cliente mande otro monto.
-- [ ] Fase 🔴 en el roadmap del frontend.
+- [x] Fase 🔴 en el roadmap del frontend (Fase 19).
+
+**Cómo quedó (decisiones que el diseño de arriba no fijaba):**
+
+- **"Un solo uso" eran dos cosas distintas, y hacen falta las dos.** El diseño solo tenía
+  `maxRedemptions` (tope global): con eso, **una sola persona podía quemar los 50 usos** de una
+  promoción, que es justo el abuso que había que evitar. Se agregó `oncePerCustomer` (default `true`)
+  como límite **por persona**, y el tope global quedó como lo que realmente es: la barrera **dura**,
+  la que acota la pérdida máxima a `usos × descuento` sin importar quién canjee. El límite por
+  persona es un tope de velocidad, no una garantía.
+- **La identidad de "una persona" es el correo del pedido, NO la IP** (la pregunta explícita del
+  dueño). Con CGNAT —cualquier plan móvil, Izzi, Totalplay— media colonia sale por una sola
+  dirección, así que un canje bloquearía vecinos que nunca usaron el cupón. Y peor: `req.ip` depende
+  de `TRUST_PROXY`, así que desplegado detrás de un proxy sin esa env **todos** los compradores se
+  ven con la IP del proxy y el primer canje mataría el cupón para la tienda entera. Encima se evade
+  apagando el WiFi. El correo se normaliza en `src/utils/emailIdentity.ts` (minúsculas, `+tag`
+  recortado en todos los dominios, puntos quitados solo en Gmail/Googlemail) y **sobre-fusiona a
+  propósito**: alguien con `juan+trabajo@` como buzón realmente distinto queda bloqueado, y por eso
+  el mensaje de error nombra el correo. La IP **sí** se guarda en `coupon_redemptions.ip`, pero solo
+  como dato forense para que el dueño detecte patrones: ninguna decisión la consulta.
+- **La liberación del canje no estaba en el diseño y sin ella la promoción se muere sola.** El
+  diseño solo pedía incrementar el contador dentro de la transacción del checkout. Pero un pedido
+  nace `pending` y puede no pagarse nunca: sin devolver el uso, un cupón de 50 canjes se agota con
+  carritos abandonados y el dueño ve morir la promoción sin una sola venta. El uso es una reserva
+  igual que el stock, así que `releaseCouponForOrder` se llama **en el mismo punto y dentro de la
+  misma transacción** que la reposición — en `releaseOrderStock` (con eso queda cubierto el webhook
+  `payment_intent.canceled` y `pendingOrderSweeper`) y en la rama `paid` de `cancelOrderByAdmin`,
+  después de su guard para que dos cancelaciones concurrentes no decrementen dos veces. Un
+  **reembolso fallido no libera** (el dinero no volvió), misma regla que el restock.
+- **El `catch` obvio del índice único habría dado un 500, no el 409.** El plan era atrapar el
+  `UniqueConstraintError` del índice parcial y traducirlo. Mecánicamente cierto, pero un error
+  `23505` deja la transacción de Postgres **abortada** y Sequelize no envuelve un `Model.create` en
+  savepoint, así que la parte importante —releer la fila que bloquea para armar un mensaje decente,
+  como sí puede hacer el camino de stock— habría fallado con *"current transaction is aborted"*. Se
+  usa un `INSERT ... ON CONFLICT ... DO NOTHING` crudo: Postgres sigue decidiendo la carrera, no se
+  levanta excepción, la transacción sigue viva y el conteo de filas es la señal (misma forma que el
+  `affected === 0` del stock, y ya había precedente con el upsert de `productImport.service.ts`).
+- **`coupon_redemptions.enforced`**: el índice parcial no puede consultar el flag `oncePerCustomer`
+  del cupón, así que apagarlo en un cupón vivo no relajaría nada — las filas ya escritas seguirían
+  bloqueando esos correos para siempre. La columna mete el flag *del momento del canje* en el
+  predicado del índice. Se escribe fila para **todo** canje (es la bitácora, y la liberación se apoya
+  en su existencia para saber de qué cupón decrementar).
+- **El 409 de "ya usaste este cupón" lleva dos mensajes.** Si el pedido que bloquea sigue `pending`,
+  el texto invita a terminar de pagarlo. Es una composición de decisiones previas que había que
+  resolverle al comprador: cuando Stripe falla *después* del commit, la Fase O.2 conserva la clave de
+  idempotencia y el pedido queda `pending` con el cupón apartado hasta que el barrido lo alcance
+  (30 min) — decirle "ya lo usaste" por un pedido que nunca pagó sería falso.
+- **`computeTotals` no se tocó**, contra lo que decía el diseño ("el descuento se aplica en
+  `computeTotals`"). Su test unitario afirma con `toEqual` sobre exactamente cuatro claves, y lo que
+  hacía falta compartir entre el checkout y `/validate` no eran "totales" sino "cuántos pesos quita
+  este cupón": `computeCouponDiscount(coupon, netMerchandise)`, en el mismo archivo.
+- **La base del descuento es la mercancía NETA (`subtotal − savings`), no `subtotal`.** En este repo
+  `subtotal` está a precio *original*, así que calcular sobre él regalaría porcentaje sobre un precio
+  que nadie paga, y un `minSubtotal` de $1000 se cumpliría con un carrito que realmente vale $600.
+- **`maxDiscount`** (tope en pesos, solo para `percent`), que el diseño no listaba: sin él un 50%
+  sobre un carrito grande se lleva una cifra que el dueño no anticipó. Y **clamp a `[0, neto]`**, o un
+  `fixed` mayor que el carrito dejaría un total negativo.
+- **Todo el cálculo va en centavos enteros con un solo redondeo.** La columna es `DECIMAL(10,2)`: sin
+  eso, Postgres redondearía al guardar (medio hacia afuera del cero) mientras `/validate` —que no pasa
+  por la BD— mostraría el de JS (medio hacia arriba), y el preview diferiría del cobro en un centavo
+  justo en los porcentajes que caen a la mitad.
+- **Guard de mínimo cobrable, dentro de la transacción.** Un total que Stripe rechace fallaría
+  *después* del commit y —por `releaseKeyOnFailure` de la Fase O.2— con la clave conservada: un pedido
+  `pending` que aparta stock y quema el cupón 30 min sin poder reintentar. `MIN_CHARGE_MXN` vive en
+  `coupon.service.ts` y **no** en `config/stripe.ts`: dos suites reemplazan ese módulo con un objeto
+  literal de exports fijos, así que un import nuevo resolvería a `undefined`, `total < undefined` sería
+  `false`, y el guard quedaría **muerto en todas las suites que mockean Stripe** con los tests en
+  verde. En la práctica casi no se dispara (el descuento está acotado a la mercancía y la tarifa plana
+  mínima son $100), así que su lógica se prueba a nivel unitario.
+- **`checkoutFingerprint` tuvo que incluir `couponCode`.** Sin eso, el mismo carrito con y sin cupón
+  daba la misma huella y al comprador que acaba de aplicar un descuento se le devolvía el pedido
+  anterior **sin descontarlo**. La IP **no** entra (no es parte de la identidad del pedido: un
+  reintento desde otra red se leería como pedido nuevo).
+- **El canje va después del loop de stock, no antes.** Es la posición anti-deadlock: así todo checkout
+  toma candados en el mismo orden global (`product_sizes` → `coupons` → `orders` →
+  `coupon_redemptions`). Reclamar antes también sería acíclico, pero mantendría un candado sobre la
+  fila caliente del cupón durante N idas y vueltas a la BD, serializando a todos los compradores de
+  una promoción popular.
+- **`/validate` distingue la causa del rechazo** (no existe / venció / se agotó / falta para el
+  mínimo), invirtiendo a propósito la regla anti-enumeración del resto del repo: un cupón existe para
+  que un humano lo teclee y un "no es válido" opaco lo volvería inusable. La consecuencia queda dicha
+  en voz alta: **los códigos no son secretos**, así que un cupón para una sola persona tiene que ser
+  largo y aleatorio, nunca `VIP`. El `email` es **opcional** porque el campo vive en el paso 0 del
+  checkout, antes de los datos de envío: sin él no se verifica el uso por persona, y la respuesta lo
+  declara con `perCustomerChecked: false` para que el front no trate el visto bueno como garantía.
+- **Reglas de edición:** `code` no se puede editar (ya pudo repartirse, y el valor congelado en los
+  pedidos dejaría de empatar) y `redeemedCount` no entra en ningún schema (estado derivado). **Bajar
+  `maxRedemptions` por debajo de `redeemedCount` sí se permite y no se valida**: es el edit que hace
+  un dueño para frenar una promoción en caliente. `updateCoupon` re-valida las reglas cruzadas contra
+  el estado **combinado** (lo guardado + lo que cambia), porque los refines del schema solo ven el
+  body y un `PUT` con solo `maxDiscount` sobre un cupón `fixed` los pasaría.
+- **Fechas en la zona de la tienda.** Un `"2026-08-01"` como ISO es medianoche **UTC** = 31 de julio a
+  las 18:00 en México: el dueño perdería la última tarde de su promoción. Una fecha sin hora se
+  interpreta en `America/Mexico_City` (inicio de día para `startsAt`, `23:59:59.999` para
+  `expiresAt`), con offset fijo `-06:00` porque México no tiene DST desde 2022.
+- **Tratamiento en el dashboard (la decisión explícita que el diseño pedía):** `savings` **no se
+  toca** y `agg.revenue += order.total` **se queda** (ahora suma el efectivo realmente cobrado, que es
+  lo correcto). Pero sin nada más, una campaña se leería como una *caída* de ingresos contra el
+  periodo anterior aunque el volumen creciera, así que hay un KPI nuevo **`DESCUENTOS POR CUPÓN`** en
+  `profitKpis`. Y `SaleRow` **tuvo** que sumar `couponCode`/`couponDiscount`: sin ellos la fila del
+  panel es irreconciliable (`subtotal − savings + envío ≠ total` sin causa visible).
+  `reports.service.ts` no cambia ni una línea (acota `attributes` en `Order` y usa el `salePrice`
+  actual, así que es estructuralmente ciego al cupón); solo se documentó que su `totalRevenue` ya era
+  ≥ caja real y el cupón ensancha esa brecha.
+- **Riesgo residual asumido:** `coupon_redemptions.orderId` va con `onDelete: "CASCADE"`, así que un
+  `DELETE FROM orders` a mano se lleva la fila de canje sin pasar por la liberación y deja
+  `redeemedCount` inflado. Ningún camino del código borra pedidos (cancelar solo cambia `status`), así
+  que se prefirió permitir la limpieza manual y hacer la divergencia **visible**: el listado admin
+  devuelve `activeRedemptions` (conteo vivo) junto al contador guardado.
+- Tests: 6 suites nuevas y +64 casos — `tests/integration/coupons.test.ts` (26, nivel 2: la
+  aserción de que `/validate` **no** mueve `redeemedCount`, las dos carreras, y que el mismo carrito
+  con y sin cupón son dos pedidos), `adminCoupons.test.ts` (16, nivel 2),
+  `couponRelease.test.ts` (10, nivel 3 — incluye que tras liberar el **mismo correo** puede volver a
+  usar el cupón, que es el predicado del índice parcial de punta a punta),
+  `unit/services/couponDiscount.test.ts` (12), `unit/services/chargeableTotal.test.ts` (6) y
+  `unit/utils/emailIdentity.test.ts` (8), más casos nuevos en
+  `orderConfirmationTemplate.test.ts` (la fila del cupón **antes** de la de Envío),
+  `dashboard.test.ts` y `errorHandler.test.ts` (el caso de regresión que documenta *por qué* el
+  conflicto del índice no debe llegar al handler genérico). Total del repo: **37 suites / 412 tests**.
+
+**Cómo verificar:** crear un cupón con `POST /api/admin/coupons`; llamar
+`POST /api/coupons/validate` varias veces y confirmar en la BD que `redeemedCount` sigue en `0`;
+completar un checkout con el cupón → el `201` y el correo muestran el descuento, el **envío no baja**,
+y `coupon_redemptions` tiene una fila con el correo normalizado; reintentar con el mismo correo →
+`409`; cancelar el pedido desde el panel → `releasedAt` poblado, `redeemedCount` de vuelta en `0` y el
+mismo correo puede volver a comprar.
 
 ---
 
@@ -776,9 +901,9 @@ activo — hay que revisarlos **cerca del 1 de octubre**:
 - **O.1 + O.2 + O.3 son las de mayor relación impacto/esfuerzo.** Ninguna necesita dependencias
   nuevas y solo O.4 requiere migración. Entre las tres tapan los tres estados en que el dueño se
   queda atorado.
-- **El bloque N no está ordenado por valor**, sino agrupado. Si hay que elegir una sola, **N.2
-  (cupones)** es la que más mueve ventas; **N.3 (gastos)** es la que más corrige lo que el dueño ya
-  está viendo mal hoy.
+- **El bloque N no está ordenado por valor**, sino agrupado. De las que quedan, **N.3 (gastos)** es la
+  que más corrige lo que el dueño ya está viendo mal hoy — `profitKpisByPeriod` sigue restando una
+  constante inventada. (N.1 y N.2, las dos que más movían ventas, ya están cerradas.)
 - **N.6 (CFDI) puede volverse urgente por razones ajenas al código.** Si el negocio lo necesita,
   brinca la fila entera.
 
@@ -797,7 +922,7 @@ activo — hay que revisarlos **cerca del 1 de octubre**:
 **Bloque N — features de negocio**
 
 - [x] **N.1** — Búsqueda (`q`), orden y rango de precio en el catálogo
-- [ ] **N.2** — Cupones (modelo + validación + canje atómico + congelado en la orden)
+- [x] **N.2** — Cupones (modelo + validación + canje atómico + congelado en la orden)
 - [ ] **N.3** — Gastos reales sustituyendo `GASTOS_FIJOS`
 - [ ] **N.4** — Aviso de venta nueva al dueño
 - [ ] **N.5** — Bitácora de auditoría admin

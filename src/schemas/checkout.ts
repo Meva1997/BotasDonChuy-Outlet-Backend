@@ -85,6 +85,26 @@ export const orderItemSchema = z.object({
     .max(99, "Máximo 99 unidades por artículo"),
 });
 
+/** Charset del código de cupón. Alfanumérico y en mayúsculas para que sea dictable por teléfono
+ *  y no dependa de cómo lo teclee el comprador. */
+export const COUPON_CODE_PATTERN = /^[A-Z0-9]{3,32}$/;
+
+/**
+ * Código de cupón normalizado (Fase N.2): se recorta y se sube a MAYÚSCULAS **antes** de
+ * validar. Compartido por el checkout y por `POST /api/coupons/validate`, y esa normalización
+ * temprana es la que hace que `verano25` y `VERANO25` sean el mismo cupón para el índice único
+ * de `coupons.code` **y** para la huella de idempotencia del checkout (si difirieran, un doble
+ * clic con distinta capitalización serían dos pedidos y dos intentos de canje).
+ */
+export const couponCodeSchema = z
+  .string("El cupón debe ser texto")
+  .trim()
+  .toUpperCase()
+  .regex(
+    COUPON_CODE_PATTERN,
+    "El cupón solo lleva letras y números (entre 3 y 32 caracteres). Revisa que esté bien escrito.",
+  );
+
 export const createOrderSchema = z
   .object({
     items: z
@@ -93,6 +113,14 @@ export const createOrderSchema = z
       .max(50, "Demasiados artículos en el pedido"),
     customer: shippingSchema,
     shippingCarrier: z.string().trim().optional(),
+    // Cupón de descuento (Fase N.2). Un solo código por compra: es un `string`, no un arreglo.
+    // El cliente manda el CÓDIGO y jamás un monto — misma regla que rige precios y envío.
+    //
+    // Un cupón inválido, vencido, agotado o ya usado responde 400/409 y **nunca se ignora en
+    // silencio**. Es lo opuesto a la regla del catálogo (donde un filtro inválido se descarta):
+    // ahí ignorarlo devuelve más productos, aquí le cobraría al comprador un precio distinto al
+    // que aceptó en pantalla.
+    couponCode: couponCodeSchema.optional(),
     // Cotización de envío en vivo (Fase 8.4). Opcionales: el checkout puede haber
     // caído al fallback de tarifa plana (Skydropx no disponible → sin cotización),
     // en cuyo caso NO se envían y el servidor cobra `computeShipping`. Cuando sí

@@ -25,6 +25,13 @@ interface OrderConfirmationInput {
   subtotal: number;
   savings: number;
   shipping: number;
+  /**
+   * Cupón canjeado (Fase N.2), congelado en el pedido. Van juntos y solo se renderizan cuando el
+   * descuento es mayor a 0 — igual que "Ahorraste". Sin esta fila, el correo mostraría un total
+   * que no cuadra con `subtotal − savings + envío` y el comprador no sabría de dónde salió.
+   */
+  couponCode?: string | null;
+  couponDiscount?: number;
   total: number;
   shippingAddress: OrderConfirmationAddress;
   shippingCarrier?: string | null;
@@ -183,6 +190,17 @@ export function orderConfirmationTemplate(input: OrderConfirmationInput): string
     : `Tu pago fue confirmado. Aquí está el resumen de tu pedido <strong>#${orderId}</strong> del ${formatOrderDate(createdAt)}.`;
   const savingsRow =
     savings > 0 ? totalsRow("Ahorraste", `− ${formatMoney(savings)}`, { accent: true }) : "";
+  // El código pasa por `escapeHtml` aunque su charset ya prohíba `<` y `&`: la regla del repo es
+  // que toda cadena no numérica interpolada pase por aquí, y así una relajación futura de ese
+  // charset no reabre el hueco.
+  const couponRow =
+    input.couponDiscount && input.couponDiscount > 0
+      ? totalsRow(
+          input.couponCode ? `Cupón ${escapeHtml(input.couponCode)}` : "Cupón",
+          `− ${formatMoney(input.couponDiscount)}`,
+          { accent: true },
+        )
+      : "";
 
   return `<!DOCTYPE html>
 <html lang="es">
@@ -215,6 +233,9 @@ export function orderConfirmationTemplate(input: OrderConfirmationInput): string
                 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
                   ${totalsRow("Subtotal", formatMoney(subtotal))}
                   ${savingsRow}
+                  <!-- El cupón va ANTES del envío a propósito: es la prueba visual de que el
+                       descuento se aplicó a la mercancía y no a la paquetería. -->
+                  ${couponRow}
                   ${totalsRow("Envío", formatMoney(shipping))}
                   ${totalsRow("Total", formatMoney(total), { strong: true, accent: true })}
                 </table>

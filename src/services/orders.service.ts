@@ -8,6 +8,12 @@ import { OrderItem } from "../models/OrderItem";
 import { AppError } from "../middlewares/AppError";
 import { computeTotals, type CartLineItem } from "./cart";
 import { assertProductAvailable } from "./productAvailability";
+import {
+  resolveCoupon,
+  claimCoupon,
+  releaseCouponForOrder,
+  assertChargeableTotal,
+} from "./coupon.service";
 import { getQuotationRate, toSkydropxAddress, SkydropxRequestError } from "./skydropx.service";
 import { sendAlertEmail } from "./alert.service";
 // El avance manual de estado (Fase O.1) reusa el rango y el correo del camino automático:
@@ -28,6 +34,17 @@ const RATE_UNAVAILABLE_MESSAGE =
   "La tarifa de envío que elegiste ya no está disponible (las cotizaciones expiran a las 24 h). Vuelve a calcular el envío para continuar.";
 
 /**
+ * Datos del checkout que **no vienen del body**. Hoy solo la IP, y por eso viaja como parámetro
+ * aparte en vez de dentro de `CreateOrderInput`: si estuviera en el schema, el cliente podría
+ * mandar la que quisiera y la bitácora de canjes registraría lo que él dijera.
+ */
+export interface CheckoutContext {
+  /** IP del comprador (`req.ip`). Se guarda en la fila de canje del cupón **solo como dato
+   *  forense** — ninguna decisión la consulta, ver `utils/emailIdentity.ts`. */
+  clientIp?: string | null;
+}
+
+/**
  * Convierte un carrito de cliente en una orden persistida.
  *
  * Garantías clave:
@@ -46,7 +63,10 @@ const RATE_UNAVAILABLE_MESSAGE =
  * La orden nace en `status: "pending"` / `paymentStatus: "unpaid"`. El cobro
  * real (Stripe) y la liberación de reservas vencidas llegan en Fase 8.
  */
-export async function createOrder(input: CreateOrderInput): Promise<Order> {
+export async function createOrder(
+  input: CreateOrderInput,
+  context: CheckoutContext = {},
+): Promise<Order> {
   // 0. Envío autoritativo (Fase 8.4). Si el checkout cotizó en vivo, re-consultamos
   //    la cotización en Skydropx y tomamos el `total` de ESE rate como costo de envío
   //    — jamás confiamos en un monto que mande el cliente (misma regla que
@@ -183,12 +203,34 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
     //    en consecuencia; si no, se usan los de `computeTotals` tal cual.
     const totals = computeTotals(cartItems);
     const shipping = shippingOverride ? shippingOverride.total : totals.shipping;
-    const total = totals.subtotal - totals.savings + shipping;
+
+    // 4.b Cupón de descuento (Fase N.2). Se resuelve DESPUÉS de `computeTotals` porque el
+    //     mínimo de compra y el porcentaje necesitan la mercancía neta autoritativa, que solo
+    //     existe una vez leídos los productos aquí dentro. El cliente manda el código y nunca
+    //     un monto; un cupón inválido revienta la transacción entera (sin pedido y sin stock
+    //     descontado) en vez de ignorarse en silencio.
+    const { customer } = input;
+    const netMerchandise = totals.subtotal - totals.savings;
+    const resolvedCoupon = input.couponCode
+      ? await resolveCoupon({
+          code: input.couponCode,
+          netMerchandise,
+          email: customer.email,
+          transaction: t,
+        })
+      : null;
+    const couponDiscount = resolvedCoupon?.discount ?? 0;
+    const total = netMerchandise - couponDiscount + shipping;
+
+    // 4.c El total tiene que ser cobrable ANTES de persistir: si Stripe lo rechazara, eso
+    //     pasaría después del commit y (por la Fase O.2) con la clave de idempotencia
+    //     conservada, dejando al comprador con un pedido que aparta stock y quema su cupón
+    //     30 min sin poder reintentar.
+    assertChargeableTotal(total, couponDiscount);
 
     // 5. Crear la orden (mapeo del cliente a las columnas de la tabla). El
     //    `shippingCarrier` viene del rate elegido cuando hubo cotización en vivo; si
     //    no, del que haya mandado el cliente (o queda vacío).
-    const { customer } = input;
     const created = await Order.create(
       {
         status: "pending",
@@ -217,9 +259,33 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
         // orden, para que exista desde el primer instante: el correo de confirmación lo manda
         // como link y la respuesta del checkout lo devuelve al comprador.
         publicToken: randomUUID(),
+        // Cupón CONGELADO (Fase N.2), igual que los precios del OrderItem: un cupón editado,
+        // agotado o desactivado después no altera este pedido.
+        couponId: resolvedCoupon?.coupon.id ?? undefined,
+        couponCode: resolvedCoupon?.coupon.code ?? undefined,
+        couponDiscount,
       },
       { transaction: t },
     );
+
+    // 5.b Canje del cupón. Va aquí, y no antes del loop de stock, por dos razones:
+    //     necesita el `orderId` (la fila de canje lo lleva `NOT NULL`), y así todo checkout
+    //     toma candados en el MISMO orden global — `product_sizes` (en el orden determinista
+    //     del paso 2) → `coupons` → `orders` → `coupon_redemptions` — con lo que dos
+    //     transacciones no pueden tomar los mismos dos recursos en orden opuesto. Reclamar
+    //     antes del loop también sería acíclico, pero mantendría un candado sobre la fila
+    //     caliente del cupón durante N idas y vueltas a la BD, serializando a todos los
+    //     compradores de una promoción popular.
+    if (resolvedCoupon) {
+      await claimCoupon({
+        resolved: resolvedCoupon,
+        orderId: created.id,
+        email: customer.email,
+        // Solo bitácora: ninguna decisión consulta la IP (ver `utils/emailIdentity.ts`).
+        ip: context.clientIp ?? null,
+        transaction: t,
+      });
+    }
 
     // 6. Congelar precios en cada OrderItem.
     await OrderItem.bulkCreate(
@@ -232,11 +298,13 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
 
   // 7. Recargar con sus items para la respuesta. Se excluyen campos internos que
   //    la fila conserva para el panel admin pero que NUNCA se serializan al
-  //    cliente en esta ruta pública: `unitCost` (costo/margen) en cada item, y
+  //    cliente en esta ruta pública: `unitCost` (costo/margen) en cada item,
   //    `shippingRequiresDropoff` (info operativa de recolección — solo le sirve
-  //    al dueño para saber si debe llevar el paquete a la sucursal).
+  //    al dueño para saber si debe llevar el paquete a la sucursal) y `couponId`
+  //    (id interno; el comprador ya tiene el código, que sí va en la respuesta
+  //    junto a `couponDiscount` porque es el descuento que se le aplicó).
   const full = await Order.findByPk(order.id, {
-    attributes: { exclude: ["shippingRequiresDropoff"] },
+    attributes: { exclude: ["shippingRequiresDropoff", "couponId"] },
     include: [
       { model: OrderItem, as: "items", attributes: { exclude: ["unitCost"] } },
     ],
@@ -299,6 +367,15 @@ const recentCheckouts = new IdempotencyStore<{
  *
  * `quotationId`/`rateId` SÍ entran: si el cliente volvió a cotizar entre un clic y el
  * otro, el envío que va a pagar es distinto y no es el mismo pedido.
+ *
+ * `couponCode` también, y ahí no es una precaución: sin él, el mismo carrito con y sin cupón
+ * daría la misma huella, y al comprador que acaba de aplicar un descuento se le devolvería el
+ * pedido anterior **sin descontarlo**. El código ya viene normalizado por `couponCodeSchema`
+ * (recortado y en mayúsculas), así que `verano25` y `VERANO25` son una sola huella y un doble
+ * clic con distinta capitalización no se convierte en dos pedidos.
+ *
+ * La IP **no** entra: no es parte de la identidad del pedido, y meterla haría que un reintento
+ * desde otra red (WiFi → datos) se leyera como un pedido nuevo.
  */
 function checkoutFingerprint(input: CreateOrderInput): string {
   const quantities = new Map<string, number>();
@@ -324,6 +401,7 @@ function checkoutFingerprint(input: CreateOrderInput): string {
     shippingCarrier: input.shippingCarrier ?? null,
     quotationId: input.quotationId ?? null,
     rateId: input.rateId ?? null,
+    couponCode: input.couponCode ?? null,
   });
 }
 
@@ -362,6 +440,7 @@ function checkoutFingerprint(input: CreateOrderInput): string {
 export async function placeOrder(
   input: CreateOrderInput,
   idempotencyKey?: string,
+  context: CheckoutContext = {},
 ): Promise<PlaceOrderResult> {
   const bodyHash = checkoutFingerprint(input);
   const key = idempotencyKey ? `key:${fingerprintOf(idempotencyKey)}` : `body:${bodyHash}`;
@@ -381,7 +460,7 @@ export async function placeOrder(
   // El `get` y el `set` van sin `await` de por medio a propósito: Node no interrumpe entre
   // ellos, así que dos requests concurrentes no pueden reclamar la clave los dos.
   const attempt: CheckoutAttempt = { persisted: false };
-  const result = executeCheckout(input, attempt);
+  const result = executeCheckout(input, attempt, context);
   recentCheckouts.set(key, { bodyHash, result });
   // El `.catch` es solo para decidir si se libera la clave; la promesa original es la que
   // se espera abajo, así que el error sí llega al llamador (y no queda ningún rechazo sin
@@ -415,8 +494,9 @@ function releaseKeyOnFailure(
 async function executeCheckout(
   input: CreateOrderInput,
   attempt: CheckoutAttempt,
+  context: CheckoutContext,
 ): Promise<PlacedOrder> {
-  const order = await createOrder(input);
+  const order = await createOrder(input, context);
   // Desde aquí el intento ya dejó huella en la BD (fila `Order` + stock descontado): lo que
   // falle de ahora en adelante NO puede tratarse como "no pasó nada, reintenta".
   attempt.persisted = true;
@@ -457,7 +537,10 @@ export function resetCheckoutIdempotency(): void {
  *
  * También fuera `customerEmail`/`customerPhone`: no aportan nada a una página de rastreo y el link
  * se comparte por WhatsApp con facilidad. La dirección sí va — es lo que el comprador necesita
- * verificar (y corregir con el dueño a tiempo si se equivocó).
+ * verificar (y corregir con el dueño a tiempo si se equivocó). Y `couponId` tampoco va (id
+ * interno), pero `couponCode`/`couponDiscount` **sí**: sin ellos, esta página mostraría un total
+ * que no cuadra con `subtotal − savings + shipping` y el faltante no tendría explicación visible,
+ * que es exactamente la llamada de soporte que la fase vino a evitar.
  */
 export interface PublicOrderView {
   id: number;
@@ -467,6 +550,9 @@ export interface PublicOrderView {
   subtotal: number;
   savings: number;
   shipping: number;
+  /** Invariante: `total = subtotal − savings − couponDiscount + shipping`. */
+  couponCode: string | null;
+  couponDiscount: number;
   total: number;
   customerName: string;
   shippingAddress: {
@@ -526,7 +612,7 @@ export async function getOrderByPublicToken(token: string): Promise<PublicOrderV
     where: { publicToken: token },
     attributes: [
       "id", "status", "paymentStatus", "createdAt",
-      "subtotal", "savings", "shipping", "total",
+      "subtotal", "savings", "shipping", "total", "couponCode", "couponDiscount",
       "customerName", "street", "neighborhood", "city", "state", "postalCode", "references",
       "shippingCarrier", "trackingNumber", "trackingUrl", "shipmentStatus", "refundedAt",
     ],
@@ -553,6 +639,8 @@ export async function getOrderByPublicToken(token: string): Promise<PublicOrderV
     subtotal: order.subtotal,
     savings: order.savings,
     shipping: order.shipping,
+    couponCode: order.couponCode,
+    couponDiscount: order.couponDiscount,
     total: order.total,
     customerName: order.customerName,
     shippingAddress: {
@@ -622,6 +710,13 @@ export async function releaseOrderStock(
         },
       );
     }
+
+    // El uso del cupón es una reserva igual que el stock, así que se devuelve en el mismo
+    // punto y dentro de la misma transacción (Fase N.2). Sin esto, un cupón de 50 usos se
+    // agota con carritos abandonados que nunca se pagaron y la promoción muere sin una venta.
+    // Cubre a los dos llamadores de esta función: el webhook `payment_intent.canceled` y
+    // `pendingOrderSweeper`.
+    await releaseCouponForOrder(orderId, t);
 
     await order.update(
       { status: finalStatus, paymentStatus: "failed" },
@@ -731,6 +826,12 @@ export async function cancelOrderByAdmin(
           { where: { productId: item.productId, size: item.size }, transaction: t },
         );
       }
+
+      // Se devuelve el uso del cupón junto con el stock (Fase N.2). Va DESPUÉS del guard de
+      // `status !== "paid"` de arriba, así que dos cancelaciones concurrentes no pueden
+      // decrementar el contador dos veces. La rama `pending` no necesita nada: delega en
+      // `releaseOrderStock`, que ya lo hace.
+      await releaseCouponForOrder(orderId, t);
 
       await locked.update(
         {

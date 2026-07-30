@@ -89,6 +89,9 @@ TRUST_PROXY=1                            # saltos de proxy en los que confiar (1
 
 # Healthcheck (Fase O.5) — opcional
 HEALTH_READY_TIMEOUT_MS=3000             # margen del chequeo de BD en /health/ready (default 3000)
+
+# Cupones (Fase N.2) — opcional
+MIN_CHARGE_MXN=10                        # total mínimo que acepta el checkout (default 10, el mínimo de Stripe en MXN)
 ```
 
 > **`TRUST_PROXY` cuando la API va detrás de un proxy** (Render, Railway, Fly, nginx,
@@ -173,6 +176,11 @@ pnpm migrate:status   # verifica qué quedó aplicado
 | `POST`   | `/api/orders`                 | —    | Checkout: crea un pedido desde el carrito          |
 | `GET`    | `/api/orders/lookup/:token`   | —    | Consulta pública del estado y rastreo de un pedido (token opaco del correo) |
 | `POST`   | `/api/shipping/rates`         | —    | Cotiza tarifas de envío en vivo (Skydropx) para el carrito, con fallback a tarifa plana |
+| `POST`   | `/api/coupons/validate`       | —    | Valida un cupón para el carrito y devuelve el descuento, **sin canjearlo** |
+| `GET`    | `/api/admin/coupons`          | ✅   | Lista los cupones (con usos consumidos y conteo vivo de canjes) |
+| `POST`   | `/api/admin/coupons`          | ✅   | Crea un cupón de descuento |
+| `PUT`    | `/api/admin/coupons/:id`      | ✅   | Edita un cupón (`active: false` lo cancela; `code` y usos no se editan) |
+| `DELETE` | `/api/admin/coupons/:id`      | ✅   | Borra un cupón (lo desactiva si ya lo usó algún pedido) |
 | `GET`    | `/api/admin/dashboard`        | ✅   | Métricas agregadas del panel (KPIs, ingresos, ventas recientes, inventario) |
 | `GET`    | `/api/admin/orders`           | ✅   | Lista paginada de pedidos con sus items (incl. `unitCost`) |
 | `POST`   | `/api/admin/orders/:id/cancel` | ✅  | Cancela manualmente un pedido `pending`/`paid` (reembolso real vía Stripe si ya estaba pagado) |
@@ -339,11 +347,20 @@ datos actuales, a propósito: no se deduplica en silencio.
 ### `POST /api/orders` (checkout público)
 
 Convierte el carrito del cliente en un pedido persistido. Body:
-`{ items: [{ productId, size, quantity }], customer, shippingCarrier?, quotationId?, rateId? }`,
-validado con `createOrderSchema` (zod). El backend es la **autoridad de precios, stock y envío**:
+`{ items: [{ productId, size, quantity }], customer, shippingCarrier?, quotationId?, rateId?,
+couponCode? }`, validado con `createOrderSchema` (zod). El backend es la **autoridad de precios,
+stock, envío y descuentos**:
 
-- **Recalcula los totales** (`subtotal`, `savings`, `shipping`, `total`) en el servidor con el
-  service `cart` — el cliente nunca envía montos.
+- **Recalcula los totales** (`subtotal`, `savings`, `shipping`, `couponDiscount`, `total`) en el
+  servidor con el service `cart` — el cliente nunca envía montos.
+- **Cupón (Fase N.2):** `couponCode` es opcional, uno solo por compra, y es un **código, nunca un
+  monto**. El servidor lo revalida y **canjea el uso dentro de la misma transacción** que descuenta
+  el stock, así que dos compradores peleando el último uso reciben uno `201` y el otro `409`. El
+  descuento se calcula sobre la mercancía neta (`subtotal − savings`) y **nunca sobre el envío**, y
+  queda congelado en `couponCode`/`couponDiscount` como los precios del `OrderItem`. Un cupón
+  inválido, vencido, agotado o ya usado por ese correo revierte todo (sin pedido y sin stock
+  descontado) y **jamás se ignora en silencio**. Invariante:
+  `total = subtotal − savings − couponDiscount + shipping`. Ver **Cupones de descuento** más abajo.
 - **Envío autoritativo (Fase 8.4):** `quotationId`/`rateId` son opcionales pero van **juntos o
   ninguno** (si el checkout cotizó en vivo contra `POST /api/shipping/rates` los manda; si cayó al
   fallback de tarifa plana, los omite). Cuando vienen, el servidor **re-consulta** esa cotización en
@@ -396,13 +413,56 @@ pagar). Solo aplica a la ruta pública `POST /`, no a `adminOrder.routes.ts` (ya
 La orden nace en `status: "pending"` / `paymentStatus: "unpaid"`, se le crea un **PaymentIntent real
 de Stripe** y se guarda su `paymentIntentId` (`paymentStatus: "processing"`). Respuesta `201`:
 `{ order, clientSecret }` — el `clientSecret` sirve para que el cliente confirme el pago. Errores:
-`400` (body/cliente inválido, o `Idempotency-Key` demasiado larga), `409` (sin stock o producto no
-disponible —con el ítem en el mensaje—, tarifa de envío vencida, o `Idempotency-Key` reusada con
-otro carrito).
+`400` (body/cliente inválido, código de cupón mal formado, o `Idempotency-Key` demasiado larga),
+`404` (el cupón no existe), `409` (sin stock o producto no disponible —con el ítem en el mensaje—,
+tarifa de envío vencida, `Idempotency-Key` reusada con otro carrito, o el cupón no aplica).
 
 Todos los errores responden `{ message }` (los de validación agregan `details`). El `message` es la
 copia que el front pinta tal cual, así que es una frase accionable en español: nombra el producto y,
 cuando aplica, cuántas piezas quedan. Ver **Errores y mensajes** más abajo.
+
+### Cupones de descuento (Fase N.2)
+
+La única palanca de descuento que no toca el catálogo. `POST /api/coupons/validate` `[público]` deja
+que el checkout muestre el descuento **antes** de pagar y el CRUD de `/api/admin/coupons` `[auth]` lo
+administra: `code` (alfanumérico en mayúsculas, único), `type: percent|fixed`, `value`, `maxDiscount?`
+(tope en pesos, solo para porcentajes), `minSubtotal?`, `maxRedemptions?` (`null` = ilimitado),
+`oncePerCustomer` (default `true`), `startsAt?`/`expiresAt?`, `active` y `description?`. Pueden haber
+varios activos a la vez, pero **uno solo por compra**.
+
+**Cómo se limita a un uso por persona sin cuentas de cliente: por el CORREO del pedido, no por la
+IP.** La IP es la opción intuitiva y la peor: detrás de CGNAT (cualquier plan móvil, Izzi,
+Totalplay) media colonia sale por una sola dirección, así que un canje bloquearía compradores que
+nunca usaron el cupón; y `req.ip` depende de `TRUST_PROXY`, así que desplegado detrás de un proxy sin
+esa variable **todos** los compradores se ven con la IP del proxy y el primer canje mataría el cupón
+para la tienda entera. El correo se normaliza (minúsculas, `+alias` recortado, puntos de Gmail
+quitados) y lo hace cumplir un **índice único parcial** de Postgres, no un `SELECT` + `if`. La IP se
+guarda en la fila de canje **solo como dato forense**, para que el dueño detecte patrones a mano.
+
+**La barrera dura contra el abuso es `maxRedemptions`**, no el límite por persona: acota la pérdida
+máxima a `usos × descuento` sin importar quién canjee. Se descuenta con un `UPDATE` condicional
+dentro de la transacción del checkout, igual que el stock.
+
+**El uso se devuelve** cuando un pedido se abandona o se cancela (el barrido de pedidos pendientes y
+`POST /api/admin/orders/:id/cancel`). Sin eso, un cupón de 50 usos se agotaría con carritos que nunca
+se pagaron. Un reembolso fallido **no** libera el uso, igual que no repone stock.
+
+`POST /api/coupons/validate` **no canjea nada** (consultarlo diez veces no gasta la promoción) y usa
+la misma función de descuento que el checkout, así que el monto que muestra es el que se cobra. Lo
+que **no** garantiza es disponibilidad: el tope global y el uso por persona se re-deciden al pagar,
+así que el front tiene que estar listo para el `409`. Su `email` es opcional (en el checkout el cupón
+se captura antes de los datos de envío) y la respuesta lo declara con `perCustomerChecked`. Está
+limitado por `couponRateLimiter` (`20` req/min por IP), y aquí el límite **sí** es la defensa
+principal: los códigos de cupón no son secretos ni UUIDs, así que un cupón dirigido a una sola
+persona debe ser **largo y aleatorio**, nunca `VIP`.
+
+En el panel, `active: false` es la forma de **cancelar** un cupón; `code` y los usos consumidos no se
+pueden editar (si el código está mal, se desactiva y se crea otro), y bajar `maxRedemptions` por
+debajo de los usos ya consumidos es válido — es cómo se frena una promoción en caliente. `DELETE`
+desactiva en vez de borrar cuando ya hay pedidos que usaron el cupón, para no romper el histórico.
+`startsAt`/`expiresAt` aceptan una fecha sin hora (`2026-08-31`) y la interpretan en la zona de la
+tienda (`America/Mexico_City`), con el vencimiento al final del día: un `2026-08-31` leído como UTC
+habría matado la promoción la tarde del 30 en México.
 
 ### `GET /api/admin/dashboard` y `GET /api/admin/orders` (panel admin)
 
@@ -797,7 +857,7 @@ Suite automatizada con **Jest + ts-jest + supertest** (Fase H.1 — ver
 [`roadmaps-completados/roadmap-testing.md`](roadmaps-completados/roadmap-testing.md) para el desglose por partes; las **12 partes** — infra,
 BD de test, servicios puros, auth, checkout, idempotencia de webhooks, cancelación/reembolso manual,
 envío en vivo, cliente Skydropx, CRUD admin de productos/imágenes, marca/usuarios admin y
-agregaciones de dashboard/reports — están **completas**: 30 suites / 297 tests en verde, y cada
+agregaciones de dashboard/reports — están **completas**: 37 suites / 412 tests en verde, y cada
 fase nueva suma la suya). Los tests
 viven en `tests/` (fuera de `src/`, para que `tsc` no los incluya en el build de producción);
 `ts-jest` los transpila en memoria.

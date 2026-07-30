@@ -68,6 +68,10 @@ export const createOrder: RequestHandler = asyncHandler(
     const { order, clientSecret, replayed } = await ordersService.placeOrder(
       input,
       idempotencyKey,
+      // La IP se toma del request y NUNCA del body: se guarda en la bitácora de canjes de
+      // cupones (Fase N.2) y, si viniera del cliente, registraría lo que él quisiera. Solo es
+      // dato forense — ninguna decisión la consulta.
+      { clientIp: req.ip ?? null },
     );
 
     // El cuerpo de un reenvío es idéntico al del original a propósito, así que sin este

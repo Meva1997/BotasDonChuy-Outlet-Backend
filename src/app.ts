@@ -23,6 +23,8 @@ import brandRoutes from "./routes/brand.routes";
 import adminUserRoutes from "./routes/adminUser.routes";
 import accountRoutes from "./routes/account.routes";
 import shippingRoutes from "./routes/shipping.routes";
+import couponRoutes from "./routes/coupon.routes";
+import adminCouponRoutes from "./routes/adminCoupon.routes";
 import { errorHandler } from "./middlewares/errorHandler";
 import { trustProxyEnv } from "./utils/env";
 import { checkReadiness, markDraining } from "./services/readiness";
@@ -40,6 +42,8 @@ import "./models/AdminUser";
 import "./models/Order";
 import "./models/OrderItem";
 import "./models/BrandSettings";
+import "./models/Coupon";
+import "./models/CouponRedemption";
 import "./models/associations";
 
 dotenv.config({ quiet: true });
@@ -95,8 +99,10 @@ app.use("/api/admin/reports", adminReportsRoutes);
 app.use("/api/admin/brand", brandRoutes); // GET pública, PUT protegido dentro del router
 app.use("/api/admin/users", adminUserRoutes);
 app.use("/api/admin/account", accountRoutes);
+app.use("/api/admin/coupons", adminCouponRoutes);
 app.use("/api/orders", orderRoutes); // checkout público
 app.use("/api/shipping", shippingRoutes); // cotización en vivo, pública
+app.use("/api/coupons", couponRoutes); // validación del cupón sin canjear, pública
 // (El webhook de Stripe se monta arriba, antes de express.json(), para verificar
 // la firma sobre el cuerpo crudo.)
 

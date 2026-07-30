@@ -12,7 +12,10 @@ import { ProductSize } from "../../src/models/ProductSize";
 import { AdminUser } from "../../src/models/AdminUser";
 import { Order } from "../../src/models/Order";
 import { OrderItem } from "../../src/models/OrderItem";
+import { Coupon } from "../../src/models/Coupon";
+import { CouponRedemption } from "../../src/models/CouponRedemption";
 import { hashPassword } from "../../src/utils/password";
+import { normalizeEmailIdentity } from "../../src/utils/emailIdentity";
 
 let emailCounter = 0;
 
@@ -93,6 +96,9 @@ interface OrderOverrides {
   paymentIntentId?: string | null;
   paymentStatus?: string;
   customerEmail?: string;
+  couponId?: number | null;
+  couponCode?: string | null;
+  couponDiscount?: number;
 }
 
 /** Crea una Order con totales y datos de cliente por defecto (status `pending`). */
@@ -100,12 +106,15 @@ export async function createOrder(overrides: OrderOverrides = {}): Promise<Order
   const subtotal = overrides.subtotal ?? 800;
   const savings = overrides.savings ?? 0;
   const shipping = overrides.shipping ?? 150;
+  const couponDiscount = overrides.couponDiscount ?? 0;
   return Order.create({
     status: overrides.status ?? "pending",
     subtotal,
     savings,
     shipping,
-    total: overrides.total ?? subtotal - savings + shipping,
+    // El descuento del cupón entra en el total por defecto, o cualquier fixture con cupón
+    // quedaría con una aritmética que contradice el invariante que la app mantiene.
+    total: overrides.total ?? subtotal - savings - couponDiscount + shipping,
     customerName: "Cliente de prueba",
     customerEmail: overrides.customerEmail ?? "cliente@test.com",
     customerPhone: "4610000000",
@@ -116,6 +125,63 @@ export async function createOrder(overrides: OrderOverrides = {}): Promise<Order
     postalCode: "38000",
     paymentIntentId: overrides.paymentIntentId ?? null,
     paymentStatus: overrides.paymentStatus ?? "unpaid",
+    couponId: overrides.couponId ?? null,
+    couponCode: overrides.couponCode ?? null,
+    couponDiscount,
+  } as any);
+}
+
+interface CouponOverrides {
+  code?: string;
+  type?: "percent" | "fixed";
+  value?: number;
+  maxDiscount?: number | null;
+  minSubtotal?: number | null;
+  maxRedemptions?: number | null;
+  redeemedCount?: number;
+  oncePerCustomer?: boolean;
+  startsAt?: Date | null;
+  expiresAt?: Date | null;
+  active?: boolean;
+}
+
+let couponCounter = 0;
+
+/** Crea un Coupon (15% sin topes ni ventana por defecto). */
+export async function createCoupon(overrides: CouponOverrides = {}): Promise<Coupon> {
+  return Coupon.create({
+    code: overrides.code ?? `PRUEBA${++couponCounter}`,
+    type: overrides.type ?? "percent",
+    value: overrides.value ?? 15,
+    maxDiscount: overrides.maxDiscount ?? null,
+    minSubtotal: overrides.minSubtotal ?? null,
+    maxRedemptions: overrides.maxRedemptions ?? null,
+    redeemedCount: overrides.redeemedCount ?? 0,
+    oncePerCustomer: overrides.oncePerCustomer ?? true,
+    startsAt: overrides.startsAt ?? null,
+    expiresAt: overrides.expiresAt ?? null,
+    active: overrides.active ?? true,
+  } as any);
+}
+
+/**
+ * Crea una fila de canje ya consumida, para probar el bloqueo por correo o la liberación sin
+ * pasar por un checkout completo. **No** mueve `redeemedCount`: si la prueba lo necesita
+ * consistente, pásalo en `createCoupon({ redeemedCount })`.
+ */
+export async function createCouponRedemption(
+  coupon: Coupon,
+  orderId: number,
+  overrides: { email?: string; enforced?: boolean; discount?: number } = {}
+): Promise<CouponRedemption> {
+  const email = overrides.email ?? "cliente@test.com";
+  return CouponRedemption.create({
+    couponId: coupon.id,
+    orderId,
+    email,
+    emailNormalized: normalizeEmailIdentity(email),
+    enforced: overrides.enforced ?? coupon.oncePerCustomer,
+    discount: overrides.discount ?? 100,
   } as any);
 }
 

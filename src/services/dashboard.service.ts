@@ -26,7 +26,15 @@ export interface SaleRow {
   day: string; // clave ISO en UTC ("2026-07-13") para filtrar por día en el front
   pieces: number;
   items: string;
+  /** Ahorro outlet (`originalPrice` vs `salePrice`). NO incluye el cupón. */
   savings: number;
+  /**
+   * Descuento por cupón (Fase N.2). Sin estos dos campos la fila es irreconciliable: `savings`
+   * es solo el ahorro outlet y `total` ya viene neto de cupón, así que
+   * `subtotal − savings + envío ≠ total` sin ninguna causa visible en el panel.
+   */
+  couponCode: string | null;
+  couponDiscount: number;
   total: number;
   costoTotal: number;
 }
@@ -80,6 +88,8 @@ interface DayAggregate {
   cogs: number;
   pieces: number;
   orders: number;
+  /** Descuento otorgado por cupones ese día (Fase N.2). Ver el KPI del mismo nombre. */
+  couponDiscount: number;
 }
 
 function buildDailyAggregates(orders: Order[]): Map<string, DayAggregate> {
@@ -88,13 +98,17 @@ function buildDailyAggregates(orders: Order[]): Map<string, DayAggregate> {
     const key = isoDay(order.createdAt);
     let agg = byDay.get(key);
     if (!agg) {
-      agg = { revenue: 0, cogs: 0, pieces: 0, orders: 0 };
+      agg = { revenue: 0, cogs: 0, pieces: 0, orders: 0, couponDiscount: 0 };
       byDay.set(key, agg);
     }
+    // `order.total` ya viene NETO de cupón, y así se queda: lo que suma "INGRESOS" es el
+    // efectivo realmente cobrado, que es lo correcto. El costo de la promoción se acumula
+    // aparte para poder explicarlo (ver `buildKpisForWindow`).
     agg.revenue += order.total;
     agg.cogs += orderCost(order);
     agg.pieces += (order.items ?? []).reduce((a, i) => a + i.quantity, 0);
     agg.orders += 1;
+    agg.couponDiscount += order.couponDiscount;
   }
   return byDay;
 }
@@ -125,6 +139,8 @@ function buildKpisForWindow(
   let currentOrderCount = 0;
   let ingresosPrev = 0;
   let cogsPrev = 0;
+  let descuentoCupones = 0;
+  let descuentoCuponesPrev = 0;
   let mejorDia: { date: Date; revenue: number } | null = null;
 
   for (let i = 0; i < windowDays; i += 1) {
@@ -135,6 +151,7 @@ function buildKpisForWindow(
     cogs += agg?.cogs ?? 0;
     piezasVendidas += agg?.pieces ?? 0;
     currentOrderCount += agg?.orders ?? 0;
+    descuentoCupones += agg?.couponDiscount ?? 0;
     if (!mejorDia || revenue > mejorDia.revenue) {
       mejorDia = { date: day, revenue };
     }
@@ -142,6 +159,7 @@ function buildKpisForWindow(
     const prevAgg = dailyAgg.get(isoDay(addDays(previousWindowStart, i)));
     ingresosPrev += prevAgg?.revenue ?? 0;
     cogsPrev += prevAgg?.cogs ?? 0;
+    descuentoCuponesPrev += prevAgg?.couponDiscount ?? 0;
   }
 
   const ticketPromedio = currentOrderCount ? ingresos / currentOrderCount : 0;
@@ -172,6 +190,16 @@ function buildKpisForWindow(
       trend: computeTrend(gananciaBruta, gananciaBrutaPrev),
     },
     { label: "MARGEN BRUTO", value: `${margenBruto}%`, subtitle: "sobre precio de venta outlet" },
+    // Sin este KPI, una campaña de cupones se lee como una CAÍDA de ingresos contra el periodo
+    // anterior (el `total` de cada pedido baja) aunque se hayan vendido más piezas, y el dueño no
+    // tendría nada en pantalla que lo explique. No se suma a "Ahorraste"/`savings`, que significa
+    // otra cosa —el descuento outlet— y mezclarlos falsearía el margen.
+    {
+      label: "DESCUENTOS POR CUPÓN",
+      value: formatMoney(descuentoCupones),
+      subtitle: "no incluido en el ahorro outlet",
+      trend: computeTrend(descuentoCupones, descuentoCuponesPrev),
+    },
     {
       label: "GASTOS FIJOS",
       value: formatMoney(gastosFijosWindow),
@@ -207,6 +235,8 @@ function buildSaleRow(order: Order): SaleRow {
     pieces,
     items: itemsLabel,
     savings: order.savings,
+    couponCode: order.couponCode,
+    couponDiscount: order.couponDiscount,
     total: order.total,
     costoTotal: orderCost(order),
   };

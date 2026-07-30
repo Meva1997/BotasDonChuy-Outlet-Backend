@@ -21,6 +21,8 @@ const options: Options = {
       { name: "Auth", description: "Autenticación de administradores" },
       { name: "Orders", description: "Checkout y pedidos del cliente" },
       { name: "Shipping", description: "Cotización de envío en vivo (Skydropx)" },
+      { name: "Coupons", description: "Validación pública de cupones de descuento" },
+      { name: "Admin - Coupons", description: "CRUD de cupones de descuento (requiere auth)" },
       { name: "Admin - Dashboard", description: "Métricas agregadas del panel (requiere auth)" },
       { name: "Admin - Orders", description: "Listado completo de pedidos con items (requiere auth)" },
       { name: "Admin - Reports", description: "Reportes de ventas y reposición (requiere auth)" },
@@ -479,6 +481,17 @@ const options: Options = {
                 "id del rate elegido dentro de la cotización. Debe ir junto con quotationId, o ninguno.",
               example: "rate_9f8a3c",
             },
+            couponCode: {
+              type: "string",
+              nullable: true,
+              description:
+                "Código del cupón, SIN monto: el servidor calcula el descuento (misma regla que " +
+                "precios y envío). Un solo cupón por compra. Un cupón inválido, vencido, agotado " +
+                "o ya usado responde 400/409 y NUNCA se ignora en silencio — ignorarlo le cobraría " +
+                "al comprador un precio distinto al que aceptó en pantalla. El descuento aplica " +
+                "sobre la mercancía neta (subtotal − savings) y nunca sobre el envío.",
+              example: "VERANO25",
+            },
           },
         },
         ShippingInput: {
@@ -531,7 +544,38 @@ const options: Options = {
             subtotal: { type: "number", format: "float", example: 1899.0 },
             savings: { type: "number", format: "float", example: 400.0 },
             shipping: { type: "number", format: "float", example: 160.0 },
-            total: { type: "number", format: "float", example: 1659.0 },
+            couponId: {
+              type: "integer",
+              nullable: true,
+              description:
+                "id interno del cupón. Se EXCLUYE de la respuesta pública de POST /api/orders (el comprador ya tiene el código).",
+              example: null,
+            },
+            couponCode: {
+              type: "string",
+              nullable: true,
+              description:
+                "Código del cupón CONGELADO al momento de la compra, igual que los precios del " +
+                "OrderItem: un cupón editado, agotado o desactivado después no altera este pedido. " +
+                "null si no se usó cupón.",
+              example: "VERANO25",
+            },
+            couponDiscount: {
+              type: "number",
+              format: "float",
+              default: 0,
+              description:
+                "Descuento por cupón en pesos. Columna APARTE de savings a propósito: savings es " +
+                "el ahorro outlet (originalPrice vs salePrice) y sumarlos falsearía el margen del " +
+                "dashboard. Invariante: total = subtotal − savings − couponDiscount + shipping.",
+              example: 150.0,
+            },
+            total: {
+              type: "number",
+              format: "float",
+              description: "subtotal − savings − couponDiscount + shipping.",
+              example: 1509.0,
+            },
             customerName: { type: "string", example: "Juan Pérez" },
             customerEmail: { type: "string", format: "email" },
             customerPhone: { type: "string", example: "4771234567" },
@@ -645,7 +689,21 @@ const options: Options = {
             subtotal: { type: "number", format: "float", example: 1899.0 },
             savings: { type: "number", format: "float", example: 400.0 },
             shipping: { type: "number", format: "float", example: 160.0 },
-            total: { type: "number", format: "float", example: 1659.0 },
+            couponCode: {
+              type: "string",
+              nullable: true,
+              description:
+                "Código del cupón usado. Va en la proyección pública para que los totales de esta " +
+                "página cuadren: sin él, el comprador vería un total menor sin explicación.",
+              example: "VERANO25",
+            },
+            couponDiscount: {
+              type: "number",
+              format: "float",
+              description: "Invariante: total = subtotal − savings − couponDiscount + shipping.",
+              example: 150.0,
+            },
+            total: { type: "number", format: "float", example: 1509.0 },
             customerName: { type: "string", example: "Juan Pérez" },
             shippingAddress: {
               type: "object",
@@ -760,6 +818,216 @@ const options: Options = {
                 "Paquetería con la que se envió. Sobrescribe la guardada en el pedido (útil cuando se envió por una distinta a la cotizada).",
               example: "Estafeta",
             },
+          },
+        },
+        // Cupones (Fase N.2). El descuento SIEMPRE lo calcula el servidor a partir del código:
+        // el cliente nunca manda un monto, misma regla que rige precios y envío.
+        Coupon: {
+          type: "object",
+          properties: {
+            id: { type: "integer", example: 3 },
+            code: {
+              type: "string",
+              maxLength: 32,
+              description: "Alfanumérico en mayúsculas (3–32 caracteres). No se puede editar.",
+              example: "VERANO25",
+            },
+            type: {
+              type: "string",
+              enum: ["percent", "fixed"],
+              description: "`percent` = porcentaje sobre la mercancía; `fixed` = monto en pesos.",
+              example: "percent",
+            },
+            value: { type: "number", format: "float", example: 15.0 },
+            maxDiscount: {
+              type: "number",
+              format: "float",
+              nullable: true,
+              description:
+                "Tope en pesos del descuento. Solo aplica a cupones de porcentaje: es lo que evita que un 50% sobre un carrito muy grande se lleve una cifra inesperada.",
+              example: 500.0,
+            },
+            minSubtotal: {
+              type: "number",
+              format: "float",
+              nullable: true,
+              description:
+                "Mínimo de mercancía NETA (subtotal − savings, sin envío) para que el cupón aplique.",
+              example: 1000.0,
+            },
+            maxRedemptions: {
+              type: "integer",
+              nullable: true,
+              description:
+                "Tope global de canjes; null = ilimitado. Es la barrera dura: acota la pérdida máxima a usos × descuento sin importar quién canjee.",
+              example: 50,
+            },
+            redeemedCount: {
+              type: "integer",
+              readOnly: true,
+              description:
+                "Usos consumidos. Estado derivado: solo lo mueven el canje atómico del checkout y la liberación cuando un pedido se cancela o se abandona. NO se acepta en POST/PUT.",
+              example: 12,
+            },
+            activeRedemptions: {
+              type: "integer",
+              readOnly: true,
+              description:
+                "Conteo vivo de canjes vigentes (solo en el listado). Normalmente igual a redeemedCount; si difiere hubo una intervención manual en la base de datos.",
+              example: 12,
+            },
+            oncePerCustomer: {
+              type: "boolean",
+              default: true,
+              description:
+                "Un solo uso por cliente, identificado por el CORREO del pedido normalizado (no por IP: detrás de CGNAT una colonia entera comparte dirección, y con un proxy mal configurado todos los compradores se verían iguales). Apagarlo deja de bloquear a partir de ese momento, pero no reabre los canjes ya hechos.",
+              example: true,
+            },
+            startsAt: {
+              type: "string",
+              format: "date-time",
+              nullable: true,
+              description:
+                "Instante ISO. Una fecha sin hora (2026-08-01) se interpreta al inicio de ese día en la zona de la tienda (America/Mexico_City), no en UTC.",
+              example: "2026-08-01T06:00:00.000Z",
+            },
+            expiresAt: {
+              type: "string",
+              format: "date-time",
+              nullable: true,
+              description:
+                "Instante ISO. Una fecha sin hora se interpreta al FINAL de ese día en la zona de la tienda, para que el dueño no pierda la última tarde de su promoción.",
+              example: "2026-08-31T05:59:59.999Z",
+            },
+            active: {
+              type: "boolean",
+              default: true,
+              description: "false es la forma de CANCELAR el cupón, sin perder el histórico.",
+              example: true,
+            },
+            description: {
+              type: "string",
+              nullable: true,
+              maxLength: 200,
+              example: "Promo de agosto en redes",
+            },
+            createdAt: { type: "string", format: "date-time" },
+            updatedAt: { type: "string", format: "date-time" },
+          },
+        },
+        CouponInput: {
+          type: "object",
+          required: ["code", "type", "value"],
+          properties: {
+            code: { type: "string", maxLength: 32, example: "VERANO25" },
+            type: { type: "string", enum: ["percent", "fixed"], example: "percent" },
+            value: {
+              type: "number",
+              format: "float",
+              description: "Mayor a 0; máximo 100 cuando el tipo es `percent`.",
+              example: 15.0,
+            },
+            maxDiscount: {
+              type: "number",
+              format: "float",
+              description: "Solo válido con type `percent`; con `fixed` responde 400.",
+              example: 500.0,
+            },
+            minSubtotal: { type: "number", format: "float", example: 1000.0 },
+            maxRedemptions: { type: "integer", minimum: 1, example: 50 },
+            oncePerCustomer: { type: "boolean", default: true, example: true },
+            startsAt: { type: "string", example: "2026-08-01" },
+            expiresAt: { type: "string", example: "2026-08-31" },
+            active: { type: "boolean", default: true, example: true },
+            description: { type: "string", maxLength: 200, example: "Promo de agosto en redes" },
+          },
+        },
+        CouponUpdateInput: {
+          type: "object",
+          description:
+            "Todos los campos son opcionales: manda solo lo que cambia (al menos uno). " +
+            "`active: false` es cancelar la promoción. `code` y `redeemedCount` NO se aceptan. " +
+            "Editar un cupón con canjes nunca altera pedidos pasados: el código y el descuento " +
+            "quedan congelados en cada orden. Bajar maxRedemptions por debajo de redeemedCount es " +
+            "válido y detiene la promoción de inmediato.",
+          properties: {
+            type: { type: "string", enum: ["percent", "fixed"], example: "percent" },
+            value: { type: "number", format: "float", example: 20.0 },
+            maxDiscount: { type: "number", format: "float", example: 500.0 },
+            minSubtotal: { type: "number", format: "float", example: 1000.0 },
+            maxRedemptions: { type: "integer", minimum: 1, example: 30 },
+            oncePerCustomer: { type: "boolean", example: true },
+            startsAt: { type: "string", example: "2026-08-01" },
+            expiresAt: { type: "string", example: "2026-09-15" },
+            active: { type: "boolean", example: false },
+            description: { type: "string", maxLength: 200, example: "Promo extendida" },
+          },
+        },
+        CouponValidateInput: {
+          type: "object",
+          required: ["code", "items"],
+          properties: {
+            code: { type: "string", maxLength: 32, example: "VERANO25" },
+            items: {
+              type: "array",
+              minItems: 1,
+              maxItems: 50,
+              description:
+                "El carrito, para poder calcular el descuento y comparar el mínimo de compra.",
+              items: {
+                type: "object",
+                required: ["productId", "size", "quantity"],
+                properties: {
+                  productId: { type: "integer", example: 1 },
+                  size: { type: "integer", example: 26 },
+                  quantity: { type: "integer", minimum: 1, maximum: 99, example: 1 },
+                },
+              },
+            },
+            email: {
+              type: "string",
+              format: "email",
+              description:
+                "Opcional porque en el checkout el cupón se captura ANTES del correo. Sin él NO se puede verificar el \"un uso por cliente\" — ver `perCustomerChecked` en la respuesta.",
+              example: "juan@example.com",
+            },
+          },
+        },
+        CouponValidateResponse: {
+          type: "object",
+          properties: {
+            code: { type: "string", example: "VERANO25" },
+            type: { type: "string", enum: ["percent", "fixed"], example: "percent" },
+            value: { type: "number", format: "float", example: 15.0 },
+            description: { type: "string", nullable: true, example: "Promo de agosto en redes" },
+            discount: {
+              type: "number",
+              format: "float",
+              description:
+                "Descuento en pesos sobre la mercancía neta. NUNCA sobre el envío. Es el mismo monto que va a cobrarse: lo calcula la misma función que el checkout.",
+              example: 224.85,
+            },
+            netMerchandise: {
+              type: "number",
+              format: "float",
+              description: "subtotal − savings del carrito enviado, sin envío.",
+              example: 1499.0,
+            },
+            remainingRedemptions: {
+              type: "integer",
+              nullable: true,
+              description:
+                "Usos que quedan del tope global; null si es ilimitado. Informativo y NO vinculante: el cupón puede agotarse entre esta consulta y el pago.",
+              example: 38,
+            },
+            oncePerCustomer: { type: "boolean", example: true },
+            perCustomerChecked: {
+              type: "boolean",
+              description:
+                "false cuando la consulta no trajo correo: el \"un uso por cliente\" todavía no se verificó y el checkout podría rechazar el cupón con un 409.",
+              example: false,
+            },
+            expiresAt: { type: "string", format: "date-time", nullable: true },
           },
         },
         ShippingRatesInput: {
@@ -889,8 +1157,22 @@ const options: Options = {
             date: { type: "string", example: "12 jun · 07:33" },
             pieces: { type: "integer", example: 1 },
             items: { type: "string", example: "Bota Ranchera 1972, Bota Exótica de Avestruz ×2" },
-            savings: { type: "number", format: "float", example: 400.0 },
-            total: { type: "number", format: "float", example: 1659.0 },
+            savings: {
+              type: "number",
+              format: "float",
+              description: "Ahorro outlet (originalPrice vs salePrice). NO incluye el cupón.",
+              example: 400.0,
+            },
+            couponCode: { type: "string", nullable: true, example: "VERANO25" },
+            couponDiscount: {
+              type: "number",
+              format: "float",
+              description:
+                "Descuento por cupón. Va aparte de savings para que la fila cuadre: " +
+                "total = subtotal − savings − couponDiscount + shipping.",
+              example: 150.0,
+            },
+            total: { type: "number", format: "float", example: 1509.0 },
             costoTotal: { type: "number", format: "float", example: 800.0 },
           },
         },

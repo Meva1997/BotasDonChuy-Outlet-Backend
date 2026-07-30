@@ -53,3 +53,18 @@ export const orderLookupRateLimiter: RateLimitRequestHandler = rateLimit({
     message: "Demasiadas consultas seguidas. Espera un momento y vuelve a intentar.",
   },
 });
+
+// POST /api/coupons/validate es público y aquí el límite SÍ es la defensa principal, a diferencia
+// del de arriba: los códigos de cupón no son secretos ni son UUIDs, así que un script podría
+// recorrer combinaciones cortas hasta encontrar una promoción que el dueño no ha anunciado. De
+// paso acota el costo de la ruta, que lee productos y cupones en cada llamada. El tope deja
+// margen para que un comprador se equivoque tecleando varias veces sin quedar bloqueado.
+export const couponRateLimiter: RateLimitRequestHandler = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    message: "Demasiados intentos con cupones. Espera un momento y vuelve a intentar.",
+  },
+});

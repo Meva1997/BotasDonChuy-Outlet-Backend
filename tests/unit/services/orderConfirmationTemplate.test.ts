@@ -64,3 +64,55 @@ describe("orderConfirmationTemplate — link de seguimiento (Fase O.4)", () => {
     expect(html).toContain(`href="${TRACKING_PAGE_URL}"`);
   });
 });
+
+describe("orderConfirmationTemplate — fila del cupón (Fase N.2)", () => {
+  it("renderiza el código y el importe descontado", () => {
+    const html = orderConfirmationTemplate({
+      ...baseInput,
+      couponCode: "VERANO25",
+      couponDiscount: 150,
+      total: 1509,
+    });
+
+    expect(html).toContain("Cupón VERANO25");
+    expect(html).toContain("$150.00");
+  });
+
+  it("la fila del cupón va ANTES de la de Envío", () => {
+    // No es cosmético: ese orden es la prueba visual de que el descuento se aplicó a la
+    // mercancía y no a la paquetería, que es la regla central de la fase.
+    const html = orderConfirmationTemplate({
+      ...baseInput,
+      couponCode: "VERANO25",
+      couponDiscount: 150,
+      total: 1509,
+    });
+
+    expect(html.indexOf("Cupón VERANO25")).toBeLessThan(html.indexOf("Envío"));
+  });
+
+  it("no renderiza la fila cuando no hubo cupón", () => {
+    expect(orderConfirmationTemplate(baseInput)).not.toContain("Cupón");
+  });
+
+  it("no la renderiza tampoco con un descuento en 0", () => {
+    const html = orderConfirmationTemplate({
+      ...baseInput,
+      couponCode: "VERANO25",
+      couponDiscount: 0,
+    });
+
+    expect(html).not.toContain("Cupón VERANO25");
+  });
+
+  it("escapa el código antes de interpolarlo", () => {
+    const html = orderConfirmationTemplate({
+      ...baseInput,
+      couponCode: "<b>X</b>" as string,
+      couponDiscount: 10,
+    });
+
+    expect(html).not.toContain("Cupón <b>X</b>");
+    expect(html).toContain("&lt;b&gt;X&lt;/b&gt;");
+  });
+});

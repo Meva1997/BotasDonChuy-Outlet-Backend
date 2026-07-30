@@ -23,7 +23,18 @@ const router: Router = Router();
  *       la misma respuesta del original —mismo `order`, mismo `clientSecret`, mismo `201`—
  *       en vez de otro cobro con el stock descontado dos veces. Manda el header
  *       `Idempotency-Key` con un valor nuevo por cada intento de compra; si no viene, el
- *       servidor deduplica por una huella del carrito + los datos del cliente.
+ *       servidor deduplica por una huella del carrito + los datos del cliente (que incluye el
+ *       `couponCode`, así que aplicar o quitar un cupón cuenta como otro pedido).
+ *
+ *
+ *       **Cupones (Fase N.2):** el body puede traer un `couponCode` (uno solo por compra) y
+ *       nunca un monto. El servidor revalida el cupón y **canjea el uso dentro de la misma
+ *       transacción que descuenta el stock**, así que dos compradores peleando el último uso de
+ *       un cupón reciben uno `201` y el otro `409`. El descuento se calcula sobre la mercancía
+ *       neta (`subtotal − savings`) y **nunca sobre el envío**; queda congelado en
+ *       `couponCode`/`couponDiscount` para que un cupón editado después no altere el pedido. Un
+ *       cupón inválido, vencido, agotado o ya usado por ese correo responde 400/409 y **no crea
+ *       el pedido ni descuenta stock** — jamás se ignora en silencio.
  *     tags: [Orders]
  *     parameters:
  *       - in: header
@@ -64,7 +75,15 @@ const router: Router = Router();
  *             schema:
  *               $ref: '#/components/schemas/OrderResponse'
  *       400:
- *         description: Body inválido (carrito vacío, datos de cliente inválidos) o `Idempotency-Key` demasiado larga.
+ *         description: >
+ *           Body inválido (carrito vacío, datos de cliente inválidos, código de cupón mal
+ *           formado) o `Idempotency-Key` demasiado larga.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: El `couponCode` enviado no existe.
  *         content:
  *           application/json:
  *             schema:
@@ -72,7 +91,10 @@ const router: Router = Router();
  *       409:
  *         description: >
  *           Sin stock suficiente o producto no disponible (incluye el ítem en el mensaje),
- *           tarifa de envío ya no disponible, o `Idempotency-Key` reusada con otro carrito.
+ *           tarifa de envío ya no disponible, `Idempotency-Key` reusada con otro carrito, o el
+ *           cupón no aplica (desactivado, fuera de vigencia, agotado —incluso si se agotó entre
+ *           la validación y el pago—, mínimo de compra no alcanzado, ya usado por ese correo, o
+ *           deja el total por debajo del mínimo que acepta el pago en línea).
  *         content:
  *           application/json:
  *             schema:
@@ -100,7 +122,9 @@ router.post("/", orderRateLimiter, createOrder);
  *       La respuesta es una **proyección explícita**, no la fila completa del pedido: quedan
  *       fuera `unitCost`, `paymentIntentId`, `refundId`, `shippingRequiresDropoff` (bandera
  *       operativa del dueño), `labelUrl` (la etiqueta imprimible es del dueño), los ids de
- *       Skydropx, el propio token y el correo/teléfono del cliente.
+ *       Skydropx, el propio token, el `couponId` interno y el correo/teléfono del cliente.
+ *       `couponCode` y `couponDiscount` **sí** van: sin ellos los totales de esta página no
+ *       cuadrarían y el descuento no tendría explicación visible.
  *
  *
  *       Un token mal formado, inexistente o de un pedido borrado devuelve **el mismo `404` con
