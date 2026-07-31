@@ -171,14 +171,36 @@ describe("cancelOrderByAdmin — paid", () => {
       paymentIntentId: "pi_test_concurrent",
     });
     await createOrderItem(order.id, product, { size: 25, quantity: 2 });
+
+    // Barrera de sincronización: `refunds.create` no resuelve hasta que AMBAS
+    // cancelaciones lo hayan llamado. Esa llamada ocurre DESPUÉS del pre-chequeo de
+    // estado y ANTES de la transacción que cierra la orden, así que la barrera fuerza
+    // justo el interleaving que este test quiere probar: las dos leyeron `paid` y las
+    // dos llegan al guard `FOR UPDATE`, donde solo una debe restockear.
+    // Sin ella el test era intermitente: si la primera alcanzaba a commitear antes de
+    // que la segunda leyera, la segunda veía `cancelled` y lanzaba 409 (comportamiento
+    // correcto, pero otro camino) y el `Promise.all` se rechazaba.
     // Misma idempotencyKey en la vida real => Stripe devolvería el MISMO refund a
     // ambas llamadas; se simula devolviendo el mismo id en las dos.
-    stripeMock.refunds.create.mockResolvedValue({ id: "re_test_concurrent" });
+    let arrived = 0;
+    let openBarrier: () => void = () => {};
+    const barrier = new Promise<void>((resolve) => {
+      openBarrier = resolve;
+    });
+    stripeMock.refunds.create.mockImplementation(async () => {
+      arrived += 1;
+      if (arrived === 2) openBarrier();
+      await barrier;
+      return { id: "re_test_concurrent" };
+    });
 
     await Promise.all([
       cancelOrderByAdmin(order.id),
       cancelOrderByAdmin(order.id),
     ]);
+
+    // Las dos llegaron a reembolsar (misma idempotencyKey => un solo reembolso real).
+    expect(stripeMock.refunds.create).toHaveBeenCalledTimes(2);
 
     expect(await stockOf(product.id, 25)).toBe(2);
     const reloaded = await Order.findByPk(order.id);

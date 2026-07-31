@@ -5,9 +5,9 @@ import {
   verifyResetCode,
   resetPassword,
   me,
-} from "../controllers/auth.controller";
-import { requireAuth } from "../middlewares/requireAuth";
-import { authRateLimiter } from "../middlewares/rateLimit";
+} from "../../controllers/auth.controller";
+import { requireAuth } from "../../middlewares/requireAuth";
+import { authRateLimiter } from "../../middlewares/rateLimit";
 
 const router: Router = Router();
 

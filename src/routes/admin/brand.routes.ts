@@ -4,9 +4,9 @@ import {
   updateBrandSettings,
   uploadBrandLogo,
   deleteBrandLogo,
-} from "../controllers/brand.controller";
-import { requireAuth } from "../middlewares/requireAuth";
-import { uploadLogo } from "../middlewares/upload";
+} from "../../controllers/brand.controller";
+import { requireAuth } from "../../middlewares/requireAuth";
+import { uploadLogo } from "../../middlewares/upload";
 
 const router: Router = Router();
 

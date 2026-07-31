@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { getProductById, getProducts } from "../controllers/product.controller";
+import { getProductById, getProducts } from "../../controllers/product.controller";
 
 const router: Router = Router();
 
@@ -21,6 +21,35 @@ const router: Router = Router();
  *         schema:
  *           type: integer
  *         description: Filtra productos que tengan stock en esta talla.
+ *       - in: query
+ *         name: q
+ *         schema:
+ *           type: string
+ *           maxLength: 100
+ *         description: >
+ *           Busca en el nombre y el código del producto (coincidencia parcial, sin distinguir
+ *           mayúsculas). Los comodines `%` y `_` se buscan como texto literal. Se ignora si viene
+ *           vacío o en blanco.
+ *       - in: query
+ *         name: orden
+ *         schema:
+ *           type: string
+ *           enum: [precio_asc, precio_desc, novedad]
+ *         description: >
+ *           Orden del listado. Por defecto (u omitido, o con un valor no reconocido) ordena por
+ *           id ascendente.
+ *       - in: query
+ *         name: precioMin
+ *         schema:
+ *           type: number
+ *           format: float
+ *         description: Precio de oferta mínimo. Se ignora si no es un número válido no negativo.
+ *       - in: query
+ *         name: precioMax
+ *         schema:
+ *           type: number
+ *           format: float
+ *         description: Precio de oferta máximo. Se ignora si no es un número válido no negativo.
  *       - in: query
  *         name: page
  *         schema:

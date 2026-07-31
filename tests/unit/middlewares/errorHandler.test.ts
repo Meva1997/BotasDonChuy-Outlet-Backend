@@ -107,4 +107,22 @@ describe("errorHandler", () => {
     expect(res.status).toHaveBeenCalledWith(400);
     expect(captureExceptionMock).not.toHaveBeenCalled();
   });
+
+  it("un conflicto del índice de cupones daría un mensaje inservible: por eso no debe llegar aquí", () => {
+    // Regresión de la Fase N.2: si el choque del índice único parcial de `coupon_redemptions`
+    // escapara como `UniqueConstraintError`, el comprador leería esto —copia de UI que nombra
+    // columnas internas— en vez del 409 accionable. `claimCoupon` lo evita usando
+    // `ON CONFLICT DO NOTHING` y traduciendo el conflicto a un `AppError`; este caso documenta
+    // qué pasaría si alguien quitara esa traducción en un refactor.
+    const res = buildRes();
+    const err = Object.assign(new UniqueConstraintError({ errors: [] }), {
+      errors: [{ path: "couponId" }, { path: "emailNormalized" }],
+    });
+
+    errorHandler(err, {} as Request, res, jest.fn());
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    const body = (res.json as jest.Mock).mock.calls[0][0] as { message: string };
+    expect(body.message).not.toMatch(/cupón/i);
+  });
 });

@@ -5,6 +5,11 @@ import { Product } from "../models/Product";
 import { productSizesInclude } from "../utils/productSizesInclude";
 import { addDays, formatShortDate, isoDay, utcDayStart } from "../utils/date";
 import { formatMoney } from "../utils/formatMoney";
+import {
+  loadExpenses,
+  oneTimeExpensesByDay,
+  totalMonthlyRunRate,
+} from "./expenses.service";
 
 export interface KpiData {
   label: string;
@@ -26,7 +31,15 @@ export interface SaleRow {
   day: string; // clave ISO en UTC ("2026-07-13") para filtrar por día en el front
   pieces: number;
   items: string;
+  /** Ahorro outlet (`originalPrice` vs `salePrice`). NO incluye el cupón. */
   savings: number;
+  /**
+   * Descuento por cupón (Fase N.2). Sin estos dos campos la fila es irreconciliable: `savings`
+   * es solo el ahorro outlet y `total` ya viene neto de cupón, así que
+   * `subtotal − savings + envío ≠ total` sin ninguna causa visible en el panel.
+   */
+  couponCode: string | null;
+  couponDiscount: number;
   total: number;
   costoTotal: number;
 }
@@ -49,9 +62,6 @@ export interface DashboardData {
   inventory: InventoryRow[];
 }
 
-// Gastos fijos mensuales de operación (dominio + comisión de pasarela estimada).
-// No existe un modelo de gastos en el roadmap — placeholder hasta que exista esa feature.
-const GASTOS_FIJOS = 2000;
 const RECENT_SALES_LIMIT = 20;
 const REVENUE_WINDOW_DAYS = 90;
 const PERIODS: Period[] = ["7", "30", "90"];
@@ -80,6 +90,8 @@ interface DayAggregate {
   cogs: number;
   pieces: number;
   orders: number;
+  /** Descuento otorgado por cupones ese día (Fase N.2). Ver el KPI del mismo nombre. */
+  couponDiscount: number;
 }
 
 function buildDailyAggregates(orders: Order[]): Map<string, DayAggregate> {
@@ -88,13 +100,17 @@ function buildDailyAggregates(orders: Order[]): Map<string, DayAggregate> {
     const key = isoDay(order.createdAt);
     let agg = byDay.get(key);
     if (!agg) {
-      agg = { revenue: 0, cogs: 0, pieces: 0, orders: 0 };
+      agg = { revenue: 0, cogs: 0, pieces: 0, orders: 0, couponDiscount: 0 };
       byDay.set(key, agg);
     }
+    // `order.total` ya viene NETO de cupón, y así se queda: lo que suma "INGRESOS" es el
+    // efectivo realmente cobrado, que es lo correcto. El costo de la promoción se acumula
+    // aparte para poder explicarlo (ver `buildKpisForWindow`).
     agg.revenue += order.total;
     agg.cogs += orderCost(order);
     agg.pieces += (order.items ?? []).reduce((a, i) => a + i.quantity, 0);
     agg.orders += 1;
+    agg.couponDiscount += order.couponDiscount;
   }
   return byDay;
 }
@@ -111,10 +127,28 @@ function buildRevenuePeriod(dailyAgg: Map<string, DayAggregate>, days: number, t
   return points;
 }
 
+/**
+ * Gastos que entran en una ventana (Fase N.3, sustituye la constante `GASTOS_FIJOS = 2000`).
+ *
+ * Son dos cosas distintas sumadas:
+ *  - los **recurrentes**, como carga mensual normalizada prorrateada por `windowDays/30` — la
+ *    misma semántica que ya tenía el placeholder, ahora con datos reales;
+ *  - los de **única vez**, contados completos y solo si su fecha cae dentro de la ventana.
+ */
+interface WindowExpenses {
+  /** Carga mensual recurrente vigente. */
+  monthlyRunRate: number;
+  recurring: number;
+  oneTime: number;
+  total: number;
+}
+
 function buildKpisForWindow(
   dailyAgg: Map<string, DayAggregate>,
   windowDays: number,
   todayStart: Date,
+  monthlyRunRate: number,
+  oneTimeByDay: Map<string, number>,
 ): { kpis: KpiData[]; profitKpis: KpiData[] } {
   const currentWindowStart = addDays(todayStart, -(windowDays - 1));
   const previousWindowStart = addDays(todayStart, -(2 * windowDays - 1));
@@ -125,16 +159,23 @@ function buildKpisForWindow(
   let currentOrderCount = 0;
   let ingresosPrev = 0;
   let cogsPrev = 0;
+  let descuentoCupones = 0;
+  let descuentoCuponesPrev = 0;
+  let gastosUnicos = 0;
+  let gastosUnicosPrev = 0;
   let mejorDia: { date: Date; revenue: number } | null = null;
 
   for (let i = 0; i < windowDays; i += 1) {
     const day = addDays(currentWindowStart, i);
     const agg = dailyAgg.get(isoDay(day));
+    gastosUnicos += oneTimeByDay.get(isoDay(day)) ?? 0;
+    gastosUnicosPrev += oneTimeByDay.get(isoDay(addDays(previousWindowStart, i))) ?? 0;
     const revenue = agg?.revenue ?? 0;
     ingresos += revenue;
     cogs += agg?.cogs ?? 0;
     piezasVendidas += agg?.pieces ?? 0;
     currentOrderCount += agg?.orders ?? 0;
+    descuentoCupones += agg?.couponDiscount ?? 0;
     if (!mejorDia || revenue > mejorDia.revenue) {
       mejorDia = { date: day, revenue };
     }
@@ -142,6 +183,7 @@ function buildKpisForWindow(
     const prevAgg = dailyAgg.get(isoDay(addDays(previousWindowStart, i)));
     ingresosPrev += prevAgg?.revenue ?? 0;
     cogsPrev += prevAgg?.cogs ?? 0;
+    descuentoCuponesPrev += prevAgg?.couponDiscount ?? 0;
   }
 
   const ticketPromedio = currentOrderCount ? ingresos / currentOrderCount : 0;
@@ -149,10 +191,22 @@ function buildKpisForWindow(
   const gananciaBruta = ingresos - cogs;
   const gananciaBrutaPrev = ingresosPrev - cogsPrev;
   const margenBruto = ingresos ? Math.round((gananciaBruta / ingresos) * 100) : 0;
-  // Gastos fijos prorrateados a la ventana seleccionada (el placeholder es mensual).
-  const gastosFijosWindow = GASTOS_FIJOS * (windowDays / 30);
-  const gananciaNeta = gananciaBruta - gastosFijosWindow;
-  const gananciaNetaPrev = gananciaBrutaPrev - gastosFijosWindow;
+
+  // Los recurrentes se prorratean (la carga mensual es la misma en las dos ventanas: lo que se
+  // paga hoy es lo que hay que retirar hoy), pero los de única vez **son distintos en cada una** —
+  // hasta esta fase la ventana previa restaba exactamente el mismo gasto que la actual porque la
+  // constante no tenía forma de variar, y eso volvía el trend de GANANCIA NETA una comparación a
+  // medias. Con gastos reales cada ventana suma los suyos.
+  const gastosRecurrentes = monthlyRunRate * (windowDays / 30);
+  const gastos: WindowExpenses = {
+    monthlyRunRate,
+    recurring: gastosRecurrentes,
+    oneTime: gastosUnicos,
+    total: gastosRecurrentes + gastosUnicos,
+  };
+  const gastosPrev = gastosRecurrentes + gastosUnicosPrev;
+  const gananciaNeta = gananciaBruta - gastos.total;
+  const gananciaNetaPrev = gananciaBrutaPrev - gastosPrev;
 
   const kpis: KpiData[] = [
     { label: "INGRESOS", value: formatMoney(ingresos), trend: computeTrend(ingresos, ingresosPrev) },
@@ -172,10 +226,26 @@ function buildKpisForWindow(
       trend: computeTrend(gananciaBruta, gananciaBrutaPrev),
     },
     { label: "MARGEN BRUTO", value: `${margenBruto}%`, subtitle: "sobre precio de venta outlet" },
+    // Sin este KPI, una campaña de cupones se lee como una CAÍDA de ingresos contra el periodo
+    // anterior (el `total` de cada pedido baja) aunque se hayan vendido más piezas, y el dueño no
+    // tendría nada en pantalla que lo explique. No se suma a "Ahorraste"/`savings`, que significa
+    // otra cosa —el descuento outlet— y mezclarlos falsearía el margen.
     {
-      label: "GASTOS FIJOS",
-      value: formatMoney(gastosFijosWindow),
-      subtitle: `estimado · ventana de ${windowDays} días`,
+      label: "DESCUENTOS POR CUPÓN",
+      value: formatMoney(descuentoCupones),
+      subtitle: "no incluido en el ahorro outlet",
+      trend: computeTrend(descuentoCupones, descuentoCuponesPrev),
+    },
+    // Ya no dice "FIJOS": ahora incluye gastos de única vez, así que "fijos" sería falso. El
+    // subtítulo separa las dos mitades porque un pico en este KPI tiene dos causas muy distintas
+    // —subió una suscripción vs. hubo una compra puntual— y el dueño tiene que poder distinguirlas
+    // sin abrir el historial.
+    {
+      label: "GASTOS",
+      value: formatMoney(gastos.total),
+      subtitle: gastos.oneTime
+        ? `${formatMoney(gastos.recurring)} recurrentes + ${formatMoney(gastos.oneTime)} de única vez · ventana de ${windowDays} días`
+        : `${formatMoney(gastos.monthlyRunRate)} al mes · ventana de ${windowDays} días`,
     },
     {
       label: "GANANCIA NETA",
@@ -207,6 +277,8 @@ function buildSaleRow(order: Order): SaleRow {
     pieces,
     items: itemsLabel,
     savings: order.savings,
+    couponCode: order.couponCode,
+    couponDiscount: order.couponDiscount,
     total: order.total,
     costoTotal: orderCost(order),
   };
@@ -219,17 +291,25 @@ export async function getDashboardData(): Promise<DashboardData> {
   // el trend "vs periodo anterior" → se buscan 180 días de historial.
   const sinceHistory = addDays(todayStart, -(2 * REVENUE_WINDOW_DAYS - 1));
 
-  const [ordersHistory, recentOrders, products] = await Promise.all([
+  const [ordersHistory, recentOrders, products, expenses] = await Promise.all([
     Order.findAll({
+      // `paymentStatus` y NO `status` (arreglo de la Fase N.4): `Order.status` avanza a
+      // `shipped`/`delivered` en cuanto la guía reporta actividad (o el dueño lo marca a mano con
+      // el `PATCH /status` de la Fase O.1), así que con `status: "paid"` **un pedido salía de los
+      // ingresos, de los KPIs y de `recentSales` justo al despacharlo** — el panel iba a
+      // subcontar desde el primer envío del lanzamiento. `paymentStatus: "paid"` significa "el
+      // dinero entró y no se ha devuelto": sobrevive a `shipped`/`delivered` y solo cambia a
+      // `refunded` (reembolso real) o `failed` (pendiente liberado), que es exactamente lo que NO
+      // debe contar como venta.
       where: {
-        status: "paid",
+        paymentStatus: "paid",
         createdAt: { [Op.gte]: sinceHistory },
       } as WhereOptions<OrderAttributes>,
       include: [{ model: OrderItem, as: "items" }],
       order: [["createdAt", "ASC"]],
     }),
     Order.findAll({
-      where: { status: "paid" },
+      where: { paymentStatus: "paid" },
       include: [{ model: OrderItem, as: "items" }],
       order: [["createdAt", "DESC"]],
       limit: RECENT_SALES_LIMIT,
@@ -238,9 +318,15 @@ export async function getDashboardData(): Promise<DashboardData> {
       where: { deletedAt: { [Op.is]: null } },
       include: [productSizesInclude],
     }),
+    // Gastos con todas sus versiones de monto (Fase N.3). Sin filtro por fecha: son decenas de
+    // filas y el cálculo necesita el historial completo de precios para saber cuánto costaba
+    // cada cosa en cada momento.
+    loadExpenses(),
   ]);
 
   const dailyAgg = buildDailyAggregates(ordersHistory);
+  const monthlyRunRate = totalMonthlyRunRate(expenses, isoDay(now));
+  const oneTimeByDay = oneTimeExpensesByDay(expenses);
 
   const revenueByPeriod: Record<Period, RevenuePoint[]> = {
     "7": buildRevenuePeriod(dailyAgg, 7, todayStart),
@@ -251,7 +337,13 @@ export async function getDashboardData(): Promise<DashboardData> {
   const kpisByPeriod = {} as Record<Period, KpiData[]>;
   const profitKpisByPeriod = {} as Record<Period, KpiData[]>;
   for (const period of PERIODS) {
-    const { kpis, profitKpis } = buildKpisForWindow(dailyAgg, Number(period), todayStart);
+    const { kpis, profitKpis } = buildKpisForWindow(
+      dailyAgg,
+      Number(period),
+      todayStart,
+      monthlyRunRate,
+      oneTimeByDay,
+    );
     kpisByPeriod[period] = kpis;
     profitKpisByPeriod[period] = profitKpis;
   }

@@ -5,6 +5,8 @@ import { AdminUser } from "./models/AdminUser";
 import { Order } from "./models/Order";
 import { OrderItem } from "./models/OrderItem";
 import { BrandSettings } from "./models/BrandSettings";
+import { Expense } from "./models/Expense";
+import { ExpenseAmount } from "./models/ExpenseAmount";
 import "./models/associations";
 import { computeTotals, type CartLineItem } from "./services/cart";
 import { hashPassword } from "./utils/password";
@@ -145,7 +147,7 @@ async function seed() {
   console.log("✅ Conexión a PostgreSQL establecida");
 
   await sequelize.query(
-    "TRUNCATE TABLE product_sizes, order_items, orders, products, adminusers, brand_settings RESTART IDENTITY CASCADE",
+    "TRUNCATE TABLE product_sizes, order_items, orders, products, adminusers, brand_settings, expense_amounts, expenses RESTART IDENTITY CASCADE",
   );
   console.log("🧹 Tablas limpiadas");
 
@@ -259,6 +261,31 @@ async function seed() {
       { transaction: t },
     );
     console.log("🏷️  BrandSettings creado");
+
+    // Migración del `GASTOS_FIJOS = 2000` que `dashboard.service.ts` restaba hasta la Fase N.3.
+    // Es una fila normal y editable, no un valor especial: el dueño puede cambiarle el monto,
+    // partirla en gastos reales (Render, Vercel, la base de datos) o borrarla. Existe solo para
+    // que la GANANCIA NETA del panel no dé un salto el día del deploy.
+    const gastosOperacion = await Expense.create(
+      {
+        concept: "Gastos de operación (dominio + comisión de pasarela)",
+        category: "otro",
+        frequency: "monthly",
+        startsAt: `${MONTHLY_UNIT_SALES[0].key}-01`,
+        notes:
+          "Estimado heredado del panel anterior. Sustitúyelo por los gastos reales (Render, Vercel, base de datos…) en cuanto los tengas a la mano.",
+      },
+      { transaction: t },
+    );
+    await ExpenseAmount.create(
+      {
+        expenseId: gastosOperacion.id,
+        amount: 2000,
+        effectiveFrom: `${MONTHLY_UNIT_SALES[0].key}-01`,
+      },
+      { transaction: t },
+    );
+    console.log("💸 Gasto recurrente semilla creado ($2,000/mes)");
 
     // Las filas anteriores se insertan con `id` explícito, lo que en Postgres
     // NO avanza la secuencia SERIAL de cada tabla. Sin esto, el primer INSERT

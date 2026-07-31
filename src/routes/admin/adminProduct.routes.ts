@@ -8,9 +8,9 @@ import {
   adminDeleteProductImage,
   adminImportProducts,
   adminPreviewProductImport,
-} from "../controllers/product.controller";
-import { requireAuth } from "../middlewares/requireAuth";
-import { uploadProductImages, uploadProductImportFile } from "../middlewares/upload";
+} from "../../controllers/product.controller";
+import { requireAuth } from "../../middlewares/requireAuth";
+import { uploadProductImages, uploadProductImportFile } from "../../middlewares/upload";
 
 const router: Router = Router();
 

@@ -2,8 +2,14 @@ import type { Request, RequestHandler, Response } from "express";
 import Stripe from "stripe";
 import { Op, type WhereOptions } from "sequelize";
 import { asyncHandler } from "../middlewares/asyncHandler";
-import { createOrderSchema, cancelOrderSchema } from "../schemas/checkout";
+import {
+  createOrderSchema,
+  cancelOrderSchema,
+  orderStatusUpdateSchema,
+  retryShipmentSchema,
+} from "../schemas/checkout";
 import { parseId } from "../utils/parseId";
+import { AppError } from "../middlewares/AppError";
 import * as ordersService from "../services/orders.service";
 import * as paymentService from "../services/payment.service";
 import { stripe, STRIPE_WEBHOOK_SECRET } from "../config/stripe";
@@ -29,28 +35,71 @@ interface SkydropxWebhookBody {
 }
 
 /**
+ * Lee el header `Idempotency-Key` (Fase O.2). Opcional: cuando no viene, `placeOrder`
+ * cae a su huella automática del carrito. Un valor vacío se trata como ausente; uno
+ * absurdamente largo se rechaza para no usarlo como llave de un mapa en memoria.
+ */
+function readIdempotencyKey(req: Request): string | undefined {
+  const raw = req.headers["idempotency-key"];
+  const value = (Array.isArray(raw) ? raw[0] : raw)?.trim();
+  if (!value) return undefined;
+  if (value.length > 200) {
+    throw new AppError(
+      "La clave de idempotencia del pedido es demasiado larga (máximo 200 caracteres).",
+      400,
+    );
+  }
+  return value;
+}
+
+/**
  * POST /api/orders — checkout público.
- * Valida el body, crea la orden (totales recalculados + stock descontado
- * atómicamente) y prepara el pago. Devuelve la orden y el clientSecret (null
- * hasta que Stripe se active en Fase 8).
+ * Valida el body y delega en `placeOrder`: crea la orden (totales recalculados + stock
+ * descontado atómicamente), crea el PaymentIntent y devuelve la orden con su
+ * `clientSecret`. Es idempotente (Fase O.2): un reenvío dentro de la ventana corta
+ * —doble clic, reintento del navegador— devuelve la MISMA respuesta del original en vez
+ * de crear un segundo pedido con su segundo cobro y su stock descontado dos veces.
  */
 export const createOrder: RequestHandler = asyncHandler(
   async (req: Request, res: Response) => {
     const input = createOrderSchema.parse(req.body);
+    const idempotencyKey = readIdempotencyKey(req);
 
-    const order = await ordersService.createOrder(input);
+    const { order, clientSecret, replayed } = await ordersService.placeOrder(
+      input,
+      idempotencyKey,
+      // La IP se toma del request y NUNCA del body: se guarda en la bitácora de canjes de
+      // cupones (Fase N.2) y, si viniera del cliente, registraría lo que él quisiera. Solo es
+      // dato forense — ninguna decisión la consulta.
+      { clientIp: req.ip ?? null },
+    );
 
-    // Seam de pago: hoy no-op (clientSecret null). Si en Fase 8 devuelve un
-    // paymentIntentId, se persiste en la orden para que el webhook la concilie.
-    const payment = await paymentService.createPaymentIntentForOrder(order);
-    if (payment.paymentIntentId) {
-      await order.update({
-        paymentIntentId: payment.paymentIntentId,
-        paymentStatus: "processing",
-      });
-    }
+    // El cuerpo de un reenvío es idéntico al del original a propósito, así que sin este
+    // header el cliente no tiene cómo saber que su segunda compra no se creó.
+    if (replayed) res.set("Idempotency-Replayed", "true");
+    res.status(201).json({ order, clientSecret });
+  },
+);
 
-    res.status(201).json({ order, clientSecret: payment.clientSecret });
+/**
+ * GET /api/orders/lookup/:token — consulta pública del pedido (Fase O.4).
+ *
+ * Sin auth: el token opaco de la orden (que viaja en el link del correo de confirmación) ES la
+ * credencial. Devuelve una proyección explícita —estado, rastreo, totales y dirección— nunca la
+ * fila completa; ver `getOrderByPublicToken` en orders.service.ts para qué queda fuera y por qué.
+ * Un token inválido, inexistente o mal formado responde el MISMO 404 genérico, para no confirmar
+ * qué tokens existen.
+ */
+export const lookupOrder: RequestHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    // Express tipa los params como `string | string[]`; el token siempre llega como uno solo,
+    // y si no, la validación de formato del servicio lo rechaza con el mismo 404 genérico.
+    const raw = req.params.token;
+    const token = Array.isArray(raw) ? (raw[0] ?? "") : (raw ?? "");
+
+    const order = await ordersService.getOrderByPublicToken(token);
+
+    res.json({ order });
   },
 );
 
@@ -230,6 +279,44 @@ export const adminCancelOrder: RequestHandler = asyncHandler(
     const { reason } = cancelOrderSchema.parse(req.body ?? {});
 
     const order = await ordersService.cancelOrderByAdmin(id, reason);
+
+    res.json({ order });
+  },
+);
+
+/**
+ * PATCH /api/admin/orders/:id/status — avance manual de estado de envío (admin, Fase O.1).
+ * Mueve el pedido a `shipped`/`delivered` y guarda la guía capturada a mano; solo hacia
+ * adelante (409 si retrocede, si el pedido está cancelado o si aún no está pagado). El correo
+ * "tu pedido va en camino" sale una sola vez por pedido, lo dispare el panel o el webhook de
+ * Skydropx. Ver `updateOrderStatusByAdmin` en orders.service.ts.
+ */
+export const adminUpdateOrderStatus: RequestHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const id = parseId(req.params.id, "pedido");
+    const input = orderStatusUpdateSchema.parse(req.body ?? {});
+
+    const order = await ordersService.updateOrderStatusByAdmin(id, input);
+
+    res.json({ order });
+  },
+);
+
+/**
+ * POST /api/admin/orders/:id/shipment/retry — reintento manual de la guía (admin, Fase O.3).
+ * Regenera la guía de un pedido pagado que se quedó sin ella (Skydropx falló al pagar) y libera
+ * el centinela huérfano que dejaría un proceso caído. 409 si el pedido ya tiene guía —real o
+ * cobrada sin persistir—, si no está pagado, si está cancelado o si se cobró con tarifa plana;
+ * 502 si Skydropx vuelve a fallar. Ver `retryShipmentForOrder` en payment.service.ts.
+ */
+export const adminRetryShipment: RequestHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const id = parseId(req.params.id, "pedido");
+    // Body opcional: el reintento normal no manda nada. `force` solo aplica al caso "Skydropx no
+    // respondió y pudo haber cobrado la guía" (ver `retryShipmentForOrder`).
+    const { force } = retryShipmentSchema.parse(req.body ?? {});
+
+    const order = await paymentService.retryShipmentForOrder(id, { force });
 
     res.json({ order });
   },

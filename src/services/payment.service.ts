@@ -1,7 +1,8 @@
-import { Op } from "sequelize";
+import { Op, type WhereOptions } from "sequelize";
 import { Order } from "../models/Order";
 import { OrderItem } from "../models/OrderItem";
 import { Product } from "../models/Product";
+import { AppError } from "../middlewares/AppError";
 import { stripe, STRIPE_CURRENCY } from "../config/stripe";
 import {
   SHIP_FROM_EXTERNAL_NUMBER,
@@ -9,10 +10,12 @@ import {
   SHIP_FROM_NEIGHBORHOOD,
   SHIP_FROM_PHONE,
   SHIP_FROM_STREET,
+  SHIPMENT_RETRY_DELAY_MINUTES,
 } from "../config/skydropx";
-import { EMAIL_FROM } from "../config/resend";
+import { EMAIL_FROM, FRONTEND_URL } from "../config/resend";
 import { sendEmail } from "./email.service";
 import { sendAlertEmail } from "./alert.service";
+import { sendNewOrderNotification } from "./ownerNotification.service";
 import { orderConfirmationTemplate } from "./email/templates/orderConfirmation";
 import { buildParcel, type ParcelLineItem } from "./packing";
 import {
@@ -20,6 +23,7 @@ import {
   getOriginAddress,
   getQuotationRate,
   getShippingRates,
+  SkydropxShipmentUncertainError,
   toSkydropxAddress,
   type SkydropxContact,
 } from "./skydropx.service";
@@ -125,6 +129,13 @@ export async function markOrderPaidFromWebhook(
   // try/catch garantiza que un fallo (correo o recarga) nunca propague.
   void sendOrderConfirmationEmail(order);
 
+  // Aviso de venta al dueño (Fase N.4), mismo disparo fire-and-forget y bajo el mismo guard
+  // `affected === 1`, que es lo que garantiza que salga UNA vez por pedido aunque el webhook de
+  // Stripe y `pendingOrderSweeper` lleguen a la vez. No espera a `createShipmentForOrder`: los dos
+  // datos operativos que lleva (`skydropxRateId` y `shippingRequiresDropoff`) se persisten en el
+  // checkout, así que encadenarlo solo retrasaría el aviso sin agregar información.
+  void sendNewOrderNotification(order);
+
   // Guía automática (Fase 8.5), mismo disparo fire-and-forget y misma razón: crear la guía
   // contra Skydropx puede tardar y no debe bloquear el 200 del webhook. Solo llega aquí UNA
   // vez por orden gracias al guard atómico de arriba (`affected === 1`), que ya sirve de
@@ -142,10 +153,127 @@ export async function markOrderPaidFromWebhook(
  * como guard de antemano. Se reclama con este centinela primero; si el `UPDATE` no afecta
  * ninguna fila, otra llamada ya está creando (o ya creó) la guía y esta se retira sin llamar a
  * Skydropx.
+ *
+ * Exportado desde la Fase O.3: el reintento (`retryShipmentForOrder`) y su barrido tienen que
+ * distinguir este valor de un id de guía real — uno significa "nadie tiene guía todavía", el
+ * otro "ya se pagó una, no generes la segunda".
  */
-const SHIPMENT_CREATION_SENTINEL = "creating";
+export const SHIPMENT_CREATION_SENTINEL = "creating";
+
+/**
+ * Prefijo del marcador que queda cuando Skydropx **sí creó (y cobró) la guía** pero no se pudo
+ * guardar su id (falla de BD justo después del `POST /shipments`). Conserva el id real detrás
+ * del prefijo para que un humano pueda reconciliarlo en el panel de Skydropx.
+ *
+ * Existe desde la Fase O.3 y es lo que hace seguro el reintento: antes, ese caso dejaba el
+ * centinela `"creating"` para siempre — indistinguible de un centinela huérfano por un proceso
+ * caído — así que un reintento por antigüedad habría pagado una **segunda** guía. Ni el
+ * endpoint de reintento ni el barrido tocan una orden marcada así.
+ */
+const UNRECONCILED_PREFIX = "unreconciled:";
+
+/**
+ * id "desconocido" del marcador anterior, para el caso en que **ni siquiera se sabe** si la guía
+ * se creó: el `POST /shipments` se fue sin respuesta concluyente (timeout, conexión cortada, 5xx —
+ * ver `SkydropxShipmentUncertainError`). Skydropx pudo haberla creado y cobrado sin que nosotros
+ * viéramos nunca su id.
+ *
+ * Se marca igual que el caso "cobrada sin persistir" porque la regla es la misma —ningún reintento
+ * automático la toca, para no pagar una segunda— pero con dos diferencias: el mensaje no puede dar
+ * un id que buscar (solo el pedido, la paquetería y la fecha), y es el único marcador que el dueño
+ * puede **forzar** desde el panel (`force: true`) una vez que confirmó en Skydropx que no existe
+ * ninguna guía. Sin esa salida el pedido quedaría atorado para siempre, que es justo lo que esta
+ * fase vino a eliminar.
+ */
+const UNKNOWN_SHIPMENT_ID = "desconocido";
+
+/** Marcador completo de "quizá se creó, no sabemos su id". */
+const UNCERTAIN_SHIPMENT_MARKER = `${UNRECONCILED_PREFIX}${UNKNOWN_SHIPMENT_ID}`;
+
+/**
+ * id real de la guía si el valor guardado es el marcador de "cobrada sin persistir"; `null` si
+ * es un id normal, el centinela o nada.
+ */
+export function unreconciledShipmentId(value: string | null): string | null {
+  return value?.startsWith(UNRECONCILED_PREFIX)
+    ? value.slice(UNRECONCILED_PREFIX.length)
+    : null;
+}
+
+/** `true` si el valor guardado es un id de guía real (ni centinela ni marcador de conflicto). */
+function isRealShipmentId(value: string | null): value is string {
+  return (
+    value != null &&
+    value !== SHIPMENT_CREATION_SENTINEL &&
+    unreconciledShipmentId(value) === null
+  );
+}
+
+/** Reintentos (y espera entre ellos) para guardar el id de una guía ya creada y cobrada. */
+const SHIPMENT_PERSIST_ATTEMPTS = 3;
+const SHIPMENT_PERSIST_RETRY_DELAY_MS = 1_000;
+
+/**
+ * Resultado de guardar el id de una guía ya cobrada:
+ *  - `saved`      → persistido.
+ *  - `claim-lost` → el `UPDATE` corrió pero no afectó ninguna fila: el centinela ya no es nuestro
+ *                   (se liberó por antigüedad y otro intento lo reclamó, o se marcó de otra forma).
+ *  - `db-error`   → los tres intentos fallaron contra la BD.
+ */
+type PersistShipmentIdResult = "saved" | "claim-lost" | "db-error";
+
+/**
+ * Guarda el id de una guía **ya creada y cobrada** en Skydropx, reintentando ante un fallo de
+ * BD. Vale la pena insistir aquí y en ningún otro punto de esta función: perder este `UPDATE`
+ * es el único fallo que cuesta dinero (deja la guía pagada sin rastro en el pedido), y la causa
+ * típica es transitoria (pool agotado, conexión reciclada), no una BD caída de verdad.
+ *
+ * El `WHERE` exige que el centinela **siga siendo nuestro**, igual que el resto de escrituras de
+ * este flujo (reclamar/liberar/marcar). Sin esa condición, una creación lenta cuyo centinela ya se
+ * liberó por huérfano podía pisar en su intento 2 o 3 lo que un intento más nuevo hubiera escrito
+ * — otro id de guía real, o un marcador `unreconciled:` — borrando en silencio justo el dato que
+ * un humano necesita para reconciliar.
+ */
+async function persistShipmentId(
+  orderId: number,
+  shipmentId: string,
+): Promise<PersistShipmentIdResult> {
+  for (let attempt = 1; attempt <= SHIPMENT_PERSIST_ATTEMPTS; attempt++) {
+    try {
+      const [saved] = await Order.update(
+        { skydropxShipmentId: shipmentId, shipmentClaimedAt: null },
+        { where: { id: orderId, skydropxShipmentId: SHIPMENT_CREATION_SENTINEL } },
+      );
+      return saved === 1 ? "saved" : "claim-lost";
+    } catch (err) {
+      logger.warn(
+        { orderId, skydropxShipmentId: shipmentId, attempt, err },
+        "[skydropx] no se pudo guardar el id de la guía recién creada; reintentando",
+      );
+      if (attempt < SHIPMENT_PERSIST_ATTEMPTS) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, SHIPMENT_PERSIST_RETRY_DELAY_MS),
+        );
+      }
+    }
+  }
+  return "db-error";
+}
 
 const STORE_COMPANY_NAME = "Botas Don Chuy Outlet";
+
+/** Opciones de `createShipmentForOrder`. */
+export interface CreateShipmentOptions {
+  /**
+   * Manda el correo de alerta operativa cuando la creación falla **sin haber cobrado nada**.
+   * Por defecto `true` (el camino automático del webhook: nadie más se va a enterar). El
+   * reintento manual y el barrido lo apagan porque tienen su propio canal — el endpoint
+   * responde el error al dueño en el momento, y el barrido alerta una sola vez al agotar sus
+   * intentos, en vez de un correo por ciclo. El caso "guía cobrada sin persistir" alerta
+   * SIEMPRE, sin importar esta bandera: ahí ya hay dinero de por medio.
+   */
+  notifyOnFailure?: boolean;
+}
 
 /**
  * Genera la guía de envío de una orden ya pagada contra Skydropx (Fase 8.5). Idempotente
@@ -160,7 +288,10 @@ const STORE_COMPANY_NAME = "Botas Don Chuy Outlet";
  * (`order.shipping`/`order.total`) NUNCA cambia por esto — la re-cotización solo sirve para
  * obtener un `rate_id` vigente con el que crear el envío físico.
  */
-export async function createShipmentForOrder(order: Order): Promise<void> {
+export async function createShipmentForOrder(
+  order: Order,
+  { notifyOnFailure = true }: CreateShipmentOptions = {},
+): Promise<void> {
   if (!order.skydropxQuotationId || !order.skydropxRateId) {
     logger.warn(
       { orderId: order.id },
@@ -177,7 +308,10 @@ export async function createShipmentForOrder(order: Order): Promise<void> {
   let claimed = 0;
   try {
     [claimed] = await Order.update(
-      { skydropxShipmentId: SHIPMENT_CREATION_SENTINEL },
+      // `shipmentClaimedAt` es el reloj del centinela: con él se decide más tarde si quedó
+      // huérfano. Va aquí (y no se apoya en `updatedAt`) porque cualquier otra escritura sobre el
+      // pedido bumpea `updatedAt` y reiniciaría la cuenta — ver el comentario de la columna.
+      { skydropxShipmentId: SHIPMENT_CREATION_SENTINEL, shipmentClaimedAt: new Date() },
       { where: { id: order.id, skydropxShipmentId: null } },
     );
   } catch (err) {
@@ -272,7 +406,37 @@ export async function createShipmentForOrder(order: Order): Promise<void> {
 
     const { shipmentId } = await createShipment(rateId, addressFrom, addressTo);
     createdShipmentId = shipmentId; // a partir de aquí, Skydropx ya cobró la guía
-    await Order.update({ skydropxShipmentId: shipmentId }, { where: { id: order.id } });
+
+    const persisted = await persistShipmentId(order.id, shipmentId);
+    if (persisted === "claim-lost") {
+      // El centinela ya no es nuestro: otra ejecución lo reclamó (típicamente porque esta creación
+      // tardó tanto que su centinela se liberó por huérfano). NO se escribe nada — pisar la fila
+      // borraría el id o el marcador del dueño actual. La guía ya está cobrada, así que esto
+      // necesita a un humano sí o sí.
+      logger.error(
+        { orderId: order.id, skydropxShipmentId: shipmentId },
+        "[skydropx] CRÍTICO: guía cobrada pero otro intento se quedó con el turno; posible guía duplicada",
+      );
+      Sentry.captureException(
+        new Error("Guía Skydropx cobrada sin poder persistirse: centinela perdido"),
+        { level: "fatal", extra: { orderId: order.id, skydropxShipmentId: shipmentId } },
+      );
+      void sendAlertEmail({
+        subject: `CRÍTICO: guía Skydropx cobrada sin guardar — orden #${order.id}`,
+        context: {
+          orderId: order.id,
+          skydropxShipmentId: shipmentId,
+          motivo:
+            "Otro intento reclamó la creación de la guía mientras esta se completaba. Revisa en el panel de Skydropx si el pedido terminó con dos guías cobradas.",
+        },
+      });
+      return;
+    }
+    if (persisted === "db-error") {
+      throw new Error(
+        `La guía ${shipmentId} de la orden #${order.id} se creó en Skydropx pero no se pudo guardar en la base de datos.`,
+      );
+    }
   } catch (err) {
     logger.error(
       { orderId: order.id, err },
@@ -280,24 +444,65 @@ export async function createShipmentForOrder(order: Order): Promise<void> {
     );
     Sentry.captureException(err, { extra: { orderId: order.id } });
 
-    if (createdShipmentId) {
-      // Skydropx ya creó (y cobró) la guía, pero no se pudo persistir su id — NO liberar el
-      // centinela: hacerlo dejaría la orden como si nunca se hubiera intentado, y un reintento
-      // futuro (manual o automático, ver roadmap-skydropx.md §8) generaría una SEGUNDA guía
-      // pagada para la misma orden. Se deja "creating" y se loguea/alerta con máxima severidad
-      // para reconciliación manual (el dueño puede confirmar el id real en el panel de Skydropx).
+    // Dos situaciones en las que NO se puede liberar el centinela, porque la guía puede existir
+    // (y estar cobrada) del lado de Skydropx:
+    //
+    //  1. `createdShipmentId` → se creó y sabemos su id; solo falló guardarlo.
+    //  2. `SkydropxShipmentUncertainError` → el `POST /shipments` se fue sin respuesta
+    //     concluyente (timeout de 5s, conexión cortada a media petición, 5xx). Skydropx pudo
+    //     haberla procesado y cobrado sin que llegáramos a ver su id. Liberar aquí —que es lo que
+    //     se hacía antes, cuando era inofensivo porque nada reintentaba— convertiría el reintento
+    //     de la Fase O.3 en una segunda guía pagada, justo el desenlace que toda esta mecánica
+    //     existe para impedir. Un 4xx sí libera: ahí Skydropx rechazó la petición explícitamente
+    //     (saldo insuficiente, datos mal armados) y no creó nada.
+    const uncertain = err instanceof SkydropxShipmentUncertainError;
+    if (createdShipmentId || uncertain) {
+      // No basta con dejar el centinela tal cual: un `"creating"` viejo se interpreta como
+      // huérfano y se libera por antigüedad. Se marca con `UNRECONCILED_PREFIX` + el id real (o
+      // `desconocido` cuando ni eso se sabe), que ningún reintento automático toca.
+      // Es best-effort por definición: si tampoco se puede escribir, la orden queda en
+      // `"creating"` y su liberación por antigüedad es el riesgo residual asumido — por eso la
+      // alerta de abajo es incondicional.
+      const markerId = createdShipmentId ?? UNKNOWN_SHIPMENT_ID;
+      try {
+        await Order.update(
+          {
+            skydropxShipmentId: `${UNRECONCILED_PREFIX}${markerId}`,
+            shipmentClaimedAt: null,
+          },
+          { where: { id: order.id, skydropxShipmentId: SHIPMENT_CREATION_SENTINEL } },
+        );
+      } catch (markErr) {
+        logger.error(
+          { orderId: order.id, skydropxShipmentId: markerId, err: markErr },
+          "[skydropx] no se pudo marcar la orden como guía-cobrada-sin-persistir",
+        );
+      }
+
       logger.error(
-        { orderId: order.id, skydropxShipmentId: createdShipmentId },
-        "[skydropx] CRÍTICO: guía cobrada pero no persistida — requiere reconciliación manual",
+        { orderId: order.id, skydropxShipmentId: markerId, uncertain },
+        createdShipmentId
+          ? "[skydropx] CRÍTICO: guía cobrada pero no persistida — requiere reconciliación manual"
+          : "[skydropx] CRÍTICO: no se pudo confirmar si la guía se creó — requiere revisión manual",
       );
       Sentry.captureException(err, {
         level: "fatal",
-        extra: { orderId: order.id, skydropxShipmentId: createdShipmentId },
+        extra: { orderId: order.id, skydropxShipmentId: markerId, uncertain },
       });
-      // Alerta incondicional (sin umbral): dinero real ya cobrado, necesita atención humana ya.
+      // Alerta incondicional (sin umbral): puede haber dinero real ya cobrado, necesita atención
+      // humana ya. Ignora `notifyOnFailure` a propósito.
       void sendAlertEmail({
-        subject: `CRÍTICO: guía Skydropx cobrada sin persistir — orden #${order.id}`,
-        context: { orderId: order.id, skydropxShipmentId: createdShipmentId },
+        subject: createdShipmentId
+          ? `CRÍTICO: guía Skydropx cobrada sin persistir — orden #${order.id}`
+          : `CRÍTICO: no se pudo confirmar la guía Skydropx — orden #${order.id}`,
+        context: {
+          orderId: order.id,
+          skydropxShipmentId: markerId,
+          paqueteria: order.shippingCarrier,
+          motivo: createdShipmentId
+            ? "La guía se creó en Skydropx pero no se pudo guardar su id en el pedido."
+            : "Skydropx no respondió al crear la guía, así que pudo haberse creado y cobrado. Búscala en el panel de Skydropx por fecha y paquetería: si NO existe, reintenta desde el panel con la opción de forzar; si existe, captura su número de guía al marcar el pedido como enviado.",
+        },
       });
       return;
     }
@@ -309,16 +514,20 @@ export async function createShipmentForOrder(order: Order): Promise<void> {
     // liberación también va en su propio try/catch: si fallara, no debe escapar como una
     // rechazo sin capturar de una función fire-and-forget.
     //
-    // Este es el disparador de la alerta "createShipmentForOrder agota reintentos" del roadmap:
-    // no existe un bucle de reintentos real, así que este catch disparándose ES el evento —
-    // severidad de advertencia porque, a diferencia del caso de arriba, aún no se cobró nada.
-    void sendAlertEmail({
-      subject: `Fallo generando guía Skydropx — orden #${order.id}`,
-      context: { orderId: order.id, message: (err as Error).message },
-    });
+    // Alerta operativa del camino automático (webhook): severidad de advertencia porque, a
+    // diferencia del caso de arriba, aún no se cobró nada. Se omite cuando quien llama tiene su
+    // propio canal (`notifyOnFailure: false`): el reintento manual le responde el error al dueño
+    // en el momento, y el barrido de la Fase O.3 alerta una sola vez al agotar sus intentos en
+    // vez de mandar un correo por ciclo.
+    if (notifyOnFailure) {
+      void sendAlertEmail({
+        subject: `Fallo generando guía Skydropx — orden #${order.id}`,
+        context: { orderId: order.id, message: (err as Error).message },
+      });
+    }
     try {
       await Order.update(
-        { skydropxShipmentId: null },
+        { skydropxShipmentId: null, shipmentClaimedAt: null },
         { where: { id: order.id, skydropxShipmentId: SHIPMENT_CREATION_SENTINEL } },
       );
     } catch (releaseErr) {
@@ -329,6 +538,292 @@ export async function createShipmentForOrder(order: Order): Promise<void> {
       Sentry.captureException(releaseErr, { extra: { orderId: order.id } });
     }
   }
+}
+
+/** Momento a partir del cual un centinela reclamado se considera todavía "en vuelo". */
+function claimCutoff(): Date {
+  return new Date(Date.now() - SHIPMENT_RETRY_DELAY_MINUTES * 60_000);
+}
+
+/**
+ * Condición de "centinela huérfano": sigue siendo `"creating"` y se reclamó hace más de
+ * `SHIPMENT_RETRY_DELAY_MINUTES` — o no tiene `shipmentClaimedAt` en absoluto, que es como quedan
+ * las filas anteriores a esa columna (llevan ahí desde antes del deploy, así que son huérfanas por
+ * definición).
+ *
+ * La antigüedad se mide con `shipmentClaimedAt` y **no** con `updatedAt`: este último lo bumpea
+ * cualquier otra escritura sobre el pedido (webhook de envío, avance manual de estado, marcado de
+ * pago), así que un pedido atorado en `"creating"` cuyo estado editara el dueño desde el panel
+ * reiniciaba su reloj en cada edición y no podía liberarse nunca.
+ */
+function staleSentinelWhere(): WhereOptions {
+  const cutoff = claimCutoff();
+  return {
+    skydropxShipmentId: SHIPMENT_CREATION_SENTINEL,
+    [Op.or]: [
+      { shipmentClaimedAt: null },
+      { shipmentClaimedAt: { [Op.lt]: cutoff } },
+    ],
+  };
+}
+
+/**
+ * Libera el centinela **huérfano** de una orden: el `"creating"` que quedó escrito porque el
+ * proceso murió entre reclamarlo y terminar la llamada a Skydropx (redeploy, OOM, crash). Sin
+ * esto la orden nunca podría volver a generar guía — cualquier intento futuro se retira creyendo
+ * que otra llamada la está creando.
+ *
+ * El `WHERE` exige que siga siendo el centinela **y** que se haya reclamado hace más de
+ * `SHIPMENT_RETRY_DELAY_MINUTES`, así que nunca le quita el turno a una creación realmente en
+ * vuelo (que se resuelve en segundos) y dos liberaciones concurrentes no pueden ganar las dos.
+ * Devuelve `true` solo si esta llamada fue la que lo liberó.
+ */
+async function releaseOrphanSentinel(orderId: number): Promise<boolean> {
+  const [released] = await Order.update(
+    { skydropxShipmentId: null, shipmentClaimedAt: null },
+    { where: { id: orderId, ...staleSentinelWhere() } },
+  );
+  if (released === 1) {
+    logger.warn(
+      { orderId },
+      "[skydropx] centinela huérfano liberado: la creación anterior murió sin terminar",
+    );
+  }
+  return released === 1;
+}
+
+/**
+ * Candidatos del barrido de guías pendientes (Fase O.3): pedidos `paid` con tarifa de Skydropx
+ * que siguen sin guía —o con un centinela huérfano— pasado el margen de reintento. Vive aquí
+ * (y no en el barrido) porque la condición depende del significado de los centinelas.
+ *
+ * Ojo con lo que **no** entra: una orden marcada con `UNRECONCILED_PREFIX` (guía ya cobrada,
+ * solo no guardada) queda fuera por construcción — el `WHERE` solo acepta `null` o el centinela
+ * exacto —, que es justo lo que impide que un reintento pague la segunda guía.
+ */
+export function pendingShipmentWhere(oldestCreatedAt: Date): WhereOptions {
+  return {
+    status: "paid",
+    // Los dos, no solo el rate: `createShipmentForOrder` exige ambos y se retira sin llamar a
+    // Skydropx si falta cualquiera. Una orden con rate pero sin cotización entraría en cada ciclo
+    // solo para salirse en la primera línea, gastando los tres intentos y disparando la alerta de
+    // "no se pudo generar la guía" sin haber hecho una sola llamada.
+    skydropxQuotationId: { [Op.ne]: null },
+    skydropxRateId: { [Op.ne]: null },
+    createdAt: { [Op.between]: [oldestCreatedAt, claimCutoff()] },
+    [Op.or]: [{ skydropxShipmentId: null }, staleSentinelWhere()],
+  };
+}
+
+/**
+ * Desenlace de un intento de guía. Distinguir `in-progress` de `failed` importa: son los dos
+ * casos que antes se colapsaban en `null`, y el barrido contaba como fallo (gastando uno de sus
+ * tres intentos y acercando la alerta) el caso en que simplemente **otra llamada tenía el turno**
+ * — p. ej. un pedido que se paga tarde, cuyo webhook está creando la guía en ese preciso momento.
+ */
+export type ShipmentAttempt =
+  | { outcome: "created"; shipmentId: string }
+  /** Otra llamada tiene el centinela: la guía se está creando ahora mismo. No es un fallo. */
+  | { outcome: "in-progress" }
+  /** Puede existir una guía cobrada; `shipmentId` es `null` cuando ni su id se conoce. */
+  | { outcome: "unreconciled"; shipmentId: string | null }
+  | { outcome: "failed" };
+
+/**
+ * Deja la orden lista para un nuevo intento de guía y lo ejecuta. Es el tronco común del reintento
+ * manual (`retryShipmentForOrder`) y del barrido automático: los dos tienen que liberar el
+ * centinela huérfano igual y apagar la alerta por intento igual, y sería un error que divergieran.
+ */
+async function attemptShipment(order: Order): Promise<ShipmentAttempt> {
+  if (order.skydropxShipmentId === SHIPMENT_CREATION_SENTINEL) {
+    // Sigue en vuelo (o ya la tomó otro): no es un fallo, solo no es nuestro turno.
+    if (!(await releaseOrphanSentinel(order.id))) return { outcome: "in-progress" };
+  }
+  // `notifyOnFailure: false`: quien llama informa por su cuenta (respuesta HTTP o alerta al
+  // agotar intentos), en vez de un correo de alerta por cada intento.
+  await createShipmentForOrder(order, { notifyOnFailure: false });
+
+  const after = await Order.findByPk(order.id, {
+    attributes: ["id", "skydropxShipmentId"],
+  });
+  const value = after?.skydropxShipmentId ?? null;
+
+  if (isRealShipmentId(value)) return { outcome: "created", shipmentId: value };
+  const unreconciled = unreconciledShipmentId(value);
+  if (unreconciled) {
+    return {
+      outcome: "unreconciled",
+      shipmentId: unreconciled === UNKNOWN_SHIPMENT_ID ? null : unreconciled,
+    };
+  }
+  // El centinela sigue puesto y no lo pusimos nosotros (`createShipmentForOrder` se retiró con
+  // `claimed === 0`): otra llamada está creando la guía en este momento.
+  if (value === SHIPMENT_CREATION_SENTINEL) return { outcome: "in-progress" };
+  return { outcome: "failed" };
+}
+
+/** Opciones de `retryShipmentForOrder`. */
+export interface RetryShipmentOptions {
+  /**
+   * Confirma que el dueño ya revisó el panel de Skydropx y **no existe** ninguna guía, para el
+   * único caso en que no se puede saber desde aquí: Skydropx no respondió al crear la guía
+   * (marcador `unreconciled:desconocido`). Nunca fuerza nada más — un id de guía real es prueba
+   * de que la guía existe y está cobrada, y ahí no hay nada que confirmar.
+   */
+  force?: boolean;
+}
+
+/**
+ * Reintento manual de la guía de un pedido desde el panel (Fase O.3,
+ * `POST /api/admin/orders/:id/shipment/retry`).
+ *
+ * Existe porque hasta ahora un fallo de `createShipmentForOrder` terminaba en un correo de
+ * alerta y nada más: el pedido quedaba pagado, el cliente esperando y **ninguna ruta** podía
+ * volver a intentarlo. Además cierra el bug latente del centinela: si el proceso moría entre
+ * reclamar `"creating"` y llamar a Skydropx, ese valor quedaba huérfano en la BD y bloqueaba
+ * para siempre cualquier intento posterior.
+ *
+ * Rechaza con `409` todo lo que no sea "falta la guía y se puede generar" — en especial un
+ * pedido que **ya tiene guía real** o una **cobrada sin persistir**: cada guía cuesta dinero,
+ * así que la regla es no generar una segunda ante la duda. A diferencia del camino automático
+ * (fire-and-forget), aquí se espera el resultado y un fallo responde `502`: el dueño está
+ * mirando la respuesta y necesita saber si tiene que insistir o resolverlo a mano.
+ */
+export async function retryShipmentForOrder(
+  orderId: number,
+  { force = false }: RetryShipmentOptions = {},
+): Promise<Order> {
+  const order = await Order.findByPk(orderId);
+  if (!order) {
+    throw new AppError("No se encontró el pedido cuya guía quieres generar.", 404);
+  }
+  if (order.status === "cancelled") {
+    throw new AppError(
+      "Este pedido está cancelado, así que no se le puede generar una guía de envío.",
+      409,
+    );
+  }
+  if (order.status === "pending") {
+    throw new AppError(
+      "Este pedido todavía no está pagado. Espera a que se confirme el pago para generar su guía.",
+      409,
+    );
+  }
+  // Un pedido ya marcado como enviado/entregado no lleva guía nueva. El caso real: la guía
+  // automática falló, el dueño la generó a mano en el panel de Skydropx y capturó su número con
+  // `PATCH /api/admin/orders/:id/status` — eso deja el pedido `shipped` con `skydropxShipmentId`
+  // en `null`, así que sin este guard el botón de reintentar generaría (y cobraría) una segunda
+  // guía para un pedido que ya salió. El barrido no necesita el guard: solo mira pedidos `paid`.
+  if (order.status === "shipped" || order.status === "delivered") {
+    throw new AppError(
+      `Este pedido ya está marcado como ${
+        order.status === "shipped" ? "enviado" : "entregado"
+      }, así que no se le genera una guía nueva: cada guía se cobra. Si necesitas reemplazar la guía, genérala en el panel de Skydropx y captura su número al actualizar el estado del pedido.`,
+      409,
+    );
+  }
+  if (!order.skydropxQuotationId || !order.skydropxRateId) {
+    throw new AppError(
+      "Este pedido se cobró con la tarifa plana de respaldo, así que no tiene una tarifa de Skydropx que convertir en guía. Genérala en el panel de Skydropx y captura el número de guía al marcar el pedido como enviado.",
+      409,
+    );
+  }
+
+  const unreconciled = unreconciledShipmentId(order.skydropxShipmentId);
+  if (unreconciled && unreconciled !== UNKNOWN_SHIPMENT_ID) {
+    throw new AppError(
+      `Este pedido ya tiene una guía cobrada en Skydropx (${unreconciled}) que no se alcanzó a guardar. Búscala en el panel de Skydropx y captura su número de guía al marcar el pedido como enviado; generar otra la cobraría dos veces.`,
+      409,
+    );
+  }
+  if (unreconciled === UNKNOWN_SHIPMENT_ID) {
+    // Skydropx no respondió al crear la guía: pudo haberla creado y cobrado. No se puede decidir
+    // por el dueño, pero tampoco dejarlo atorado — con `force` confirma que ya revisó el panel y
+    // que no existe ninguna guía. Es la única puerta que abre `force`: un id real nunca se fuerza.
+    if (!force) {
+      throw new AppError(
+        "Skydropx no respondió al generar la guía de este pedido, así que pudo haberse creado y cobrado sin que quedara registrada. Búscala en el panel de Skydropx por fecha y paquetería: si existe, captura su número al marcar el pedido como enviado; si no existe, vuelve a intentarlo confirmando que quieres generarla de todos modos.",
+        409,
+      );
+    }
+    const [cleared] = await Order.update(
+      { skydropxShipmentId: null, shipmentClaimedAt: null },
+      { where: { id: orderId, skydropxShipmentId: UNCERTAIN_SHIPMENT_MARKER } },
+    );
+    if (cleared === 0) {
+      throw new AppError(
+        "El pedido cambió mientras se procesaba tu solicitud. Recárgalo y revisa su guía antes de volver a intentarlo.",
+        409,
+      );
+    }
+    order.skydropxShipmentId = null;
+    logger.warn(
+      { orderId },
+      "[skydropx] el dueño confirmó que no existe guía y forzó un nuevo intento",
+    );
+  }
+  if (isRealShipmentId(order.skydropxShipmentId)) {
+    throw new AppError(
+      `Este pedido ya tiene una guía generada en Skydropx (${order.skydropxShipmentId}). Imprímela desde el pedido en vez de generar otra: cada guía se cobra.`,
+      409,
+    );
+  }
+
+  const attempt = await attemptShipment(order);
+  switch (attempt.outcome) {
+    case "created":
+      break;
+    // Dos reintentos simultáneos (doble clic en el panel) los serializa el centinela: uno crea la
+    // guía y el otro llega aquí. No es un error.
+    case "in-progress":
+      throw new AppError(
+        "La guía de este pedido se está generando en este momento. Espera unos segundos y recarga el pedido para ver el resultado.",
+        409,
+      );
+    case "unreconciled":
+      throw new AppError(
+        attempt.shipmentId
+          ? `La guía se creó y se cobró en Skydropx (${attempt.shipmentId}) pero no se pudo guardar en el pedido. Búscala en el panel de Skydropx: no generes otra.`
+          : "Skydropx no respondió al generar la guía, así que pudo haberse creado y cobrado. Búscala en el panel de Skydropx por fecha y paquetería antes de volver a intentarlo: si no existe, reintenta confirmando que quieres generarla de todos modos.",
+        502,
+      );
+    case "failed":
+      throw new AppError(
+        "No se pudo generar la guía con Skydropx. Revisa el saldo de la cuenta y los datos de envío del pedido, y vuelve a intentarlo.",
+        502,
+      );
+  }
+
+  logger.info(
+    { orderId, skydropxShipmentId: attempt.shipmentId },
+    "[skydropx] guía regenerada manualmente desde el panel",
+  );
+
+  const full = await Order.findByPk(orderId, {
+    include: [{ model: OrderItem, as: "items" }],
+  });
+  return full!;
+}
+
+/**
+ * Un intento de guía del barrido automático (Fase O.3). Misma mecánica que el reintento manual
+ * pero sin traducir el resultado a HTTP: devuelve el id creado o `null`.
+ */
+export async function retryShipmentFromSweeper(order: Order): Promise<ShipmentAttempt> {
+  return attemptShipment(order);
+}
+
+/**
+ * Link a la página pública de seguimiento (Fase O.4). `undefined` cuando el pedido no tiene token
+ * (filas anteriores a la columna): en ese caso el correo simplemente no lleva el botón, en vez de
+ * mandar un link roto a una página que respondería 404.
+ *
+ * La ruta `/pedido/<token>` es la que el frontend registra para esta fase; si cambia allá, cambia
+ * aquí — es la única URL que este backend construye hacia el front.
+ */
+function publicOrderUrl(publicToken: string | null): string | undefined {
+  if (!publicToken) return undefined;
+  return `${FRONTEND_URL.replace(/\/+$/, "")}/pedido/${publicToken}`;
 }
 
 /**
@@ -372,6 +867,10 @@ async function sendOrderEmail(
         subtotal: order.subtotal,
         savings: order.savings,
         shipping: order.shipping,
+        // Los dos correos (confirmación y "va en camino") comparten este helper, así que el
+        // cupón se ve en el que el comprador conserve, que es impredecible.
+        couponCode: order.couponCode,
+        couponDiscount: order.couponDiscount,
         total: order.total,
         shippingAddress: {
           street: order.street,
@@ -383,6 +882,7 @@ async function sendOrderEmail(
         },
         shippingCarrier: order.shippingCarrier,
         tracking: opts.tracking,
+        trackingPageUrl: publicOrderUrl(order.publicToken),
       }),
       idempotencyKey: opts.idempotencyKey,
     });
@@ -402,8 +902,14 @@ function sendOrderConfirmationEmail(order: Order): Promise<void> {
   });
 }
 
-/** Correo "tu pedido va en camino" (Fase 8.6), con el número de guía ya disponible. */
-function sendShipmentEmail(
+/**
+ * Correo "tu pedido va en camino" (Fase 8.6), con el número de guía ya disponible.
+ * Exportado porque el avance manual de estado (`updateOrderStatusByAdmin`, Fase O.1) manda
+ * exactamente el mismo correo cuando el dueño captura la guía a mano: los dos caminos
+ * (webhook de Skydropx y panel) comparten template, asunto e `idempotencyKey`, así que el
+ * correo sale una sola vez por pedido sin importar cuál de los dos lo dispare.
+ */
+export function sendShipmentEmail(
   order: Order,
   tracking: { number: string; url?: string; carrier?: string },
 ): Promise<void> {
@@ -419,8 +925,13 @@ function sendShipmentEmail(
  * Skydropx SOLO hacia adelante: un evento tardío o fuera de orden (p. ej. un `in_transit` que
  * llega después de un `delivered`) nunca debe retroceder la orden. Una orden `cancelled` no se
  * reactiva desde este webhook (no está en el rango, así que queda excluida del avance).
+ *
+ * Exportado (junto con `statusesBelow`) porque el avance manual desde el panel
+ * (`updateOrderStatusByAdmin`, Fase O.1) usa exactamente el mismo rango: si el dueño y un
+ * webhook tardío se pelean por el estado del mismo pedido, la regla "solo hacia adelante" tiene
+ * que ser la misma en los dos caminos o el ganador dependería de quién escribió al último.
  */
-const ORDER_STATUS_RANK: Record<string, number> = {
+export const ORDER_STATUS_RANK: Record<string, number> = {
   pending: 0,
   paid: 1,
   shipped: 2,
@@ -446,7 +957,7 @@ function targetOrderStatus(packageStatus: string | null): "shipped" | "delivered
  * el avance sea atómico a nivel de BD — dos eventos concurrentes/fuera de orden no pueden retroceder
  * la orden. `cancelled` no está en el rango, así que nunca aparece aquí (no se reactiva).
  */
-function statusesBelow(target: "shipped" | "delivered"): string[] {
+export function statusesBelow(target: "shipped" | "delivered"): string[] {
   const targetRank = ORDER_STATUS_RANK[target];
   return Object.keys(ORDER_STATUS_RANK).filter((s) => ORDER_STATUS_RANK[s] < targetRank);
 }
@@ -505,8 +1016,15 @@ export async function applyShipmentUpdateFromWebhook(
   const trackingUrl = blankToNull(event.trackingUrl);
   const labelUrl = blankToNull(event.labelUrl);
 
+  // Se busca también por el marcador de "guía cobrada sin persistir": ese evento es justo la
+  // prueba de que la guía existe y de cuál es su id, así que se aprovecha para sanar la fila
+  // (más abajo) en vez de dejarla esperando una reconciliación manual.
   const order = await Order.findOne({
-    where: { skydropxShipmentId: event.shipmentId },
+    where: {
+      skydropxShipmentId: {
+        [Op.in]: [event.shipmentId, `${UNRECONCILED_PREFIX}${event.shipmentId}`],
+      },
+    },
   });
   if (!order) {
     // La guía puede existir ya en Skydropx pero aún no estar persistida: `createShipmentForOrder`
@@ -516,8 +1034,17 @@ export async function applyShipmentUpdateFromWebhook(
     // Skydropx que reintente: cuando reintente, el id real ya estará persistido y el evento
     // encontrará su orden. Solo se pide reintento si HAY una guía en creación; un envío realmente
     // ajeno se descarta con 200 para no entrar en bucle de reintentos.
+    //
+    // "En creación" se acota a los centinelas reclamados hace menos de `SHIPMENT_RETRY_DELAY_MINUTES`:
+    // un centinela viejo NO es una creación en vuelo (por eso el barrido lo libera por huérfano) y
+    // contarlo hacía que cualquier evento de una guía ajena —p. ej. las que el dueño genera a mano
+    // en el panel de Skydropx, que es justo lo que los mensajes de esta fase le piden hacer— se
+    // respondiera 503 y Skydropx la reintentara en bucle mientras esa fila rancia existiera.
     const pendingCreation = await Order.count({
-      where: { skydropxShipmentId: SHIPMENT_CREATION_SENTINEL },
+      where: {
+        skydropxShipmentId: SHIPMENT_CREATION_SENTINEL,
+        shipmentClaimedAt: { [Op.gte]: claimCutoff() },
+      },
     });
     if (pendingCreation > 0) {
       logger.warn(
@@ -539,9 +1066,19 @@ export async function applyShipmentUpdateFromWebhook(
     shipmentStatus: string | null;
     trackingUrl?: string;
     labelUrl?: string;
+    skydropxShipmentId?: string;
   } = { shipmentStatus: status };
   if (trackingUrl) fieldUpdates.trackingUrl = trackingUrl;
   if (labelUrl) fieldUpdates.labelUrl = labelUrl;
+  if (unreconciledShipmentId(order.skydropxShipmentId)) {
+    // Sanado: el id real reemplaza al marcador, así la orden vuelve al camino normal (los
+    // siguientes eventos la encuentran por id directo) y deja de pedir intervención humana.
+    fieldUpdates.skydropxShipmentId = event.shipmentId;
+    logger.warn(
+      { orderId: order.id, skydropxShipmentId: event.shipmentId },
+      "[skydropx] guía cobrada sin persistir reconciliada por su webhook",
+    );
+  }
 
   // Avance de `status` SOLO hacia adelante y atómico a nivel de BD: el objetivo se decide por el
   // `status` del paquete, pero el `WHERE status IN (<rangos por debajo>)` deja que la BD serialice

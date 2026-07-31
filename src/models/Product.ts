@@ -207,6 +207,22 @@ Product.init(
         // migraciones.
         where: { [Op.and]: [{ code: { [Op.ne]: null } }, { code: { [Op.ne]: "" } }] },
       },
+      // Índices de los filtros del catálogo público (v. migración
+      // 20260729120000-products-catalog-indexes.ts). Parciales con el mismo predicado que llevan
+      // todas las consultas públicas: los productos ocultos o dados de baja no los mira ninguna.
+      // Declarados aquí por el mismo motivo que el de arriba (sync({ force: true }) en tests).
+      {
+        name: "products_type_visible",
+        fields: ["type"],
+        where: { [Op.and]: [{ visible: true }, { deletedAt: { [Op.is]: null } }] },
+      },
+      {
+        // Compuesto con `id` porque el listado ordena por ("salePrice", "id"): un índice de una
+        // sola columna no cubre ese ORDER BY y obligaría a un sort.
+        name: "products_sale_price_visible",
+        fields: ["salePrice", "id"],
+        where: { [Op.and]: [{ visible: true }, { deletedAt: { [Op.is]: null } }] },
+      },
     ],
   },
 );

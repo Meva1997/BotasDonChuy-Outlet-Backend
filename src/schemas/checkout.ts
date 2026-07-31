@@ -85,6 +85,26 @@ export const orderItemSchema = z.object({
     .max(99, "Máximo 99 unidades por artículo"),
 });
 
+/** Charset del código de cupón. Alfanumérico y en mayúsculas para que sea dictable por teléfono
+ *  y no dependa de cómo lo teclee el comprador. */
+export const COUPON_CODE_PATTERN = /^[A-Z0-9]{3,32}$/;
+
+/**
+ * Código de cupón normalizado (Fase N.2): se recorta y se sube a MAYÚSCULAS **antes** de
+ * validar. Compartido por el checkout y por `POST /api/coupons/validate`, y esa normalización
+ * temprana es la que hace que `verano25` y `VERANO25` sean el mismo cupón para el índice único
+ * de `coupons.code` **y** para la huella de idempotencia del checkout (si difirieran, un doble
+ * clic con distinta capitalización serían dos pedidos y dos intentos de canje).
+ */
+export const couponCodeSchema = z
+  .string("El cupón debe ser texto")
+  .trim()
+  .toUpperCase()
+  .regex(
+    COUPON_CODE_PATTERN,
+    "El cupón solo lleva letras y números (entre 3 y 32 caracteres). Revisa que esté bien escrito.",
+  );
+
 export const createOrderSchema = z
   .object({
     items: z
@@ -93,6 +113,14 @@ export const createOrderSchema = z
       .max(50, "Demasiados artículos en el pedido"),
     customer: shippingSchema,
     shippingCarrier: z.string().trim().optional(),
+    // Cupón de descuento (Fase N.2). Un solo código por compra: es un `string`, no un arreglo.
+    // El cliente manda el CÓDIGO y jamás un monto — misma regla que rige precios y envío.
+    //
+    // Un cupón inválido, vencido, agotado o ya usado responde 400/409 y **nunca se ignora en
+    // silencio**. Es lo opuesto a la regla del catálogo (donde un filtro inválido se descarta):
+    // ahí ignorarlo devuelve más productos, aquí le cobraría al comprador un precio distinto al
+    // que aceptó en pantalla.
+    couponCode: couponCodeSchema.optional(),
     // Cotización de envío en vivo (Fase 8.4). Opcionales: el checkout puede haber
     // caído al fallback de tarifa plana (Skydropx no disponible → sin cotización),
     // en cuyo caso NO se envían y el servidor cobra `computeShipping`. Cuando sí
@@ -123,3 +151,43 @@ export const cancelOrderSchema = z.object({
 });
 
 export type CancelOrderInput = z.infer<typeof cancelOrderSchema>;
+
+// Avance manual de estado de envío desde el panel admin (Fase O.1).
+// `status` se limita a `shipped`/`delivered` a propósito: `cancelled` sigue siendo
+// exclusivo de `POST /api/admin/orders/:id/cancel` (el único camino que reembolsa y
+// restockea), y `pending`/`paid` los fija el flujo de pago, no el dueño.
+// Los tres campos de guía son opcionales: marcar `delivered` sin guía es válido
+// (entrega en mano o local), y una guía capturada a mano puede no traer URL.
+export const orderStatusUpdateSchema = z.object({
+  status: z.enum(["shipped", "delivered"], {
+    message: 'El estado debe ser "shipped" (enviado) o "delivered" (entregado)',
+  }),
+  trackingNumber: z
+    .string("El número de guía debe ser texto")
+    .trim()
+    .min(1, "El número de guía no puede ir vacío")
+    .max(100, "El número de guía es demasiado largo (máximo 100 caracteres)")
+    .optional(),
+  trackingUrl: z
+    .url("El enlace de rastreo debe ser una URL válida (por ejemplo https://...)")
+    .max(500, "El enlace de rastreo es demasiado largo (máximo 500 caracteres)")
+    .optional(),
+  shippingCarrier: z
+    .string("La paquetería debe ser texto")
+    .trim()
+    .min(1, "La paquetería no puede ir vacía")
+    .max(80, "El nombre de la paquetería es demasiado largo (máximo 80 caracteres)")
+    .optional(),
+});
+
+export type OrderStatusUpdateInput = z.infer<typeof orderStatusUpdateSchema>;
+
+// Reintento manual de la guía de Skydropx (Fase O.3). El body es opcional por completo: el caso
+// normal no lleva nada. `force` solo desbloquea un escenario —Skydropx no respondió al crear la
+// guía, así que pudo haberla creado y cobrado— y significa "ya revisé el panel de Skydropx y no
+// existe ninguna guía de este pedido". Nunca fuerza sobre una guía de id conocido: esa existe.
+export const retryShipmentSchema = z.object({
+  force: z.boolean("La confirmación debe ser verdadero o falso").optional(),
+});
+
+export type RetryShipmentInput = z.infer<typeof retryShipmentSchema>;

@@ -68,6 +68,8 @@ SKYDROPX_CLIENT_SECRET=...
 SKYDROPX_WEBHOOK_SECRET=...             # secreto HMAC del webhook de estado de envío (Fase 8.6); el server no arranca sin él
 SKYDROPX_BASE_URL=https://sb-pro.skydropx.com   # opcional (default: sandbox; producción es pro.skydropx.com)
 SKYDROPX_CARRIERS=dhl,paquetexpress    # opcional: slugs provider_name separados por coma, restringe qué paqueterías cotizar
+SHIPMENT_RETRY_DELAY_MINUTES=15         # opcional: espera antes de reintentar una guía (y antigüedad de un centinela huérfano)
+SHIPMENT_RETRY_SWEEP_INTERVAL_MINUTES=10 # opcional: cada cuánto corre el barrido de guías pendientes
 SHIP_FROM_POSTAL_CODE=38000
 SHIP_FROM_STATE=Guanajuato
 SHIP_FROM_CITY=Celaya
@@ -81,7 +83,34 @@ SHIP_FROM_PHONE=...
 LOG_LEVEL=debug                         # opcional: nivel de pino (default info en prod, debug en dev)
 SENTRY_DSN=https://...ingest.sentry.io/...  # opcional: si falta, Sentry queda deshabilitado (solo se loguea)
 ALERT_EMAIL_TO=tu_correo@ejemplo.com     # opcional: destino de las alertas operativas (correo vía Resend)
+
+# Despliegue detrás de un proxy — opcional, pero necesaria si hay uno (ver nota abajo)
+TRUST_PROXY=1                            # saltos de proxy en los que confiar (1 = lo típico en un PaaS)
+
+# Healthcheck (Fase O.5) — opcional
+HEALTH_READY_TIMEOUT_MS=3000             # margen del chequeo de BD en /health/ready (default 3000)
+
+# Cupones (Fase N.2) — opcional
+MIN_CHARGE_MXN=10                        # total mínimo que acepta el checkout (default 10, el mínimo de Stripe en MXN)
+
+# Avisos de venta al dueño (Fase N.4) — opcionales, pero SIN destinatario la fase queda apagada
+OWNER_NOTIFICATION_EMAIL=duenio@ejemplo.com  # destino del aviso por venta y del resumen diario;
+                                             # si falta, cae a ALERT_EMAIL_TO. Ponerlo aparte permite
+                                             # filtrar "vendiste" de "algo se rompió".
+DAILY_DIGEST_HOUR=8                      # hora local (Celaya) del resumen del día anterior (default 8; válido 1–23)
+DAILY_DIGEST_CHECK_INTERVAL_MINUTES=15   # cada cuánto se revisa si ya toca mandarlo (default 15)
 ```
+
+> **`TRUST_PROXY` cuando la API va detrás de un proxy** (Render, Railway, Fly, nginx,
+> Cloudflare…). Sin ella, `req.ip` es la IP del proxy y **todos** los rate limiters de
+> `src/middlewares/rateLimit.ts` dejan de contar por cliente: pasan a ser un único cupo
+> compartido por toda la tienda (30 consultas/min de `GET /api/orders/lookup/:token` para
+> todos los compradores juntos, no para cada uno). No viene activada por defecto a propósito:
+> confiar en el `X-Forwarded-For` de un servidor expuesto directamente permitiría saltarse los
+> límites rotando IPs inventadas, así que el valor correcto depende del despliegue. Acepta
+> `1` (o el número de proxies encadenados — **empieza aquí**), `loopback`/`10.0.0.0/8`/una lista
+> separada por comas (lo más estricto), o `true` (confía en toda la cadena; solo si el proxy
+> garantiza reescribir el header). Sin definir, se conserva el default de Express.
 
 > **El esquema nunca se sincroniza automáticamente**, ni siquiera en desarrollo. `connectDB()`
 > solo autentica la conexión; todo cambio de esquema pasa por una migración versionada
@@ -134,7 +163,8 @@ pnpm migrate:status   # verifica qué quedó aplicado
 
 | Método   | Ruta                          | Auth | Descripción                                        |
 | -------- | ----------------------------- | ---- | -------------------------------------------------- |
-| `GET`    | `/health`                     | —    | Healthcheck (status + timestamp)                   |
+| `GET`    | `/health`                     | —    | Liveness: el proceso vive (status + timestamp, no toca la BD) |
+| `GET`    | `/health/ready`               | —    | Readiness: ¿puede atender? Consulta la BD → `200`/`503` |
 | `GET`    | `/api/products`               | —    | Lista productos visibles (paginados y filtrables)  |
 | `GET`    | `/api/products/:id`           | —    | Devuelve un producto visible por `id`              |
 | `POST`   | `/api/auth/login`             | —    | Login con email/password; devuelve JWT y usuario   |
@@ -151,10 +181,24 @@ pnpm migrate:status   # verifica qué quedó aplicado
 | `POST`   | `/api/admin/products/import/preview` | ✅ | Previsualiza un `.xlsx` de alta/restock masivo (no escribe nada) |
 | `POST`   | `/api/admin/products/import` | ✅ | Aplica las filas revisadas en el preview (JSON) |
 | `POST`   | `/api/orders`                 | —    | Checkout: crea un pedido desde el carrito          |
+| `GET`    | `/api/orders/lookup/:token`   | —    | Consulta pública del estado y rastreo de un pedido (token opaco del correo) |
 | `POST`   | `/api/shipping/rates`         | —    | Cotiza tarifas de envío en vivo (Skydropx) para el carrito, con fallback a tarifa plana |
+| `POST`   | `/api/coupons/validate`       | —    | Valida un cupón para el carrito y devuelve el descuento, **sin canjearlo** |
+| `GET`    | `/api/admin/coupons`          | ✅   | Lista los cupones (con usos consumidos y conteo vivo de canjes) |
+| `POST`   | `/api/admin/coupons`          | ✅   | Crea un cupón de descuento |
+| `PUT`    | `/api/admin/coupons/:id`      | ✅   | Edita un cupón (`active: false` lo cancela; `code` y usos no se editan) |
+| `DELETE` | `/api/admin/coupons/:id`      | ✅   | Borra un cupón (lo desactiva si ya lo usó algún pedido) |
+| `GET`    | `/api/admin/expenses`         | ✅   | Lista los gastos con su monto vigente, carga mensual y próximo cargo |
+| `GET`    | `/api/admin/expenses/summary` | ✅   | Cuánto hay que retirar cada mes + los próximos cargos con su fecha |
+| `GET`    | `/api/admin/expenses/history` | ✅   | Historial de gastos mes con mes, con los cambios de precio del mes |
+| `POST`   | `/api/admin/expenses`         | ✅   | Da de alta un gasto (con su primera versión de monto) |
+| `PUT`    | `/api/admin/expenses/:id`     | ✅   | Edita un gasto (mandar `amount` **agrega una versión**, no sobrescribe) |
+| `DELETE` | `/api/admin/expenses/:id`     | ✅   | Borra un gasto (lo desactiva si ya generó algún cargo) |
 | `GET`    | `/api/admin/dashboard`        | ✅   | Métricas agregadas del panel (KPIs, ingresos, ventas recientes, inventario) |
 | `GET`    | `/api/admin/orders`           | ✅   | Lista paginada de pedidos con sus items (incl. `unitCost`) |
 | `POST`   | `/api/admin/orders/:id/cancel` | ✅  | Cancela manualmente un pedido `pending`/`paid` (reembolso real vía Stripe si ya estaba pagado) |
+| `PATCH`  | `/api/admin/orders/:id/status` | ✅  | Marca un pedido como `shipped`/`delivered` a mano, con guía capturada (solo hacia adelante) |
+| `POST`   | `/api/admin/orders/:id/shipment/retry` | ✅ | Reintenta generar la guía de Skydropx de un pedido pagado que se quedó sin ella |
 | `GET`    | `/api/admin/reports/monthly`  | ✅   | Ventas por mes por producto (`MonthlyReport[]`; mes en curso con `partial`) |
 | `GET`    | `/api/admin/reports/replenishment` | ✅ | Reposición sugerida (`ReplenishmentRow[]`; pronóstico + cobertura + margen) |
 | `GET`    | `/api/admin/brand`            | —    | Identidad de marca (lectura pública, crea el singleton con defaults si falta) |
@@ -168,6 +212,54 @@ pnpm migrate:status   # verifica qué quedó aplicado
 | `POST`   | `/api/webhooks/stripe`        | 🔑   | Webhook de Stripe (firma verificada; lo invoca Stripe, no de uso manual) |
 | `POST`   | `/api/webhooks/skydropx`      | 🔑   | Webhook de estado de envío de Skydropx (firma HMAC verificada; lo invoca Skydropx, no de uso manual) |
 
+### `GET /health` y `GET /health/ready` (probes del despliegue, Fase O.5)
+
+Son **dos probes distintos y el orquestador debe apuntar cada uno al suyo**:
+
+| Probe | Ruta | Qué contesta | Qué hace el orquestador si falla |
+| --- | --- | --- | --- |
+| **Liveness** | `GET /health` | `200 { status, timestamp }`. **No toca la BD.** | **Reinicia** el contenedor |
+| **Readiness** | `GET /health/ready` | `200 { status: "ok", database: "up", timestamp }` · `503 { status: "unavailable", database, reason, timestamp }` | Lo **saca de rotación** (sin reiniciarlo) |
+
+Separarlos no es cosmético: si el liveness dependiera de Postgres, una caída momentánea de la BD
+haría que el orquestador **reinicie la app** —que no arregla nada y encima tira las requests en
+vuelo— en vez de solo dejar de mandarle tráfico. Por eso `/health` se quedó exactamente como
+estaba y el chequeo real vive en la ruta nueva.
+
+`/health/ready` hace `sequelize.authenticate()` bajo un timeout de `HEALTH_READY_TIMEOUT_MS`
+(3 s por defecto). El timeout es imprescindible: `src/config/database.ts` no fija
+`connectTimeout` ni `statement_timeout` y `pool.acquire` son 30 s, así que con Postgres caído la
+consulta podría colgarse mucho más de lo que el probe espera. El resultado se cachea **1 s** y las
+consultas concurrentes comparten la que está en vuelo (`src/services/readiness.ts`), para que un
+script que martille esta ruta pública no se coma las 5 conexiones del pool y deje esperando a los
+checkouts. Un `503` **nunca** incluye el error de la BD en el cuerpo (ruta pública sin auth): el
+detalle va al log, y solo en los **cambios** de estado, para no llenar el proveedor de logs con una
+línea por sondeo.
+
+Durante el apagado ordenado, `/health/ready` responde `503` con `reason: "draining"` desde el
+instante en que llega la señal — ver [Apagado ordenado](#apagado-ordenado-graceful-shutdown).
+
+> **Hasta dónde llega el `reason: "draining"`.** Garantiza que un sondeo que **alcance a llegar**
+> durante el drenado reciba un `503` honesto en vez de un `200` mentiroso, pero esa ventana dura lo
+> que duren las requests en vuelo: en Node ≥ 19 `server.close()` cierra de inmediato las conexiones
+> keep-alive ociosas y, sin nada que drenar, el proceso sale en milisegundos, así que el sondeo
+> siguiente recibe un error de conexión (no el `503`). Para que un balanceador alcance a verlo haría
+> falta un retardo explícito entre marcar el drenado y `server.close()`, que **no** está
+> implementado porque alargaría cada redeploy. En la práctica el balanceador se entera por el error
+> de conexión, que es igual de concluyente; el `503` cubre el caso en que sí hay tráfico drenando.
+
+Ejemplo de configuración (Kubernetes; en Render/Railway/Fly el healthcheck configurable es el
+readiness):
+
+```yaml
+livenessProbe:
+  httpGet: { path: /health, port: 4000 }
+readinessProbe:
+  httpGet: { path: /health/ready, port: 4000 }
+  periodSeconds: 10
+  timeoutSeconds: 5   # holgado respecto a HEALTH_READY_TIMEOUT_MS
+```
+
 ### `GET /api/products`
 
 Solo expone productos con `visible: true` y oculta el campo `unitCost`.
@@ -176,12 +268,27 @@ Solo expone productos con `visible: true` y oculta el campo `unitCost`.
 | ----------- | ------ | ------- | -------------------------------------------- |
 | `categoria` | string | —       | Filtra por `type` (`bota`, `sombrero`, `ropa`) |
 | `talla`     | number | —       | Filtra productos que incluyan esa talla      |
+| `q`         | string | —       | Busca en `name` y `code` (parcial, sin distinguir mayúsculas). Máx. 100 caracteres |
+| `orden`     | string | —       | `precio_asc` · `precio_desc` · `novedad`. Sin valor, ordena por `id` ascendente |
+| `precioMin` | number | —       | Precio de venta mínimo (inclusive)           |
+| `precioMax` | number | —       | Precio de venta máximo (inclusive)           |
 | `page`      | number | `1`     | Página (se ajusta al rango `[1, totalPages]`) |
 | `perPage`   | number | `9`     | Elementos por página                         |
 
+**Un parámetro inválido se ignora en silencio; nunca responde `400`.** Un enlace viejo o un bot con
+basura en la query string debe seguir viendo el catálogo, no un error. Aplica a un `orden`
+desconocido, a un precio no numérico o negativo y a una talla vacía o no entera. Un `precioMin`
+mayor que `precioMax` **no se invierte**: devuelve cero resultados, que es la respuesta honesta a lo
+que se pidió.
+
+En `q`, los comodines `%` y `_` se buscan como **texto literal** (`escapeLike`, ver
+`src/utils/escapeLike.ts`).
+
 Respuesta: `{ products, total, page, perPage, totalPages, availableSizes }`. `Product.sizes`
 (repetido por talla) y `Product.stock` (total) son campos `VIRTUAL` derivados de la tabla
-`ProductSize` cuando se incluye esa asociación.
+`ProductSize` cuando se incluye esa asociación. `availableSizes` se acota por `categoria`, `q` y el
+rango de precio, pero **nunca por `talla`**: si se acotara por la talla ya elegida, elegir una
+vaciaría el propio selector y no habría forma de cambiarla.
 
 ### `/api/admin/products` (CRUD admin, requiere JWT)
 
@@ -253,11 +360,20 @@ datos actuales, a propósito: no se deduplica en silencio.
 ### `POST /api/orders` (checkout público)
 
 Convierte el carrito del cliente en un pedido persistido. Body:
-`{ items: [{ productId, size, quantity }], customer, shippingCarrier?, quotationId?, rateId? }`,
-validado con `createOrderSchema` (zod). El backend es la **autoridad de precios, stock y envío**:
+`{ items: [{ productId, size, quantity }], customer, shippingCarrier?, quotationId?, rateId?,
+couponCode? }`, validado con `createOrderSchema` (zod). El backend es la **autoridad de precios,
+stock, envío y descuentos**:
 
-- **Recalcula los totales** (`subtotal`, `savings`, `shipping`, `total`) en el servidor con el
-  service `cart` — el cliente nunca envía montos.
+- **Recalcula los totales** (`subtotal`, `savings`, `shipping`, `couponDiscount`, `total`) en el
+  servidor con el service `cart` — el cliente nunca envía montos.
+- **Cupón (Fase N.2):** `couponCode` es opcional, uno solo por compra, y es un **código, nunca un
+  monto**. El servidor lo revalida y **canjea el uso dentro de la misma transacción** que descuenta
+  el stock, así que dos compradores peleando el último uso reciben uno `201` y el otro `409`. El
+  descuento se calcula sobre la mercancía neta (`subtotal − savings`) y **nunca sobre el envío**, y
+  queda congelado en `couponCode`/`couponDiscount` como los precios del `OrderItem`. Un cupón
+  inválido, vencido, agotado o ya usado por ese correo revierte todo (sin pedido y sin stock
+  descontado) y **jamás se ignora en silencio**. Invariante:
+  `total = subtotal − savings − couponDiscount + shipping`. Ver **Cupones de descuento** más abajo.
 - **Envío autoritativo (Fase 8.4):** `quotationId`/`rateId` son opcionales pero van **juntos o
   ninguno** (si el checkout cotizó en vivo contra `POST /api/shipping/rates` los manda; si cayó al
   fallback de tarifa plana, los omite). Cuando vienen, el servidor **re-consulta** esa cotización en
@@ -282,6 +398,24 @@ validado con `createOrderSchema` (zod). El backend es la **autoridad de precios,
 - **Topes anti-abuso** (zod): máximo `99` unidades por artículo y `50` artículos por pedido (`400`
   si se exceden). El límite **real** de existencias por talla lo impone el descuento atómico: pedir
   más unidades de las que hay en esa talla (o una talla inexistente) devuelve `409`.
+- **Idempotente (Fase O.2):** un reenvío del mismo checkout dentro de una ventana corta (**60 s**)
+  no crea un segundo pedido — devuelve la **misma respuesta del original** (mismo `order`, mismo
+  `clientSecret`, mismo `201`). Sin esto, un doble clic creaba otra fila `Order`, otro PaymentIntent
+  real y **descontaba el stock otra vez**, y ese inventario fantasma no se liberaba hasta que
+  `pendingOrderSweeper` alcanzara la orden (30–40 min). Se devuelve el original en vez de un `409`
+  —al revés que el import masivo— porque el cliente está esperando para pagar: un `409` lo dejaría
+  sin poder comprar y con stock apartado a su nombre. Hay **dos capas de clave**: el header
+  `Idempotency-Key` (opcional, un valor nuevo por intento de compra; reusarlo con **otro** carrito
+  responde `409`, y uno de más de 200 caracteres `400`) y, si no viene, una huella automática del
+  carrito + los datos del cliente (renglones agregados y ordenados, así que el mismo carrito en
+  distinto orden se reconoce igual). Es un mapa **en memoria**, deliberadamente no persistido —
+  misma decisión que el guard del import masivo: protege del accidente, no del abuso; contra el
+  abuso está `orderRateLimiter`. Un intento fallido libera la clave para que el comprador pueda
+  corregir y reintentar de inmediato, **salvo** cuando el pedido ya se había creado y lo que falló
+  fue el cobro: ahí la clave se conserva, porque la orden y su stock descontado ya existen y liberarla
+  convertiría el reintento justo en el pedido duplicado que todo esto evita. La respuesta repetida
+  trae el header `Idempotency-Replayed: true` (el cuerpo es idéntico al del original a propósito, así
+  que es lo único que las distingue); va en `exposedHeaders` del CORS para que el navegador lo lea.
 
 La ruta está limitada por `orderRateLimiter` (Fase H.3, mismo patrón que `authRateLimiter` /
 `shippingRateLimiter`, `10` req/min por IP): cada request exitoso crea un PaymentIntent real de
@@ -292,11 +426,102 @@ pagar). Solo aplica a la ruta pública `POST /`, no a `adminOrder.routes.ts` (ya
 La orden nace en `status: "pending"` / `paymentStatus: "unpaid"`, se le crea un **PaymentIntent real
 de Stripe** y se guarda su `paymentIntentId` (`paymentStatus: "processing"`). Respuesta `201`:
 `{ order, clientSecret }` — el `clientSecret` sirve para que el cliente confirme el pago. Errores:
-`400` (body/cliente inválido), `409` (sin stock o producto no disponible, con el ítem en el mensaje).
+`400` (body/cliente inválido, código de cupón mal formado, o `Idempotency-Key` demasiado larga),
+`404` (el cupón no existe), `409` (sin stock o producto no disponible —con el ítem en el mensaje—,
+tarifa de envío vencida, `Idempotency-Key` reusada con otro carrito, o el cupón no aplica).
 
 Todos los errores responden `{ message }` (los de validación agregan `details`). El `message` es la
 copia que el front pinta tal cual, así que es una frase accionable en español: nombra el producto y,
 cuando aplica, cuántas piezas quedan. Ver **Errores y mensajes** más abajo.
+
+### Cupones de descuento (Fase N.2)
+
+La única palanca de descuento que no toca el catálogo. `POST /api/coupons/validate` `[público]` deja
+que el checkout muestre el descuento **antes** de pagar y el CRUD de `/api/admin/coupons` `[auth]` lo
+administra: `code` (alfanumérico en mayúsculas, único), `type: percent|fixed`, `value`, `maxDiscount?`
+(tope en pesos, solo para porcentajes), `minSubtotal?`, `maxRedemptions?` (`null` = ilimitado),
+`oncePerCustomer` (default `true`), `startsAt?`/`expiresAt?`, `active` y `description?`. Pueden haber
+varios activos a la vez, pero **uno solo por compra**.
+
+**Cómo se limita a un uso por persona sin cuentas de cliente: por el CORREO del pedido, no por la
+IP.** La IP es la opción intuitiva y la peor: detrás de CGNAT (cualquier plan móvil, Izzi,
+Totalplay) media colonia sale por una sola dirección, así que un canje bloquearía compradores que
+nunca usaron el cupón; y `req.ip` depende de `TRUST_PROXY`, así que desplegado detrás de un proxy sin
+esa variable **todos** los compradores se ven con la IP del proxy y el primer canje mataría el cupón
+para la tienda entera. El correo se normaliza (minúsculas, `+alias` recortado, puntos de Gmail
+quitados) y lo hace cumplir un **índice único parcial** de Postgres, no un `SELECT` + `if`. La IP se
+guarda en la fila de canje **solo como dato forense**, para que el dueño detecte patrones a mano.
+
+**La barrera dura contra el abuso es `maxRedemptions`**, no el límite por persona: acota la pérdida
+máxima a `usos × descuento` sin importar quién canjee. Se descuenta con un `UPDATE` condicional
+dentro de la transacción del checkout, igual que el stock.
+
+**El uso se devuelve** cuando un pedido se abandona o se cancela (el barrido de pedidos pendientes y
+`POST /api/admin/orders/:id/cancel`). Sin eso, un cupón de 50 usos se agotaría con carritos que nunca
+se pagaron. Un reembolso fallido **no** libera el uso, igual que no repone stock.
+
+`POST /api/coupons/validate` **no canjea nada** (consultarlo diez veces no gasta la promoción) y usa
+la misma función de descuento que el checkout, así que el monto que muestra es el que se cobra. Lo
+que **no** garantiza es disponibilidad: el tope global y el uso por persona se re-deciden al pagar,
+así que el front tiene que estar listo para el `409`. Su `email` es opcional (en el checkout el cupón
+se captura antes de los datos de envío) y la respuesta lo declara con `perCustomerChecked`. Está
+limitado por `couponRateLimiter` (`20` req/min por IP), y aquí el límite **sí** es la defensa
+principal: los códigos de cupón no son secretos ni UUIDs, así que un cupón dirigido a una sola
+persona debe ser **largo y aleatorio**, nunca `VIP`.
+
+En el panel, `active: false` es la forma de **cancelar** un cupón; `code` y los usos consumidos no se
+pueden editar (si el código está mal, se desactiva y se crea otro), y bajar `maxRedemptions` por
+debajo de los usos ya consumidos es válido — es cómo se frena una promoción en caliente. `DELETE`
+desactiva en vez de borrar cuando ya hay pedidos que usaron el cupón, para no romper el histórico.
+`startsAt`/`expiresAt` aceptan una fecha sin hora (`2026-08-31`) y la interpretan en la zona de la
+tienda (`America/Mexico_City`), con el vencimiento al final del día: un `2026-08-31` leído como UTC
+habría matado la promoción la tarde del 30 en México.
+
+### Gastos y suscripciones (Fase N.3)
+
+Da de alta cualquier gasto —Render, Vercel, la base de datos, la renta, publicidad— con **cada cuánto
+se paga** y **cuánto**, y responde las dos preguntas que el panel no podía contestar: *¿cuánto tengo
+que retirar de lo ganado?* y *¿cuánto gasté cada mes, y cambió algo?*. Sustituye la constante
+`GASTOS_FIJOS = $2,000` que el dashboard restaba para calcular la GANANCIA NETA — el KPI más
+importante del panel era, hasta esta fase, un número inventado.
+
+**El monto no es una columna del gasto: se guarda versionado por fecha de vigencia.** Cuando Render
+sube de $290 a $340, se agrega una versión nueva y julio **sigue valiendo $290** en el historial: los
+meses cerrados nunca se reescriben. Esa misma lista de versiones es lo que alimenta el arreglo
+`changes` de cada mes en `/history`, o sea la respuesta consultable a "¿algo cambió?". Guardar además
+un "monto actual" en el gasto habría dejado dos fuentes de verdad que se desincronizan con el primer
+edit mal hecho, así que `currentAmount` se **calcula**.
+
+**Todo en pesos.** Render y Vercel cobran en USD, pero lo que se captura es lo que cobró la tarjeta:
+si el dólar sube y el cargo pasa de $130 a $145, eso **es** un cambio de monto y queda en el
+historial. Sin API de tipo de cambio que se desactualice en silencio.
+
+**Dos números distintos, y confundirlos es el error caro:**
+
+- **El gasto real de un mes** (`/history`) se calcula generando las fechas de cargo y atribuyendo
+  cada una a su mes con el monto vigente **en esa fecha**. Una anualidad de dominio aparece completa
+  en su mes de renovación, no untada a lo largo del año. Los meses van sin huecos (los meses sin
+  gasto salen en `$0`) y el mes en curso trae `partial: true`.
+- **La carga mensual normalizada** (`monthlyRunRate` en `/summary` y en cada fila del listado)
+  convierte cada gasto recurrente a su equivalente por mes: anual ÷ 12, trimestral ÷ 3, semanal
+  × 52/12 (no × 4 — el año tiene 52 semanas, y usar 4 subestimaría el gasto anual en casi un mes).
+  Es lo que responde "cuánto retirar" y lo que el dashboard prorratea por ventana. Los gastos de
+  única vez **no** entran aquí: cuentan completos en su mes y nunca más.
+
+`/summary` completa la respuesta con `upcomingCharges`: qué se cobra, de cuánto y **en qué fecha**
+durante los próximos 60 días.
+
+Detalles que muerden y ya están resueltos: las fechas son `DATEONLY` (un cargo es un día de
+calendario, no un instante — esquiva el problema de zona horaria que los cupones tuvieron que
+resolver con un offset fijo); una suscripción que arranca el **31** genera 31 de enero → 28 de
+febrero → **31 de marzo**, sin arrastrar el clamp; apagar un gasto le fija `endsAt` en hoy, para que
+"hasta cuándo cobró" sea un dato y no una inferencia sobre `updatedAt`; y `DELETE` **desactiva** en
+vez de borrar si el gasto ya generó algún cargo, porque ese dinero se gastó y borrarlo dejaría el
+historial mintiendo sobre meses cerrados.
+
+El seed crea una fila recurrente de `$2,000/mes` equivalente a la constante vieja, para que la
+GANANCIA NETA no dé un salto el día del deploy. Es una fila normal: se edita, se parte en gastos
+reales o se borra.
 
 ### `GET /api/admin/dashboard` y `GET /api/admin/orders` (panel admin)
 
@@ -307,8 +532,11 @@ cuando aplica, cuántas piezas quedan. Ver **Errores y mensajes** más abajo.
   `"7" | "30" | "90"` juntas, cada una comparada contra su propio periodo anterior (p. ej. "30"
   compara `hoy-29d..hoy` vs los 30 días previos) para el `trend`. El frontend alterna en cliente
   (`DataSection`), sin query params. Valores monetarios formateados en `es-MX` (`"$13,531.00"`).
-  `GASTOS FIJOS` es una constante mensual hardcodeada (`$2,000.00`, no existe un modelo de gastos)
-  prorrateada a la ventana seleccionada (`$2,000 × ventana/30`).
+  `GASTOS` sale de los gastos capturados en `/api/admin/expenses` (Fase N.3, antes era una
+  constante de `$2,000` hardcodeada): los recurrentes como carga mensual prorrateada a la ventana
+  (`× ventana/30`) más los de única vez que caigan dentro de ella, y el subtítulo separa las dos
+  mitades. Cada ventana suma **sus propios** gastos de única vez, así que el `trend` de
+  `GANANCIA NETA` compara periodos de verdad.
 - `revenueByPeriod`: las tres series `"7" | "30" | "90"` juntas, un punto por día (incluye días en
   `$0`, no se omiten). El agrupamiento y el formateo de fechas son **ambos en UTC** (`timeZone:
   "UTC"` explícito), para que el resultado no dependa de la zona horaria del host donde corre el
@@ -344,6 +572,57 @@ guía generada, no se restockea) o ya `cancelled` responde `409`.
   reactivar una orden que un admin ya canceló (con su stock ya repuesto). Si eso ocurre, la orden
   queda `cancelled` y se dispara una alerta operativa para revisar si corresponde un reembolso
   manual — ver `CLAUDE.md`.
+
+### `GET /api/orders/lookup/:token` (consulta pública del pedido, Fase O.4)
+
+Deja al comprador ver en qué va su pedido **sin cuenta ni contraseña**. No hay cuentas de cliente ni
+ninguna otra lectura pública de órdenes: hasta esta fase, lo único que tenía después de pagar era el
+correo de confirmación, así que si lo borraba o le caía en spam, cada "¿ya salió mi pedido?" acababa
+siendo trabajo manual del dueño por WhatsApp.
+
+- **La credencial es el token**, un UUID opaco (`orders.publicToken`, con índice único) que se genera
+  en `createOrder`, viaja como link en el correo de confirmación (`/pedido/<token>`) y se devuelve
+  también en el `201` del checkout. **No** es `id + email`: los ids son secuenciales y un correo es
+  adivinable, así que ese par sería enumerable aunque se le pusiera rate limit.
+- **Proyección explícita**, no la fila del pedido con exclusiones: se arma campo por campo y el
+  `SELECT` va acotado, así que una columna nueva en `Order` **no aparece** hasta que alguien la
+  agregue a mano — el modo de fallo seguro. Devuelve estado, rastreo, totales con los precios
+  congelados y la dirección de envío. Quedan fuera `unitCost`, `paymentIntentId`, `refundId`,
+  `labelUrl` (la etiqueta imprimible es del dueño), los ids de Skydropx, `shippingRequiresDropoff`,
+  el propio token y el correo/teléfono del cliente (el link se comparte con facilidad).
+  `refundedAt` **sí** va: un pedido cancelado tiene que decir cuándo se devolvió el dinero.
+- Un token **inexistente, alterado o mal formado** responde siempre el **mismo `404` con el mismo
+  mensaje** (misma regla anti-enumeración que el login). El mal formado se rechaza antes de tocar la
+  BD: la columna es `uuid` y Postgres rechazaría la comparación con un error que el `errorHandler`
+  degradaría a un **500** — mismo problema que `parseId` resuelve para los `:id` numéricos.
+- Rate limiter propio (`orderLookupRateLimiter`, **30 req/min por IP**). Holgado a propósito: quien
+  recarga esa página es un comprador esperando su pedido, y adivinar un UUID es inviable con o sin
+  límite. Ojo con el "por IP": detrás de un proxy sin `TRUST_PROXY` configurada (ver
+  [Variables de entorno](#variables-de-entorno)) ese cupo es uno solo para toda la tienda, y el
+  comprador 31 del minuto recibe un 429 en su propio pedido.
+
+### `PATCH /api/admin/orders/:id/status` (envío/entrega manual, Fase O.1)
+
+La única forma de que un pedido llegue a `shipped`/`delivered` **sin pasar por Skydropx**. Antes de
+esta ruta, `Order.status` solo avanzaba ahí desde el webhook de Skydropx, o sea únicamente cuando
+Skydropx reporta una guía que Skydropx creó: un pedido que en el checkout cayó al **fallback de
+tarifa plana** nace sin `skydropxRateId` → no se genera guía → nunca llega el webhook → se quedaba
+en `paid` **para siempre**, sin correo de "va en camino" y contando como pendiente en el dashboard.
+
+Body: `{ status: "shipped" | "delivered", trackingNumber?, trackingUrl?, shippingCarrier? }`.
+No agrega ninguna columna — las cuatro ya existen en `Order` desde las Fases 8.5/8.6.
+
+- **Solo hacia adelante**, con el mismo rango que aplica el webhook
+  (`pending < paid < shipped < delivered`): retroceder responde `409`. **Repetir el estado actual sí
+  se permite** — es como se agrega una guía a un pedido ya marcado enviado sin ella.
+- **`cancelled` no se toca aquí**: no es un valor aceptado en el body (`400`) y un pedido ya
+  cancelado responde `409`. Cancelar sigue siendo exclusivo de `POST /api/admin/orders/:id/cancel`,
+  el único camino que reembolsa y restockea. Un pedido todavía `pending` también responde `409` (no
+  se despacha mercancía sin pago confirmado).
+- El correo **"tu pedido va en camino" sale exactamente una vez por pedido**, lo dispare el panel o
+  el webhook: los dos comparten el mismo guard atómico (`WHERE trackingNumber IS NULL`) y el mismo
+  `idempotencyKey` de Resend. Marcar `delivered` **sin** guía es válido (entrega en mano o local) y
+  no manda correo.
 
 ### `GET /api/admin/reports/monthly` y `/replenishment` (reportes)
 
@@ -395,6 +674,34 @@ en Skydropx: `tracking_number`/`label_url` no llegan en la respuesta, así que
 `trackingNumber`/`trackingUrl`/`labelUrl` quedan en `null` hasta que el webhook de Skydropx
 (Fase 8.6) los reporte — ver `roadmaps-completados/roadmap-skydropx.md` para el detalle completo.
 
+**Reintento de guía (Fase O.3):** si esa única llamada falla (Skydropx caído, saldo agotado, o el
+proceso muere a media creación), el pedido queda pagado y sin guía y **ningún webhook va a llegar por
+una guía que nunca se creó**. `POST /api/admin/orders/:id/shipment/retry` `[auth]` lo reintenta desde
+el panel, y `src/services/shipmentRetrySweeper.ts` hace lo mismo solo cada
+`SHIPMENT_RETRY_SWEEP_INTERVAL_MINUTES` sobre los pedidos `paid` con tarifa de Skydropx que siguen sin
+guía pasados `SHIPMENT_RETRY_DELAY_MINUTES` (hasta 3 intentos por pedido, con una sola alerta por
+correo al agotarlos). Ese mismo margen sirve para **liberar el centinela huérfano**: el valor
+`"creating"` que quedaría bloqueando al pedido para siempre si el proceso muriera entre reclamarlo y
+llamar a Skydropx. La antigüedad de ese centinela se mide con la columna propia
+`orders.shipmentClaimedAt` (poblada al reclamarlo) y **no** con `updatedAt`, que cualquier otra
+escritura sobre el pedido reiniciaría.
+
+**Cada guía se cobra**, así que ninguno de los dos caminos genera una segunda ante la duda: un pedido
+con `skydropxShipmentId` real se rechaza con `409`, y el caso "Skydropx la creó y cobró pero no se
+pudo guardar su id" se marca con el valor especial `unreconciled:<id real>`, que nadie reintenta y que
+conserva el id para localizar la guía en el panel de Skydropx (el webhook de esa guía, si llega,
+reconcilia la fila solo). Un pedido ya marcado como `shipped`/`delivered` también se rechaza: ahí la
+guía suele haberse generado a mano en el panel de Skydropx y capturado con el `PATCH .../status`.
+
+Cuando Skydropx **no responde** al crear la guía (timeout, conexión cortada, 5xx) no se puede saber si
+la creó y la cobró, así que el pedido se marca `unreconciled:desconocido` en vez de liberarse para un
+reintento: liberarlo es exactamente lo que pagaría la segunda guía. Un `4xx` sí libera (ahí Skydropx
+rechazó la petición y no creó nada). Ese es el único caso que el dueño puede **forzar** desde el panel
+(`{ "force": true }` en el body) una vez que confirmó que no existe ninguna guía; un id real nunca se
+fuerza. El endpoint **espera el resultado**: `200` con la guía creada, `409` si el pedido no aplica
+(ya tiene guía, se está generando, no está pagado, está cancelado, ya se marcó como enviado/entregado,
+se cobró con tarifa plana, o quedó sin conciliar) y `502` si Skydropx vuelve a fallar.
+
 **Webhook de estado de envío (Fase 8.6):** `POST /api/webhooks/skydropx`
 (`src/routes/webhook.routes.ts` → `order.controller.ts`'s `skydropxWebhook`) se monta con el mismo
 `express.raw` que el de Stripe y verifica la firma **HMAC-SHA512** del header
@@ -423,7 +730,11 @@ exige `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET` (el server no arranca sin el
   lock de la fila de la orden, solo mientras esté `pending`).
 - **Barrido:** `src/services/pendingOrderSweeper.ts` corre cada `PENDING_ORDER_SWEEP_INTERVAL_MINUTES`,
   reconcilia las órdenes `pending` viejas contra Stripe y libera su stock (o las marca `paid` si el
-  PaymentIntent ya se pagó y se perdió el webhook).
+  PaymentIntent ya se pagó y se perdió el webhook). También alcanza a las órdenes `pending` **sin**
+  `paymentIntentId` —las que quedaron así porque Stripe falló cuando la orden ya estaba escrita con su
+  stock descontado—: no hay nada que reconciliar (el cliente nunca recibió un `clientSecret`, así que
+  ese pedido no puede pagarse) y son las únicas que ningún webhook va a tocar, así que se les repone el
+  stock directo.
 - **Correo de confirmación (Fase 9.3):** al pasar a `paid`, `markOrderPaidFromWebhook` dispara el
   correo de confirmación (Resend) con el resumen del pedido. La transición a `paid` es un **UPDATE
   atómico condicional** (`WHERE status: "pending", paymentStatus != 'paid'`): garantiza que el correo
@@ -544,12 +855,42 @@ todo error no controlado que llegue al `500`.
 — si falta, no hace nada y solo loguea un warning) en dos casos: falla al generar una guía de
 Skydropx después de haber pagado el pedido (`createShipmentForOrder`), y fallas repetidas (3
 seguidas) del barrido de órdenes pendientes contra Stripe para la misma orden. Estos son avisos
-operativos, no un sistema de reintentos automáticos.
+operativos, no un sistema de reintentos automáticos — con una excepción: desde la Fase O.3 la guía
+fallida **sí** se reintenta sola (`shipmentRetrySweeper`), y por eso ese camino apaga la alerta por
+intento y manda una sola al agotar los 3.
+
+## Avisos de venta al dueño (Fase N.4)
+
+`alert.service.ts` solo avisa cuando algo **falla**. Los avisos de **negocio** viven aparte, en
+`src/services/ownerNotification.service.ts` y `src/services/dailySalesDigest.ts`, y van a
+`OWNER_NOTIFICATION_EMAIL` (con fallback a `ALERT_EMAIL_TO`). **Si ninguna de las dos está definida,
+no se manda nada** — ese es el interruptor de la función, no hay una variable booleana aparte.
+
+Son dos correos que responden preguntas distintas:
+
+- **Aviso por venta.** Sale al confirmarse el pago, bajo el mismo guard atómico que el correo de
+  confirmación al cliente, así que llega **exactamente una vez** por pedido. Trae tallas, cantidades,
+  dirección y contacto, y avisa de las dos cosas que obligan a actuar a mano: que el pedido se cobró
+  con la tarifa plana de respaldo (**no habrá guía automática**) y que la paquetería no recoge a
+  domicilio. El asunto es autocontenido (`Venta #142 — $1,850.00 — 3 piezas — GUÍA MANUAL`) para poder
+  leerse sin abrir el correo.
+- **Resumen diario.** A las `DAILY_DIGEST_HOUR` (8:00 hora de Celaya) con el **día anterior completo**:
+  totales, tabla por pedido, comparación contra el día previo y una sección de pedidos que requieren
+  acción. Se manda **también los días sin ventas**, para que un día flojo no se confunda con un cron
+  caído.
+
+Nota de despliegue: a diferencia de los correos al cliente, esta función **ya sirve sin dominio
+verificado en Resend**, porque el destinatario es el propio dueño de la cuenta de Resend.
 
 ## Apagado ordenado (graceful shutdown)
 
-`SIGTERM`/`SIGINT` disparan un `gracefulShutdown` compartido en `src/app.ts` que: (1) detiene el
-`pendingOrderSweeper` (deja de abrir trabajo nuevo), (2) `server.close()` — deja de aceptar
+`SIGTERM`/`SIGINT` disparan un `gracefulShutdown` compartido en `src/app.ts` que: (0) pone el
+readiness en rojo (`markDraining()`, Fase O.5) — a partir de ahí `GET /health/ready` responde `503`
+con `reason: "draining"` sin consultar la BD, así ningún sondeo que llegue mientras se drena recibe
+un `200` que ya no es cierto (ver el [alcance real](#get-health-y-get-healthready-probes-del-despliegue-fase-o5)
+de esa ventana); (1) detiene los tres crons
+—`pendingOrderSweeper`, `shipmentRetrySweeper` y el resumen diario de ventas— (dejan de abrir trabajo
+nuevo), (2) `server.close()` — deja de aceptar
 conexiones nuevas y espera a que terminen las que están en vuelo, (3) cierra el pool de Sequelize.
 Así un redeploy no corta una transacción de checkout a medias. Señales repetidas se ignoran, y un
 timeout de 10s (`unref()`ado) fuerza `process.exit(1)` si alguna conexión colgada bloquea el cierre.
@@ -602,7 +943,8 @@ Suite automatizada con **Jest + ts-jest + supertest** (Fase H.1 — ver
 [`roadmaps-completados/roadmap-testing.md`](roadmaps-completados/roadmap-testing.md) para el desglose por partes; las **12 partes** — infra,
 BD de test, servicios puros, auth, checkout, idempotencia de webhooks, cancelación/reembolso manual,
 envío en vivo, cliente Skydropx, CRUD admin de productos/imágenes, marca/usuarios admin y
-agregaciones de dashboard/reports — están **completas**: 19 suites / 183 tests en verde). Los tests
+agregaciones de dashboard/reports — están **completas**: 37 suites / 412 tests en verde, y cada
+fase nueva suma la suya). Los tests
 viven en `tests/` (fuera de `src/`, para que `tsc` no los incluya en el build de producción);
 `ts-jest` los transpila en memoria.
 
@@ -613,9 +955,11 @@ pnpm test <patrón>      # una parte (p. ej. pnpm test auth)
 ```
 
 **Tres niveles de prueba:** (1) *unit puro* sin BD (`cart`, `forecast`, `formatMoney`, `date`,
-`skydropx` con `fetch` mockeado, `dashboard`/`reports`, `sentry`, `errorHandler`);
-(2) *integración HTTP* con `request(app)...` contra un Postgres de test real (`auth`, `checkout`,
-`products`, `shippingRates`, `adminProducts`, `adminProductImport`, `adminBrandUsers`); (3)
+`skydropx` con `fetch` mockeado, `dashboard`/`reports`, `sentry`, `errorHandler`, `idempotency`,
+`readiness`);
+(2) *integración HTTP* con `request(app)...` contra un Postgres de test real (`auth`,
+`checkout`, `checkoutIdempotency`, `adminOrderStatus`, `products`, `shippingRates`, `adminProducts`,
+`adminProductImport`, `adminBrandUsers`, `healthReady`); (3)
 *servicio + SDK mockeado* para
 concurrencia/idempotencia (`webhooks`, `cancelOrder`). **Stripe,
 Skydropx y Resend van SIEMPRE mockeados** (cuestan dinero o mandan correos reales); la **BD no se
@@ -624,8 +968,8 @@ Postgres de test y cada una dropea/recrea las tablas en su `beforeAll` (`sync({ 
 que correrlas en paralelo produce errores intermitentes de tipo `ENUM ya existe`; un solo worker
 serializa todo y elimina la carrera.
 
-Al importar `src/app.ts` con `NODE_ENV=test`, un gate salta el `connectDB()`, el
-`pendingOrderSweeper` y el `app.listen(...)`, así que Supertest levanta `app` sin abrir puerto ni
+Al importar `src/app.ts` con `NODE_ENV=test`, un gate salta el `connectDB()`, los barridos
+(`pendingOrderSweeper`/`shipmentRetrySweeper`) y el `app.listen(...)`, así que Supertest levanta `app` sin abrir puerto ni
 conectar a la BD. La config de test (`.env.test`, gitignored) trae llaves dummy que satisfacen el
 fail-fast de cada `src/config/*` más el `DATABASE_URL` de pruebas.
 
@@ -661,9 +1005,9 @@ tests/                           # Suite automatizada (fuera de src/ — tsc la 
 ├── setup/                       # env.ts, db.ts, factories.ts, mocks/{stripe,skydropx,resend}.ts
 ├── smoke/                       # import app + GET /health (valida el arranque en test)
 ├── unit/                        # nivel 1 — servicios/utils/config/middlewares puros, sin BD
-└── integration/                 # niveles 2/3 — Postgres de test (auth, checkout, products, webhooks,
-                                  # cancelOrder, shippingRates, adminProducts, adminProductImport,
-                                  # adminBrandUsers)
+└── integration/                 # niveles 2/3 — Postgres de test (auth, checkout, checkoutIdempotency,
+                                  # products, webhooks, cancelOrder, adminOrderStatus, shippingRates,
+                                  # adminProducts, adminProductImport, adminBrandUsers, healthReady)
 src/
 ├── app.ts                       # Punto de entrada: Express, middleware, arranque y apagado ordenado
 ├── seed.ts                      # Script de seed (productos, histórico, admin, marca)
@@ -681,7 +1025,7 @@ src/
 ├── controllers/
 │   ├── product.controller.ts    # Lógica de productos (listar, obtener por id, CRUD admin, import masivo)
 │   ├── auth.controller.ts       # Login, forgot-password, verify-reset-code, reset-password, me
-│   ├── order.controller.ts      # Checkout, admin orders, cancelación manual, webhooks de Stripe/Skydropx
+│   ├── order.controller.ts      # Checkout, consulta pública por token, admin orders, cancelación manual, webhooks de Stripe/Skydropx
 │   ├── shipping.controller.ts   # POST /api/shipping/rates (cotización en vivo)
 │   ├── dashboard.controller.ts  # GET /api/admin/dashboard
 │   ├── reports.controller.ts    # GET /api/admin/reports/monthly y /replenishment
@@ -691,15 +1035,15 @@ src/
 │   ├── AppError.ts               # Clase de error con status code para respuestas controladas
 │   ├── asyncHandler.ts            # Wrapper para controllers async (evita try/catch repetido)
 │   ├── errorHandler.ts            # Middleware centralizado de manejo de errores
-│   ├── rateLimit.ts               # authRateLimiter / shippingRateLimiter / orderRateLimiter
+│   ├── rateLimit.ts               # authRateLimiter / shippingRateLimiter / orderRateLimiter / orderLookupRateLimiter
 │   ├── requireAuth.ts             # Verifica JWT Bearer, adjunta req.user; requireRole helper
 │   └── upload.ts                  # multer en memoria (uploadProductImages / uploadLogo / uploadProductImportFile)
 ├── routes/
 │   ├── product.routes.ts        # Rutas /api/products
 │   ├── adminProduct.routes.ts   # Rutas /api/admin/products (CRUD admin + imágenes + import masivo, requireAuth)
 │   ├── auth.routes.ts           # Rutas /api/auth
-│   ├── order.routes.ts          # Ruta /api/orders (checkout público)
-│   ├── adminOrder.routes.ts     # Rutas /api/admin/orders (listado + cancelación manual, requireAuth)
+│   ├── order.routes.ts          # Rutas /api/orders (checkout público + consulta por token)
+│   ├── adminOrder.routes.ts     # Rutas /api/admin/orders (listado, cancelación, estado manual y reintento de guía, requireAuth)
 │   ├── adminDashboard.routes.ts # Ruta /api/admin/dashboard (requireAuth)
 │   ├── adminReports.routes.ts   # Rutas /api/admin/reports/* (requireAuth)
 │   ├── shipping.routes.ts       # Ruta /api/shipping/rates (cotización en vivo, pública)
@@ -717,13 +1061,15 @@ src/
 │   └── adminUser.ts               # Esquemas zod de alta de usuario y update de cuenta propia
 ├── services/
 │   ├── cart.ts                    # computeTotals, computeShipping, SHIPPING_BY_TYPE
-│   ├── orders.service.ts          # Checkout: stock atómico, totales, precios congelados; releaseOrderStock / cancelOrderByAdmin
-│   ├── payment.service.ts         # Stripe: PaymentIntent, concilia pagos/fallos/reembolsos, crea guía Skydropx, dispara correos
+│   ├── orders.service.ts          # Checkout idempotente: stock atómico, totales, precios congelados; releaseOrderStock / cancelOrderByAdmin / updateOrderStatusByAdmin / getOrderByPublicToken
+│   ├── payment.service.ts         # Stripe: PaymentIntent, concilia pagos/fallos/reembolsos, crea/reintenta guía Skydropx, dispara correos
 │   ├── pendingOrderSweeper.ts     # Barrido de órdenes pending abandonadas (libera stock, reconcilia con Stripe)
+│   ├── shipmentRetrySweeper.ts    # Barrido de guías pendientes: reintenta la guía de pedidos pagados sin ella
 │   ├── skydropx.service.ts        # Cliente REST de Skydropx (OAuth2, throttle 2 req/s, cotización, guía, poll)
 │   ├── packing.ts                 # buildParcel: arma una sola caja apilada por pedido
 │   ├── productAvailability.ts     # assertProductAvailable: guardia compartida checkout/cotización
-│   ├── alert.service.ts           # sendAlertEmail: avisos operativos (guía fallida, sweeper con fallas repetidas)
+│   ├── readiness.ts               # Readiness de GET /health/ready: chequeo de BD con timeout, caché 1s y flag de drenado
+│   ├── alert.service.ts           # sendAlertEmail: avisos operativos (guía fallida o irreintentable, sweepers con fallas repetidas)
 │   ├── image.service.ts           # Cloudinary: sube buffer (upload_stream) y borra asset (destroy)
 │   ├── productImport.service.ts   # Importación/restock masivo: parsea el .xlsx, previsualiza y aplica
 │   ├── email.service.ts           # sendEmail(...) sobre Resend; loguea pero nunca lanza
@@ -736,6 +1082,7 @@ src/
 │   ├── date.ts                    # Helpers de fecha UTC (isoDay/isoMonth/formatShortDate/...)
 │   ├── formatMoney.ts             # Formateo es-MX compartido por correos/reportes/errores de precio
 │   ├── parseId.ts                 # Valida :id numérico antes de tocar Sequelize (evita 500 por NaN)
+│   ├── idempotency.ts             # Huella sha256 + mapa con TTL compartidos por el checkout y el import masivo
 │   ├── constantTimeEqual.ts       # Comparación en tiempo constante (firma HMAC de Skydropx y código de reset)
 │   ├── productSizesInclude.ts     # Include reusado para resolver los VIRTUAL stock/sizes de Product
 │   ├── excelCell.ts               # Lee celdas de exceljs (fórmulas, richText, hyperlink) sin "[object Object]"

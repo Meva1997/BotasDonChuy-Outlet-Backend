@@ -44,6 +44,13 @@ export interface OrderAttributes {
   // de `POST /shipments` no los incluye (confirmado contra sandbox real). `shipmentStatus` es el
   // último estado que reporte ese mismo webhook (`in_transit`, `delivered`, etc.).
   skydropxShipmentId: string | null;
+  // Momento en que se reclamó el centinela de creación de guía (Fase O.3). Es el reloj con el
+  // que se decide si un `"creating"` quedó HUÉRFANO (el proceso murió antes de llamar a
+  // Skydropx) y puede liberarse. Columna propia y no `updatedAt` a propósito: `updatedAt` lo
+  // bumpea cualquier otra escritura sobre el pedido (webhook de envío, avance manual de estado,
+  // marcado de pago), así que un pedido realmente atorado en `"creating"` reiniciaba su reloj
+  // cada vez que el dueño lo tocaba desde el panel y nunca podía liberarse.
+  shipmentClaimedAt: Date | null;
   trackingNumber: string | null;
   trackingUrl: string | null;
   labelUrl: string | null;
@@ -54,6 +61,25 @@ export interface OrderAttributes {
   // cualquier otro caso. Ver `cancelOrderByAdmin` en orders.service.ts.
   refundId: string | null;
   refundedAt: Date | null;
+  // Token opaco de consulta pública (Fase O.4). Es la ÚNICA credencial de
+  // `GET /api/orders/lookup/:token`, la ruta que deja al cliente ver el estado y el rastreo de
+  // su pedido sin cuenta ni contraseña — de ahí que sea un UUID aleatorio con índice único y no
+  // el par `id + email` (ids secuenciales + correo adivinable = enumerable). Se genera en
+  // `createOrder`; nullable solo por las filas anteriores a la columna (la migración las rellenó).
+  publicToken: string | null;
+  // Cupón de descuento (Fase N.2). `couponId` apunta al cupón canjeado (FK con `RESTRICT`, así
+  // que un cupón con historia no se puede borrar y dejar la orden huérfana); `couponCode` es el
+  // texto **CONGELADO** al momento de la compra, igual que los precios del `OrderItem`: un cupón
+  // editado o desactivado después no altera el histórico. Los dos son `null` cuando no se usó
+  // cupón.
+  couponId: number | null;
+  couponCode: string | null;
+  // Descuento en pesos que aplicó el cupón. Columna APARTE de `savings` a propósito (regla
+  // explícita del roadmap): `savings` significa "ahorro outlet" (`originalPrice` vs `salePrice`)
+  // y sumar el cupón ahí falsearía el margen del dashboard. No es nullable —default `0`— para que
+  // todo consumidor que hace aritmética se ahorre el `?? 0` y una fila anterior al deploy lea 0.
+  // Invariante nuevo de toda la app: `total = subtotal − savings − couponDiscount + shipping`.
+  couponDiscount: number;
 }
 
 interface OrderCreationAttributes extends Optional<
@@ -67,12 +93,17 @@ interface OrderCreationAttributes extends Optional<
   | "skydropxRateId"
   | "shippingRequiresDropoff"
   | "skydropxShipmentId"
+  | "shipmentClaimedAt"
   | "trackingNumber"
   | "trackingUrl"
   | "labelUrl"
   | "shipmentStatus"
   | "refundId"
   | "refundedAt"
+  | "publicToken"
+  | "couponId"
+  | "couponCode"
+  | "couponDiscount"
 > {}
 
 export class Order
@@ -101,12 +132,17 @@ export class Order
   declare skydropxRateId: string | null;
   declare shippingRequiresDropoff: boolean | null;
   declare skydropxShipmentId: string | null;
+  declare shipmentClaimedAt: Date | null;
   declare trackingNumber: string | null;
   declare trackingUrl: string | null;
   declare labelUrl: string | null;
   declare shipmentStatus: string | null;
   declare refundId: string | null;
   declare refundedAt: Date | null;
+  declare publicToken: string | null;
+  declare couponId: number | null;
+  declare couponCode: string | null;
+  declare couponDiscount: number;
   declare readonly createdAt: Date;
   declare readonly updatedAt: Date;
   declare items?: OrderItem[];
@@ -232,6 +268,11 @@ Order.init(
       allowNull: true,
       defaultValue: null,
     },
+    shipmentClaimedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      defaultValue: null,
+    },
     trackingNumber: {
       type: DataTypes.STRING,
       allowNull: true,
@@ -262,10 +303,41 @@ Order.init(
       allowNull: true,
       defaultValue: null,
     },
+    publicToken: {
+      type: DataTypes.UUID,
+      allowNull: true,
+      defaultValue: null,
+    },
+    couponId: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      defaultValue: null,
+    },
+    couponCode: {
+      type: DataTypes.STRING(32),
+      allowNull: true,
+      defaultValue: null,
+    },
+    couponDiscount: {
+      type: DataTypes.DECIMAL(10, 2),
+      allowNull: false,
+      defaultValue: 0,
+      get() {
+        const value = this.getDataValue("couponDiscount");
+        return value === null ? null : parseFloat(value as unknown as string);
+      },
+    },
   },
   {
     sequelize,
     tableName: "orders",
     timestamps: true,
+    // El índice se declara aquí ADEMÁS de en su migración (Fase O.4) porque
+    // `tests/setup/db.ts` arma el esquema con `sync({ force: true })`, no con migraciones:
+    // sin esto, la unicidad del token —la única garantía de que un token no resuelva a dos
+    // pedidos— no existiría en la BD de test. Mismo motivo que el índice de `product_sizes`.
+    indexes: [
+      { unique: true, fields: ["publicToken"], name: "orders_public_token_unique" },
+    ],
   },
 );

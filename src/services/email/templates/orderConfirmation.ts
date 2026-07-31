@@ -1,4 +1,5 @@
 import { formatMoney } from "../../../utils/formatMoney";
+import { escapeHtml } from "./escapeHtml";
 
 interface OrderConfirmationItem {
   nameSnapshot: string;
@@ -25,6 +26,13 @@ interface OrderConfirmationInput {
   subtotal: number;
   savings: number;
   shipping: number;
+  /**
+   * Cupón canjeado (Fase N.2), congelado en el pedido. Van juntos y solo se renderizan cuando el
+   * descuento es mayor a 0 — igual que "Ahorraste". Sin esta fila, el correo mostraría un total
+   * que no cuadra con `subtotal − savings + envío` y el comprador no sabría de dónde salió.
+   */
+  couponCode?: string | null;
+  couponDiscount?: number;
   total: number;
   shippingAddress: OrderConfirmationAddress;
   shippingCarrier?: string | null;
@@ -33,28 +41,14 @@ interface OrderConfirmationInput {
    * llegue, el mismo template renderiza el bloque de rastreo sin rediseñarse.
    */
   tracking?: { number: string; url?: string; carrier?: string };
+  /**
+   * Link a la página pública de seguimiento (Fase O.4), con el token opaco del pedido. Es la
+   * razón de ser de esa fase: sin él, el cliente que borra este correo no tiene forma de
+   * consultar su pedido y cada "¿ya salió?" acaba siendo trabajo manual del dueño por WhatsApp.
+   */
+  trackingPageUrl?: string;
 }
 
-/**
- * Escapa los metacaracteres HTML de un texto controlado por el usuario (nombre, dirección,
- * nombre de producto) antes de interpolarlo en el correo. Sin esto, un `&`/`<`/`>` legítimo
- * en una dirección rompe el render y un valor malicioso inyectaría markup. Se define local
- * (plantilla autónoma, igual que `formatMoney`).
- */
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-/**
- * Formatea un número como moneda es-MX: `$1,920.50`. Se duplica el helper privado de
- * `dashboard.service.ts` (no está exportado) para que este módulo de plantilla se
- * mantenga autónomo, igual que `passwordResetCode.ts`.
- */
 /**
  * Fecha legible del pedido, p. ej. "14 de julio de 2026". Se fija a
  * `America/Mexico_City` (no UTC): a diferencia de `src/utils/date.ts` —que usa UTC para
@@ -128,6 +122,22 @@ function shippingSection(input: OrderConfirmationInput): string {
 }
 
 /**
+ * Bloque con el link a la página pública de seguimiento (Fase O.4). Va en los dos correos
+ * (confirmación y "va en camino") a propósito: el de confirmación es el que el cliente conserva,
+ * y es justo el que puede borrar o perder en spam — cuantas más veces le llegue el link, menos
+ * probable es que la consulta acabe siendo un WhatsApp al dueño.
+ */
+function trackingPageSection(url?: string): string {
+  if (!url) return "";
+  return `<div style="margin:24px 0 0;text-align:center;">
+                <a href="${escapeHtml(url)}" style="display:inline-block;border:1px solid #7c2d12;color:#7c2d12;text-decoration:none;font-size:14px;font-weight:bold;padding:10px 20px;border-radius:8px;">Ver el estado de mi pedido</a>
+                <p style="margin:8px 0 0;font-size:12px;color:#a1a1aa;">
+                  Guarda este enlace: con él puedes consultar tu pedido cuando quieras.
+                </p>
+              </div>`;
+}
+
+/**
  * Correo de confirmación de pedido: resumen de artículos (con precios congelados del
  * `OrderItem`, nunca del `Product` actual), totales y dirección de envío. Nunca incluye
  * `unitCost`. CSS inline: los clientes de correo no cargan hojas de estilo externas.
@@ -161,6 +171,17 @@ export function orderConfirmationTemplate(input: OrderConfirmationInput): string
     : `Tu pago fue confirmado. Aquí está el resumen de tu pedido <strong>#${orderId}</strong> del ${formatOrderDate(createdAt)}.`;
   const savingsRow =
     savings > 0 ? totalsRow("Ahorraste", `− ${formatMoney(savings)}`, { accent: true }) : "";
+  // El código pasa por `escapeHtml` aunque su charset ya prohíba `<` y `&`: la regla del repo es
+  // que toda cadena no numérica interpolada pase por aquí, y así una relajación futura de ese
+  // charset no reabre el hueco.
+  const couponRow =
+    input.couponDiscount && input.couponDiscount > 0
+      ? totalsRow(
+          input.couponCode ? `Cupón ${escapeHtml(input.couponCode)}` : "Cupón",
+          `− ${formatMoney(input.couponDiscount)}`,
+          { accent: true },
+        )
+      : "";
 
   return `<!DOCTYPE html>
 <html lang="es">
@@ -193,6 +214,9 @@ export function orderConfirmationTemplate(input: OrderConfirmationInput): string
                 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
                   ${totalsRow("Subtotal", formatMoney(subtotal))}
                   ${savingsRow}
+                  <!-- El cupón va ANTES del envío a propósito: es la prueba visual de que el
+                       descuento se aplicó a la mercancía y no a la paquetería. -->
+                  ${couponRow}
                   ${totalsRow("Envío", formatMoney(shipping))}
                   ${totalsRow("Total", formatMoney(total), { strong: true, accent: true })}
                 </table>
@@ -210,6 +234,7 @@ export function orderConfirmationTemplate(input: OrderConfirmationInput): string
                 </div>
 
                 ${shippingSection(input)}
+                ${trackingPageSection(input.trackingPageUrl)}
               </td>
             </tr>
             <tr>

@@ -21,6 +21,8 @@ const options: Options = {
       { name: "Auth", description: "Autenticación de administradores" },
       { name: "Orders", description: "Checkout y pedidos del cliente" },
       { name: "Shipping", description: "Cotización de envío en vivo (Skydropx)" },
+      { name: "Coupons", description: "Validación pública de cupones de descuento" },
+      { name: "Admin - Coupons", description: "CRUD de cupones de descuento (requiere auth)" },
       { name: "Admin - Dashboard", description: "Métricas agregadas del panel (requiere auth)" },
       { name: "Admin - Orders", description: "Listado completo de pedidos con items (requiere auth)" },
       { name: "Admin - Reports", description: "Reportes de ventas y reposición (requiere auth)" },
@@ -479,6 +481,17 @@ const options: Options = {
                 "id del rate elegido dentro de la cotización. Debe ir junto con quotationId, o ninguno.",
               example: "rate_9f8a3c",
             },
+            couponCode: {
+              type: "string",
+              nullable: true,
+              description:
+                "Código del cupón, SIN monto: el servidor calcula el descuento (misma regla que " +
+                "precios y envío). Un solo cupón por compra. Un cupón inválido, vencido, agotado " +
+                "o ya usado responde 400/409 y NUNCA se ignora en silencio — ignorarlo le cobraría " +
+                "al comprador un precio distinto al que aceptó en pantalla. El descuento aplica " +
+                "sobre la mercancía neta (subtotal − savings) y nunca sobre el envío.",
+              example: "VERANO25",
+            },
           },
         },
         ShippingInput: {
@@ -531,7 +544,38 @@ const options: Options = {
             subtotal: { type: "number", format: "float", example: 1899.0 },
             savings: { type: "number", format: "float", example: 400.0 },
             shipping: { type: "number", format: "float", example: 160.0 },
-            total: { type: "number", format: "float", example: 1659.0 },
+            couponId: {
+              type: "integer",
+              nullable: true,
+              description:
+                "id interno del cupón. Se EXCLUYE de la respuesta pública de POST /api/orders (el comprador ya tiene el código).",
+              example: null,
+            },
+            couponCode: {
+              type: "string",
+              nullable: true,
+              description:
+                "Código del cupón CONGELADO al momento de la compra, igual que los precios del " +
+                "OrderItem: un cupón editado, agotado o desactivado después no altera este pedido. " +
+                "null si no se usó cupón.",
+              example: "VERANO25",
+            },
+            couponDiscount: {
+              type: "number",
+              format: "float",
+              default: 0,
+              description:
+                "Descuento por cupón en pesos. Columna APARTE de savings a propósito: savings es " +
+                "el ahorro outlet (originalPrice vs salePrice) y sumarlos falsearía el margen del " +
+                "dashboard. Invariante: total = subtotal − savings − couponDiscount + shipping.",
+              example: 150.0,
+            },
+            total: {
+              type: "number",
+              format: "float",
+              description: "subtotal − savings − couponDiscount + shipping.",
+              example: 1509.0,
+            },
             customerName: { type: "string", example: "Juan Pérez" },
             customerEmail: { type: "string", format: "email" },
             customerPhone: { type: "string", example: "4771234567" },
@@ -566,7 +610,7 @@ const options: Options = {
               type: "string",
               nullable: true,
               description:
-                "id de la guía (shipment) creada en Skydropx al confirmarse el pago. null antes de pagar, si la orden usó la tarifa plana de respaldo (sin rate de Skydropx que convertir en guía), o mientras se reclama con el valor centinela \"creating\" (ver createShipmentForOrder).",
+                "id de la guía (shipment) creada en Skydropx al confirmarse el pago. null antes de pagar o si la orden usó la tarifa plana de respaldo (sin rate de Skydropx que convertir en guía). Puede traer dos valores especiales en vez de un id: \"creating\" mientras se reclama la creación (valor centinela, ver createShipmentForOrder) y \"unreconciled:<id>\" cuando Skydropx creó y cobró la guía pero no se pudo guardar su id — ese pedido necesita reconciliarse a mano en el panel de Skydropx y ningún reintento genera otra guía para él.",
               example: "ship_7c1a9e",
             },
             trackingNumber: {
@@ -608,12 +652,113 @@ const options: Options = {
               nullable: true,
               description: "Momento en que se aplicó el reembolso. null si la orden no se reembolsó.",
             },
+            publicToken: {
+              type: "string",
+              format: "uuid",
+              nullable: true,
+              description:
+                "Token opaco de consulta pública (Fase O.4): es la credencial de GET /api/orders/lookup/{token}, la ruta sin auth donde el comprador ve el estado y el rastreo de su pedido. Viaja como link en el correo de confirmación. Se devuelve al comprador en la respuesta del checkout (el pedido es suyo); null solo en pedidos anteriores a la columna.",
+              example: "3f1a9c7e-5d24-4b8e-9f01-2a6c8d4b7e13",
+            },
             items: {
               type: "array",
               items: { $ref: "#/components/schemas/OrderItem" },
             },
             createdAt: { type: "string", format: "date-time" },
             updatedAt: { type: "string", format: "date-time" },
+          },
+        },
+        // Proyección explícita de la consulta pública (Fase O.4). NO es `Order` con campos
+        // omitidos: se arma campo por campo en getOrderByPublicToken, así que una columna nueva
+        // en `Order` no se filtra sola por olvidar excluirla.
+        PublicOrderLookup: {
+          type: "object",
+          properties: {
+            id: { type: "integer", example: 5 },
+            status: {
+              type: "string",
+              enum: ["pending", "paid", "shipped", "delivered", "cancelled"],
+              example: "shipped",
+            },
+            paymentStatus: {
+              type: "string",
+              enum: ["unpaid", "processing", "paid", "failed", "refunded"],
+              example: "paid",
+            },
+            createdAt: { type: "string", format: "date-time" },
+            subtotal: { type: "number", format: "float", example: 1899.0 },
+            savings: { type: "number", format: "float", example: 400.0 },
+            shipping: { type: "number", format: "float", example: 160.0 },
+            couponCode: {
+              type: "string",
+              nullable: true,
+              description:
+                "Código del cupón usado. Va en la proyección pública para que los totales de esta " +
+                "página cuadren: sin él, el comprador vería un total menor sin explicación.",
+              example: "VERANO25",
+            },
+            couponDiscount: {
+              type: "number",
+              format: "float",
+              description: "Invariante: total = subtotal − savings − couponDiscount + shipping.",
+              example: 150.0,
+            },
+            total: { type: "number", format: "float", example: 1509.0 },
+            customerName: { type: "string", example: "Juan Pérez" },
+            shippingAddress: {
+              type: "object",
+              description:
+                "Dirección de entrega. Se incluye para que el comprador la verifique (y avise a tiempo si se equivocó); su correo y teléfono NO se devuelven.",
+              properties: {
+                street: { type: "string", example: "Av. Reforma 123" },
+                neighborhood: { type: "string", example: "Centro" },
+                city: { type: "string", example: "Celaya" },
+                state: { type: "string", example: "Guanajuato" },
+                postalCode: { type: "string", example: "38000" },
+                references: { type: "string", nullable: true, example: "Casa azul, portón negro." },
+              },
+            },
+            shippingCarrier: { type: "string", nullable: true, example: "Estafeta" },
+            trackingNumber: {
+              type: "string",
+              nullable: true,
+              description:
+                "Número de guía. null mientras el pedido no se haya enviado (o si la guía todavía no la reporta el webhook de Skydropx).",
+              example: "ESF1234567890",
+            },
+            trackingUrl: {
+              type: "string",
+              nullable: true,
+              example: "https://www.estafeta.com/Rastreo/ESF1234567890",
+            },
+            shipmentStatus: {
+              type: "string",
+              nullable: true,
+              description: "Último estado crudo reportado por la paquetería.",
+              example: "in_transit",
+            },
+            refundedAt: {
+              type: "string",
+              format: "date-time",
+              nullable: true,
+              description:
+                "Momento del reembolso, cuando el pedido se canceló y se devolvió el dinero. El id del reembolso NO se expone aquí.",
+            },
+            items: {
+              type: "array",
+              description:
+                "Renglones con los precios CONGELADOS de la compra. Sin `unitCost` ni ids internos.",
+              items: {
+                type: "object",
+                properties: {
+                  nameSnapshot: { type: "string", example: "Bota vaquera de cuero" },
+                  size: { type: "integer", example: 26 },
+                  quantity: { type: "integer", example: 1 },
+                  unitOriginalPrice: { type: "number", format: "float", example: 1899.0 },
+                  unitSalePrice: { type: "number", format: "float", example: 1499.0 },
+                },
+              },
+            },
           },
         },
         OrderResponse: {
@@ -638,6 +783,564 @@ const options: Options = {
               description:
                 "Motivo opcional de la cancelación, para el registro (p. ej. \"el cliente pidió cancelar por WhatsApp\").",
               example: "El cliente pidió cancelar por WhatsApp",
+            },
+          },
+        },
+        OrderStatusUpdateInput: {
+          type: "object",
+          required: ["status"],
+          properties: {
+            status: {
+              type: "string",
+              enum: ["shipped", "delivered"],
+              description:
+                "Estado destino. Solo hacia adelante: `cancelled` no se maneja aquí (usa POST /api/admin/orders/{id}/cancel, el único camino que reembolsa y restockea) y `pending`/`paid` los fija el flujo de pago.",
+              example: "shipped",
+            },
+            trackingNumber: {
+              type: "string",
+              maxLength: 100,
+              description:
+                "Número de guía capturado a mano. Al registrarse por primera vez dispara el correo \"tu pedido va en camino\" (una sola vez por pedido, compartido con el webhook de Skydropx). Opcional: marcar `delivered` sin guía es válido (entrega en mano o local).",
+              example: "7891234567",
+            },
+            trackingUrl: {
+              type: "string",
+              format: "uri",
+              maxLength: 500,
+              description: "Enlace de rastreo de la paquetería, si lo hay.",
+              example: "https://rastreo.paqueteria.mx/7891234567",
+            },
+            shippingCarrier: {
+              type: "string",
+              maxLength: 80,
+              description:
+                "Paquetería con la que se envió. Sobrescribe la guardada en el pedido (útil cuando se envió por una distinta a la cotizada).",
+              example: "Estafeta",
+            },
+          },
+        },
+        // Cupones (Fase N.2). El descuento SIEMPRE lo calcula el servidor a partir del código:
+        // el cliente nunca manda un monto, misma regla que rige precios y envío.
+        Coupon: {
+          type: "object",
+          properties: {
+            id: { type: "integer", example: 3 },
+            code: {
+              type: "string",
+              maxLength: 32,
+              description: "Alfanumérico en mayúsculas (3–32 caracteres). No se puede editar.",
+              example: "VERANO25",
+            },
+            type: {
+              type: "string",
+              enum: ["percent", "fixed"],
+              description: "`percent` = porcentaje sobre la mercancía; `fixed` = monto en pesos.",
+              example: "percent",
+            },
+            value: { type: "number", format: "float", example: 15.0 },
+            maxDiscount: {
+              type: "number",
+              format: "float",
+              nullable: true,
+              description:
+                "Tope en pesos del descuento. Solo aplica a cupones de porcentaje: es lo que evita que un 50% sobre un carrito muy grande se lleve una cifra inesperada.",
+              example: 500.0,
+            },
+            minSubtotal: {
+              type: "number",
+              format: "float",
+              nullable: true,
+              description:
+                "Mínimo de mercancía NETA (subtotal − savings, sin envío) para que el cupón aplique.",
+              example: 1000.0,
+            },
+            maxRedemptions: {
+              type: "integer",
+              nullable: true,
+              description:
+                "Tope global de canjes; null = ilimitado. Es la barrera dura: acota la pérdida máxima a usos × descuento sin importar quién canjee.",
+              example: 50,
+            },
+            redeemedCount: {
+              type: "integer",
+              readOnly: true,
+              description:
+                "Usos consumidos. Estado derivado: solo lo mueven el canje atómico del checkout y la liberación cuando un pedido se cancela o se abandona. NO se acepta en POST/PUT.",
+              example: 12,
+            },
+            activeRedemptions: {
+              type: "integer",
+              readOnly: true,
+              description:
+                "Conteo vivo de canjes vigentes (solo en el listado). Normalmente igual a redeemedCount; si difiere hubo una intervención manual en la base de datos.",
+              example: 12,
+            },
+            oncePerCustomer: {
+              type: "boolean",
+              default: true,
+              description:
+                "Un solo uso por cliente, identificado por el CORREO del pedido normalizado (no por IP: detrás de CGNAT una colonia entera comparte dirección, y con un proxy mal configurado todos los compradores se verían iguales). Apagarlo deja de bloquear a partir de ese momento, pero no reabre los canjes ya hechos.",
+              example: true,
+            },
+            startsAt: {
+              type: "string",
+              format: "date-time",
+              nullable: true,
+              description:
+                "Instante ISO. Una fecha sin hora (2026-08-01) se interpreta al inicio de ese día en la zona de la tienda (America/Mexico_City), no en UTC.",
+              example: "2026-08-01T06:00:00.000Z",
+            },
+            expiresAt: {
+              type: "string",
+              format: "date-time",
+              nullable: true,
+              description:
+                "Instante ISO. Una fecha sin hora se interpreta al FINAL de ese día en la zona de la tienda, para que el dueño no pierda la última tarde de su promoción.",
+              example: "2026-08-31T05:59:59.999Z",
+            },
+            active: {
+              type: "boolean",
+              default: true,
+              description: "false es la forma de CANCELAR el cupón, sin perder el histórico.",
+              example: true,
+            },
+            description: {
+              type: "string",
+              nullable: true,
+              maxLength: 200,
+              example: "Promo de agosto en redes",
+            },
+            createdAt: { type: "string", format: "date-time" },
+            updatedAt: { type: "string", format: "date-time" },
+          },
+        },
+        CouponInput: {
+          type: "object",
+          required: ["code", "type", "value"],
+          properties: {
+            code: { type: "string", maxLength: 32, example: "VERANO25" },
+            type: { type: "string", enum: ["percent", "fixed"], example: "percent" },
+            value: {
+              type: "number",
+              format: "float",
+              description: "Mayor a 0; máximo 100 cuando el tipo es `percent`.",
+              example: 15.0,
+            },
+            maxDiscount: {
+              type: "number",
+              format: "float",
+              description: "Solo válido con type `percent`; con `fixed` responde 400.",
+              example: 500.0,
+            },
+            minSubtotal: { type: "number", format: "float", example: 1000.0 },
+            maxRedemptions: { type: "integer", minimum: 1, example: 50 },
+            oncePerCustomer: { type: "boolean", default: true, example: true },
+            startsAt: { type: "string", example: "2026-08-01" },
+            expiresAt: { type: "string", example: "2026-08-31" },
+            active: { type: "boolean", default: true, example: true },
+            description: { type: "string", maxLength: 200, example: "Promo de agosto en redes" },
+          },
+        },
+        CouponUpdateInput: {
+          type: "object",
+          description:
+            "Todos los campos son opcionales: manda solo lo que cambia (al menos uno). " +
+            "`active: false` es cancelar la promoción. `code` y `redeemedCount` NO se aceptan. " +
+            "Editar un cupón con canjes nunca altera pedidos pasados: el código y el descuento " +
+            "quedan congelados en cada orden. Bajar maxRedemptions por debajo de redeemedCount es " +
+            "válido y detiene la promoción de inmediato.",
+          properties: {
+            type: { type: "string", enum: ["percent", "fixed"], example: "percent" },
+            value: { type: "number", format: "float", example: 20.0 },
+            maxDiscount: { type: "number", format: "float", example: 500.0 },
+            minSubtotal: { type: "number", format: "float", example: 1000.0 },
+            maxRedemptions: { type: "integer", minimum: 1, example: 30 },
+            oncePerCustomer: { type: "boolean", example: true },
+            startsAt: { type: "string", example: "2026-08-01" },
+            expiresAt: { type: "string", example: "2026-09-15" },
+            active: { type: "boolean", example: false },
+            description: { type: "string", maxLength: 200, example: "Promo extendida" },
+          },
+        },
+        CouponValidateInput: {
+          type: "object",
+          required: ["code", "items"],
+          properties: {
+            code: { type: "string", maxLength: 32, example: "VERANO25" },
+            items: {
+              type: "array",
+              minItems: 1,
+              maxItems: 50,
+              description:
+                "El carrito, para poder calcular el descuento y comparar el mínimo de compra.",
+              items: {
+                type: "object",
+                required: ["productId", "size", "quantity"],
+                properties: {
+                  productId: { type: "integer", example: 1 },
+                  size: { type: "integer", example: 26 },
+                  quantity: { type: "integer", minimum: 1, maximum: 99, example: 1 },
+                },
+              },
+            },
+            email: {
+              type: "string",
+              format: "email",
+              description:
+                "Opcional porque en el checkout el cupón se captura ANTES del correo. Sin él NO se puede verificar el \"un uso por cliente\" — ver `perCustomerChecked` en la respuesta.",
+              example: "juan@example.com",
+            },
+          },
+        },
+        CouponValidateResponse: {
+          type: "object",
+          properties: {
+            code: { type: "string", example: "VERANO25" },
+            type: { type: "string", enum: ["percent", "fixed"], example: "percent" },
+            value: { type: "number", format: "float", example: 15.0 },
+            description: { type: "string", nullable: true, example: "Promo de agosto en redes" },
+            discount: {
+              type: "number",
+              format: "float",
+              description:
+                "Descuento en pesos sobre la mercancía neta. NUNCA sobre el envío. Es el mismo monto que va a cobrarse: lo calcula la misma función que el checkout.",
+              example: 224.85,
+            },
+            netMerchandise: {
+              type: "number",
+              format: "float",
+              description: "subtotal − savings del carrito enviado, sin envío.",
+              example: 1499.0,
+            },
+            remainingRedemptions: {
+              type: "integer",
+              nullable: true,
+              description:
+                "Usos que quedan del tope global; null si es ilimitado. Informativo y NO vinculante: el cupón puede agotarse entre esta consulta y el pago.",
+              example: 38,
+            },
+            oncePerCustomer: { type: "boolean", example: true },
+            perCustomerChecked: {
+              type: "boolean",
+              description:
+                "false cuando la consulta no trajo correo: el \"un uso por cliente\" todavía no se verificó y el checkout podría rechazar el cupón con un 409.",
+              example: false,
+            },
+            expiresAt: { type: "string", format: "date-time", nullable: true },
+          },
+        },
+        // ── Gastos (Fase N.3) ──────────────────────────────────────────────────
+        ExpenseAmountVersion: {
+          type: "object",
+          description:
+            "Una versión del monto. El monto NO es una columna del gasto: se guarda versionado por fecha de vigencia, y eso es lo que hace que subir un precio hoy no reescriba lo que costaba en meses pasados.",
+          properties: {
+            id: { type: "integer", example: 7 },
+            amount: { type: "number", format: "float", example: 290.0 },
+            effectiveFrom: {
+              type: "string",
+              description: "Desde qué día rige este monto (AAAA-MM-DD).",
+              example: "2026-08-01",
+            },
+            note: {
+              type: "string",
+              nullable: true,
+              description: "Por qué cambió. El monto solo dice cuánto.",
+              example: "Subió el dólar",
+            },
+          },
+        },
+        Expense: {
+          type: "object",
+          properties: {
+            id: { type: "integer", example: 3 },
+            concept: { type: "string", maxLength: 120, example: "Render — Web Service" },
+            vendor: { type: "string", maxLength: 60, nullable: true, example: "Render" },
+            category: {
+              type: "string",
+              enum: [
+                "infraestructura",
+                "software",
+                "renta",
+                "servicios",
+                "paqueteria",
+                "publicidad",
+                "nomina",
+                "impuestos",
+                "otro",
+              ],
+              example: "infraestructura",
+            },
+            frequency: {
+              type: "string",
+              enum: [
+                "once",
+                "weekly",
+                "monthly",
+                "bimonthly",
+                "quarterly",
+                "semiannual",
+                "yearly",
+              ],
+              description: "`once` es un gasto de una sola vez: cuenta completo en su mes y no entra en la carga mensual recurrente.",
+              example: "monthly",
+            },
+            startsAt: {
+              type: "string",
+              description: "Fecha del primer cargo (AAAA-MM-DD). Y el único, si `frequency: once`.",
+              example: "2026-03-15",
+            },
+            endsAt: {
+              type: "string",
+              nullable: true,
+              description:
+                "Se canceló: deja de generar cargos desde esa fecha, pero el historial pasado se conserva.",
+              example: null,
+            },
+            active: { type: "boolean", example: true },
+            notes: { type: "string", maxLength: 300, nullable: true },
+            currentAmount: {
+              type: "number",
+              format: "float",
+              description: "Monto vigente hoy, CALCULADO a partir de las versiones.",
+              example: 290.0,
+            },
+            monthlyRunRate: {
+              type: "number",
+              format: "float",
+              description:
+                "Equivalente mensual de este gasto (0 para los de única vez y los ya terminados).",
+              example: 290.0,
+            },
+            nextChargeDate: {
+              type: "string",
+              nullable: true,
+              description: "Próximo cargo a partir de hoy, o null si ya no habrá más.",
+              example: "2026-09-15",
+            },
+            amounts: {
+              type: "array",
+              description: "Historial de precios del gasto, del más antiguo al más reciente.",
+              items: { $ref: "#/components/schemas/ExpenseAmountVersion" },
+            },
+          },
+        },
+        ExpenseInput: {
+          type: "object",
+          required: ["concept", "category", "frequency", "startsAt", "amount"],
+          properties: {
+            concept: { type: "string", maxLength: 120, example: "Render — Web Service" },
+            vendor: { type: "string", maxLength: 60, nullable: true, example: "Render" },
+            category: {
+              type: "string",
+              enum: [
+                "infraestructura",
+                "software",
+                "renta",
+                "servicios",
+                "paqueteria",
+                "publicidad",
+                "nomina",
+                "impuestos",
+                "otro",
+              ],
+              example: "infraestructura",
+            },
+            frequency: {
+              type: "string",
+              enum: [
+                "once",
+                "weekly",
+                "monthly",
+                "bimonthly",
+                "quarterly",
+                "semiannual",
+                "yearly",
+              ],
+              example: "monthly",
+            },
+            startsAt: { type: "string", example: "2026-03-15" },
+            endsAt: {
+              type: "string",
+              nullable: true,
+              description: "No se acepta junto con `frequency: once` (sería una contradicción).",
+              example: null,
+            },
+            active: { type: "boolean", example: true },
+            notes: { type: "string", maxLength: 300, nullable: true },
+            amount: {
+              type: "number",
+              format: "float",
+              description: "En pesos. Lo que realmente se paga: no hay conversión de divisa.",
+              example: 290.0,
+            },
+            amountEffectiveFrom: {
+              type: "string",
+              description:
+                "Desde cuándo rige el monto. Por defecto `startsAt`, no hoy: si se registra en agosto una suscripción que empezó en marzo, los cargos de marzo a julio tienen que valer ese monto.",
+              example: "2026-03-15",
+            },
+            amountNote: { type: "string", maxLength: 200, nullable: true },
+          },
+        },
+        ExpenseUpdateInput: {
+          type: "object",
+          description:
+            "Todos los campos son opcionales. Mandar `amount` AGREGA una versión de monto en vez de sobrescribir la anterior (salvo que ya exista una con la misma fecha de vigencia, o que el monto no haya cambiado).",
+          properties: {
+            concept: { type: "string", maxLength: 120 },
+            vendor: { type: "string", maxLength: 60, nullable: true },
+            category: {
+              type: "string",
+              enum: [
+                "infraestructura",
+                "software",
+                "renta",
+                "servicios",
+                "paqueteria",
+                "publicidad",
+                "nomina",
+                "impuestos",
+                "otro",
+              ],
+            },
+            frequency: {
+              type: "string",
+              enum: [
+                "once",
+                "weekly",
+                "monthly",
+                "bimonthly",
+                "quarterly",
+                "semiannual",
+                "yearly",
+              ],
+            },
+            startsAt: { type: "string", example: "2026-03-15" },
+            endsAt: { type: "string", nullable: true, example: "2026-12-31" },
+            active: { type: "boolean", example: false },
+            notes: { type: "string", maxLength: 300, nullable: true },
+            amount: { type: "number", format: "float", example: 340.0 },
+            amountEffectiveFrom: { type: "string", example: "2026-09-01" },
+            amountNote: { type: "string", maxLength: 200, nullable: true, example: "Cambio a plan Pro" },
+          },
+        },
+        ExpenseSummary: {
+          type: "object",
+          properties: {
+            monthlyRunRate: {
+              type: "number",
+              format: "float",
+              description:
+                "Lo que hay que retirar cada mes de lo ganado para cubrir los gastos recurrentes vivos. Una anualidad cuenta 1/12 y una semanal 52/12.",
+              example: 1310.83,
+            },
+            annualRunRate: { type: "number", format: "float", example: 15730.0 },
+            activeCount: {
+              type: "integer",
+              description: "Gastos que siguen generando cargos (no solo la bandera `active`).",
+              example: 4,
+            },
+            byCategory: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  category: { type: "string", example: "infraestructura" },
+                  count: { type: "integer", example: 3 },
+                  monthlyRunRate: { type: "number", format: "float", example: 1020.83 },
+                },
+              },
+            },
+            byFrequency: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  frequency: { type: "string", example: "monthly" },
+                  count: { type: "integer", example: 3 },
+                  monthlyRunRate: { type: "number", format: "float", example: 1290.0 },
+                },
+              },
+            },
+            upcomingDays: { type: "integer", example: 60 },
+            upcomingTotal: { type: "number", format: "float", example: 830.0 },
+            upcomingCharges: {
+              type: "array",
+              description: "Qué se cobra, de cuánto y en qué fecha, ordenado por fecha.",
+              items: {
+                type: "object",
+                properties: {
+                  expenseId: { type: "integer", example: 3 },
+                  concept: { type: "string", example: "Render — Web Service" },
+                  vendor: { type: "string", nullable: true, example: "Render" },
+                  category: { type: "string", example: "infraestructura" },
+                  frequency: { type: "string", example: "monthly" },
+                  date: { type: "string", example: "2026-08-15" },
+                  amount: { type: "number", format: "float", example: 290.0 },
+                },
+              },
+            },
+          },
+        },
+        ExpenseMonth: {
+          type: "object",
+          properties: {
+            isoMonth: { type: "string", example: "2026-08" },
+            label: { type: "string", example: "Agosto 2026" },
+            partial: {
+              type: "boolean",
+              description: "El mes en curso todavía no termina: su total puede crecer.",
+              example: true,
+            },
+            total: { type: "number", format: "float", example: 2540.0 },
+            byCategory: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  category: { type: "string", example: "infraestructura" },
+                  amount: { type: "number", format: "float", example: 540.0 },
+                },
+              },
+            },
+            byExpense: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  expenseId: { type: "integer", example: 3 },
+                  concept: { type: "string", example: "Render — Web Service" },
+                  vendor: { type: "string", nullable: true, example: "Render" },
+                  category: { type: "string", example: "infraestructura" },
+                  frequency: { type: "string", example: "monthly" },
+                  occurrences: {
+                    type: "integer",
+                    description: "Cuántos cargos cayeron en el mes (más de 1 solo en semanales).",
+                    example: 1,
+                  },
+                  amount: { type: "number", format: "float", example: 290.0 },
+                },
+              },
+            },
+            changes: {
+              type: "array",
+              description:
+                "Los cambios de precio que entraron en vigor este mes. ESTE arreglo es la respuesta a \"¿algo cambió?\": sin él, un aumento solo se nota como un total más alto sin causa visible. Se devuelve crudo — el delta y el % los calcula el front.",
+              items: {
+                type: "object",
+                properties: {
+                  expenseId: { type: "integer", example: 3 },
+                  concept: { type: "string", example: "Render — Web Service" },
+                  vendor: { type: "string", nullable: true, example: "Render" },
+                  category: { type: "string", example: "infraestructura" },
+                  effectiveFrom: { type: "string", example: "2026-08-01" },
+                  previousAmount: { type: "number", format: "float", example: 290.0 },
+                  amount: { type: "number", format: "float", example: 340.0 },
+                  note: { type: "string", nullable: true, example: "Subió el dólar" },
+                },
+              },
             },
           },
         },
@@ -768,8 +1471,22 @@ const options: Options = {
             date: { type: "string", example: "12 jun · 07:33" },
             pieces: { type: "integer", example: 1 },
             items: { type: "string", example: "Bota Ranchera 1972, Bota Exótica de Avestruz ×2" },
-            savings: { type: "number", format: "float", example: 400.0 },
-            total: { type: "number", format: "float", example: 1659.0 },
+            savings: {
+              type: "number",
+              format: "float",
+              description: "Ahorro outlet (originalPrice vs salePrice). NO incluye el cupón.",
+              example: 400.0,
+            },
+            couponCode: { type: "string", nullable: true, example: "VERANO25" },
+            couponDiscount: {
+              type: "number",
+              format: "float",
+              description:
+                "Descuento por cupón. Va aparte de savings para que la fila cuadre: " +
+                "total = subtotal − savings − couponDiscount + shipping.",
+              example: 150.0,
+            },
+            total: { type: "number", format: "float", example: 1509.0 },
             costoTotal: { type: "number", format: "float", example: 800.0 },
           },
         },
@@ -1003,7 +1720,8 @@ const options: Options = {
     },
   },
   // Globs relativos al cwd (raíz del backend) — válidos en dev (src/*.ts) y en prod (dist/*.js).
-  apis: ["./src/routes/*.ts", "./src/app.ts", "./dist/routes/*.js", "./dist/app.js"],
+  // "**" cubre las subcarpetas admin/public/auth/webhooks en las que se organizan las rutas.
+  apis: ["./src/routes/**/*.ts", "./src/app.ts", "./dist/routes/**/*.js", "./dist/app.js"],
 };
 
 export const swaggerSpec = swaggerJsdoc(options);

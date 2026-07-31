@@ -1,4 +1,3 @@
-import crypto from "crypto";
 import ExcelJS from "exceljs";
 import { Op, UniqueConstraintError, fn, col, where as sqlWhere } from "sequelize";
 import { ZodError } from "zod";
@@ -9,6 +8,7 @@ import { AppError } from "../middlewares/AppError";
 import { logger } from "../config/logger";
 import { formatMoney } from "../utils/formatMoney";
 import { productSizesInclude } from "../utils/productSizesInclude";
+import { IdempotencyStore, fingerprintOf } from "../utils/idempotency";
 import { readCellText, readCellNumber, readCellBoolean } from "../utils/excelCell";
 import {
   productImportCreateSchema,
@@ -813,20 +813,16 @@ function summarize(actions: ImportAction[] | ImportRowResult["status"][]): Impor
  * varias instancias — misma decisión (y misma limitación asumida) que el contador de fallos
  * consecutivos de pendingOrderSweeper.ts. Protege del accidente, no del abuso; la barrera dura
  * contra duplicados de catálogo sigue siendo el índice único de `code`.
+ *
+ * El mapa con TTL y la huella son los de `utils/idempotency.ts`, compartidos con el guard del
+ * checkout (Fase O.2). Lo que NO se comparte es la política: aquí un reenvío se rechaza, allá
+ * se le devuelve la respuesta del original (ver el módulo para el porqué de cada una).
  */
 const DUPLICATE_COMMIT_WINDOW_MS = 60_000;
-const recentCommits = new Map<string, number>();
+const recentCommits = new IdempotencyStore<true>(DUPLICATE_COMMIT_WINDOW_MS);
 
 function assertNotDuplicateCommit(rows: ImportRowInput[]): string {
-  const now = Date.now();
-  for (const [hash, at] of recentCommits) {
-    if (now - at > DUPLICATE_COMMIT_WINDOW_MS) recentCommits.delete(hash);
-  }
-
-  const fingerprint = crypto
-    .createHash("sha256")
-    .update(JSON.stringify(rows.map((r) => ({ ...r, row: undefined }))))
-    .digest("hex");
+  const fingerprint = fingerprintOf(rows.map((r) => ({ ...r, row: undefined })));
 
   if (recentCommits.has(fingerprint)) {
     throw new AppError(
@@ -834,7 +830,7 @@ function assertNotDuplicateCommit(rows: ImportRowInput[]): string {
       409,
     );
   }
-  recentCommits.set(fingerprint, now);
+  recentCommits.set(fingerprint, true);
   return fingerprint;
 }
 
