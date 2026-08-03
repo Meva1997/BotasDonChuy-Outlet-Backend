@@ -819,11 +819,20 @@ export async function retryShipmentFromSweeper(order: Order): Promise<ShipmentAt
  * mandar un link roto a una página que respondería 404.
  *
  * La ruta `/pedido/<token>` es la que el frontend registra para esta fase; si cambia allá, cambia
- * aquí — es la única URL que este backend construye hacia el front.
+ * aquí — junto con `publicOrderLookupUrl`, son las únicas URLs que este backend construye hacia el
+ * front, y por eso viven las dos juntas.
  */
 function publicOrderUrl(publicToken: string | null): string | undefined {
   if (!publicToken) return undefined;
   return `${FRONTEND_URL.replace(/\/+$/, "")}/pedido/${publicToken}`;
+}
+
+/**
+ * La página de consulta sin token: donde el comprador pega el código que ahora lleva el correo.
+ * No depende del pedido, así que no puede faltar como `publicOrderUrl`.
+ */
+function publicOrderLookupUrl(): string {
+  return `${FRONTEND_URL.replace(/\/+$/, "")}/pedido`;
 }
 
 /**
@@ -854,7 +863,6 @@ async function sendOrderEmail(
       to: order.customerEmail,
       subject: opts.subject,
       html: orderConfirmationTemplate({
-        orderId: order.id,
         createdAt: order.createdAt,
         customerName: order.customerName,
         items: (order.items ?? []).map((it) => ({
@@ -883,6 +891,10 @@ async function sendOrderEmail(
         shippingCarrier: order.shippingCarrier,
         tracking: opts.tracking,
         trackingPageUrl: publicOrderUrl(order.publicToken),
+        // El token también va suelto: el botón sirve para el clic, pero la página de consulta pide
+        // el código y dentro de un `href` no hay forma de copiarlo.
+        trackingCode: order.publicToken,
+        trackingLookupUrl: publicOrderLookupUrl(),
       }),
       idempotencyKey: opts.idempotencyKey,
     });
@@ -894,10 +906,17 @@ async function sendOrderEmail(
   }
 }
 
-/** Correo de confirmación de pago (Fase 9.3), sin datos de rastreo. */
+/**
+ * Correo de confirmación de pago (Fase 9.3), sin datos de rastreo.
+ *
+ * El asunto no lleva el número de pedido por el mismo motivo que el cuerpo (ver `introBody` en
+ * `orderConfirmation.ts`): `Order.id` es un consecutivo de la tienda, no del comprador. La
+ * `idempotencyKey` sí lo conserva — es interna de Resend, no la ve el cliente, y es la garantía de
+ * "un correo por pedido".
+ */
 function sendOrderConfirmationEmail(order: Order): Promise<void> {
   return sendOrderEmail(order, {
-    subject: `Confirmación de tu pedido #${order.id} — Botas Don Chuy Outlet`,
+    subject: "Confirmación de tu pedido — Botas Don Chuy Outlet",
     idempotencyKey: `order-confirmation/${order.id}`,
   });
 }
@@ -914,7 +933,7 @@ export function sendShipmentEmail(
   tracking: { number: string; url?: string; carrier?: string },
 ): Promise<void> {
   return sendOrderEmail(order, {
-    subject: `Tu pedido #${order.id} va en camino — Botas Don Chuy Outlet`,
+    subject: "Tu pedido va en camino — Botas Don Chuy Outlet",
     idempotencyKey: `order-shipped/${order.id}`,
     tracking,
   });
