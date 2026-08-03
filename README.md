@@ -581,9 +581,15 @@ correo de confirmación, así que si lo borraba o le caía en spam, cada "¿ya s
 siendo trabajo manual del dueño por WhatsApp.
 
 - **La credencial es el token**, un UUID opaco (`orders.publicToken`, con índice único) que se genera
-  en `createOrder`, viaja como link en el correo de confirmación (`/pedido/<token>`) y se devuelve
-  también en el `201` del checkout. **No** es `id + email`: los ids son secuenciales y un correo es
-  adivinable, así que ese par sería enumerable aunque se le pusiera rate limit.
+  en `createOrder`, viaja **dos veces** en los correos al cliente —como link del botón "Ver el estado
+  de mi pedido" (`/pedido/<token>`) y como **código a la vista, listo para copiar**, porque la página
+  `/pedido` pide el código y un token metido dentro de un `href` no hay cómo copiarlo sin conocer el
+  menú contextual del cliente de correo— y se devuelve también en el `201` del checkout. **No** es
+  `id + email`: los ids son secuenciales y un correo es adivinable, así que ese par sería enumerable
+  aunque se le pusiera rate limit.
+- Por eso mismo **los correos al cliente no llevan número de pedido** (ni en el cuerpo ni en el
+  asunto): `Order.id` es el consecutivo global de la tienda, no del comprador, y como referencia no
+  le sirve de nada. La fecha del pedido sí se queda.
 - **Proyección explícita**, no la fila del pedido con exclusiones: se arma campo por campo y el
   `SELECT` va acotado, así que una columna nueva en `Order` **no aparece** hasta que alguien la
   agregue a mano — el modo de fallo seguro. Devuelve estado, rastreo, totales con los precios

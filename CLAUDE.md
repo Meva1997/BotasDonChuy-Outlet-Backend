@@ -541,17 +541,37 @@ engine): `passwordResetCodeTemplate`, `orderConfirmationTemplate`, `newOrderNoti
 current `Product` prices (original struck through when discounted), the
 `subtotal`/`savings`/`couponDiscount`/`shipping`/`total`, the shipping address, and a **conditional
 shipping block**: a "Estamos preparando tu envío" placeholder, or —when `tracking: { number, url?,
-carrier? }` is passed— the "va en camino" variant, so one template backs both emails. It also takes an
-optional `trackingPageUrl` (Fase O.4) and renders a "Ver el estado de mi pedido" button in **both** emails,
-since they share `sendOrderEmail` and there's no telling which one the customer keeps; `publicOrderUrl`
-returns `undefined` for an order with no token (rows predating the column) and the block simply isn't
-rendered, rather than linking to a 404. It **never** receives or renders `unitCost`, formats money with
+carrier? }` is passed— the "va en camino" variant, so one template backs both emails.
+
+**It never renders the order number**, in the body or the subject, and that's deliberate: `Order.id` is
+the store's global sequence, not the buyer's — "tu pedido #20" implies twenty purchases they never made
+— and it isn't a usable reference either, since the public lookup is by token precisely because a
+sequential id would be enumerable. The date stays: it's what actually distinguishes two purchases in an
+inbox. Both `sendOrderEmail` callers' `idempotencyKey`s (`order-confirmation/${id}`, `order-shipped/${id}`)
+**do** keep the id — they're internal to Resend, the customer never sees them, and they're the
+"one email per order" guarantee shared by the Skydropx webhook and the manual status advance.
+
+The tracking block (Fase O.4) offers **two ways in, and both are needed**: the "Ver el estado de mi
+pedido" button (`trackingPageUrl`) **and the `publicToken` printed in plain sight** in a monospace,
+`word-break:break-all` box (`trackingCode`), with `trackingLookupUrl` naming the page where it's pasted.
+The code box exists because the button alone left the token reachable only inside an `href`: the `/pedido`
+page asks for the **code**, so a buyer arriving that way had to know how to "copy link address" — the
+owner himself couldn't find it. That box is **never an `<a>`** (tapping a link on mobile navigates instead
+of letting you select the text, which is the whole point). The block goes in **both** emails, since they
+share `sendOrderEmail` and there's no telling which one the customer keeps; with neither URL nor code
+(rows predating the `publicToken` column, where `publicOrderUrl` returns `undefined`) nothing is rendered
+at all, rather than a link to a 404 or an empty box. `payment.service.ts` builds both URLs —
+`publicOrderUrl` (`/pedido/<token>`) and `publicOrderLookupUrl` (`/pedido`) — and they are the only URLs
+this backend constructs toward the front, which is why they live side by side.
+
+It **never** receives or renders `unitCost`, formats money with
 the shared `formatMoney` (`src/utils/formatMoney.ts`, es-MX `$1,920.50` — also used by
 `dashboard.service.ts` and `product.controller.ts`'s price-conflict error, so the same amount reads the
 same everywhere) and formats the order date pinned to `America/Mexico_City` (a **deliberate** deviation
 from the repo's UTC-pinning, which exists for aggregation stability — this is a customer receipt for a
 store in Celaya, GTO). Every customer/product-controlled string it interpolates (`customerName`,
-`nameSnapshot`, the address fields, `shippingCarrier`, `couponCode`, the `tracking` fields) goes through
+`nameSnapshot`, the address fields, `shippingCarrier`, `couponCode`, `trackingCode`, the `tracking` fields)
+goes through
 `escapeHtml` — without it a legitimate `&`/`<`/`>` in an address breaks the render and a hostile value
 would inject markup; numeric fields are not escaped.
 
@@ -614,9 +634,12 @@ read of orders, so until this phase the only thing a buyer had after paying was 
 deleted or spam-filtered, every "¿ya salió mi pedido?" became manual WhatsApp work.
 
 The credential is **`Order.publicToken`**, an opaque UUID (unique index, `randomUUID()` generated inside
-`createOrder`) that travels as a link in the confirmation email (`/pedido/<token>`, built by
-`publicOrderUrl` in `payment.service.ts` from `FRONTEND_URL` — the only URL this backend builds toward the
-front) **and** in the checkout's `201` (the order is the buyer's, so the front can send them to the
+`createOrder`) that travels in the confirmation email **twice** — as the link behind the button
+(`/pedido/<token>`, built by `publicOrderUrl` in `payment.service.ts` from `FRONTEND_URL`) and as the
+**visible, copy-ready code** next to it (see *Emails / Resend*), because the `/pedido` page asks for the
+code and a token buried in an `href` is unreachable for most people; `publicOrderUrl` and
+`publicOrderLookupUrl` are the only URLs this backend builds toward the front — **and** in the checkout's
+`201` (the order is the buyer's, so the front can send them to the
 tracking page without waiting for the email). Deliberately **not** `id + email`: ids are sequential and an
 email is guessable, so that pair would be enumerable even behind a rate limit.
 
