@@ -195,8 +195,8 @@ function buildKpisForWindow(
   // Los recurrentes se prorratean (la carga mensual es la misma en las dos ventanas: lo que se
   // paga hoy es lo que hay que retirar hoy), pero los de única vez **son distintos en cada una** —
   // hasta esta fase la ventana previa restaba exactamente el mismo gasto que la actual porque la
-  // constante no tenía forma de variar, y eso volvía el trend de GANANCIA NETA una comparación a
-  // medias. Con gastos reales cada ventana suma los suyos.
+  // constante no tenía forma de variar, y eso volvía el trend de GANANCIA OPERATIVA una comparación
+  // a medias. Con gastos reales cada ventana suma los suyos.
   const gastosRecurrentes = monthlyRunRate * (windowDays / 30);
   const gastos: WindowExpenses = {
     monthlyRunRate,
@@ -248,7 +248,7 @@ function buildKpisForWindow(
         : `${formatMoney(gastos.monthlyRunRate)} al mes · ventana de ${windowDays} días`,
     },
     {
-      label: "GANANCIA NETA",
+      label: "GANANCIA OPERATIVA",
       value: formatMoney(gananciaNeta),
       trend: computeTrend(gananciaNeta, gananciaNetaPrev),
     },
