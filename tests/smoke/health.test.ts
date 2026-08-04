@@ -15,4 +15,17 @@ describe("smoke: app arranca en entorno de test", () => {
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("ok");
   });
+
+  it("GET /api/docs.json sirve el spec de OpenAPI con todas las rutas montadas", async () => {
+    const res = await request(app).get("/api/docs.json");
+
+    expect(res.status).toBe(200);
+    expect(res.body.openapi).toMatch(/^3\./);
+    // El spec se construye leyendo los bloques `@openapi` de `src/routes/**/*.ts` con un glob;
+    // si ese glob dejara de empatar (p. ej. al mover un router a otra subcarpeta), el spec
+    // quedaría vacío y Swagger UI se serviría sin una sola ruta, sin que nada más fallara.
+    const paths = Object.keys(res.body.paths ?? {});
+    expect(paths).toEqual(expect.arrayContaining(["/api/products", "/api/orders", "/health"]));
+    expect(res.body.components?.securitySchemes?.bearerAuth).toBeDefined();
+  });
 });

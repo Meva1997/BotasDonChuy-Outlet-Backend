@@ -4,3 +4,4 @@ dist/
 .env.test
 *.log
 .DS_Store
+coverage/

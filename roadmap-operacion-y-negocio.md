@@ -989,18 +989,77 @@ apareciendo en `GET /api/admin/dashboard` y en `GET /api/admin/reports/monthly` 
 
 ### Fase N.5 — Facturación CFDI `[evaluar antes de comprometer]`
 
-**Objetivo:** emitir factura fiscal cuando el cliente la pida.
+**Objetivo:** emitir factura fiscal cuando el cliente la pida, de forma automática y opcional (no todos
+los clientes la piden).
+
+**Contexto (2026-08-04):** ya existe una tienda física con la misma razón social (persona física con
+actividad empresarial), y ahí las facturas se hacen a mano. La motivación de esta fase no es solo dar
+autofacturación al cliente en línea, sino evitar que eso agregue trabajo manual extra al proceso actual
+— por eso la solución probablemente no es "solo facturas individuales", sino individuales (opt-in del
+cliente) **más** algo que cubra el resto de las ventas (posible factura global), dependiendo de lo que
+confirme el contador. **No comprometer el diseño hasta tener las respuestas de abajo.**
 
 **Por qué está al final:** es de lejos la fase más pesada de este documento y la única que depende de
 requisitos legales y de un proveedor externo de pago. No se compromete hasta que el negocio confirme
 que la necesita.
 
-**A resolver antes de escribir código:**
+**Preguntas enviadas al contador (2026-08-04) — esperando respuesta:**
+
+*Lo más importante primero:*
+- [ ] Todo lo que entra al banco por las ventas, ¿tiene que llevar factura sí o sí? ¿O es válido juntar
+  en una sola "factura global" todo lo que la gente no pidió que se le facturara?
+- [ ] En la tienda física, ¿ya se hace esa factura global de lo que no se factura? ¿Cada cuándo — diario,
+  semanal, mensual?
+- [ ] Las ventas de la tienda en línea, ¿se pueden meter a esa misma factura global, o tienen que ir
+  aparte?
+- [ ] Si un cliente en línea sí pide su factura, ¿cómo se evita que esa venta se cuente doble (que
+  también aparezca en la factura global del mes)?
+
+*Sobre cómo se cobra en línea:*
+- [ ] El dinero de las ventas en línea no llega directo del cliente al banco — lo deposita la pasarela
+  de pagos que procesa las tarjetas, y a veces junta varias ventas en un solo depósito. ¿Eso cambia algo
+  de cómo se debe facturar o de cómo se concilia?
+- [ ] Todas las ventas en línea se cobran de una sola exhibición con tarjeta, nunca a meses ni a
+  crédito — ¿hay algo especial que deba ir en la factura por eso?
+
+*Datos necesarios para poder generar cualquier factura:*
+- [ ] Código de producto (clave SAT) a usar para botas, sombreros y ropa.
+- [ ] ¿Todo lleva el IVA normal del 16%, o hay algo que va diferente?
+- [ ] El costo del envío que se le cobra al cliente, ¿va como renglón aparte en la factura o se suma al
+  precio del producto?
+- [ ] Si se aplicó un descuento con cupón, ¿debe verse reflejado en la factura o solo se factura por lo
+  que realmente se cobró?
+
+*Cómo debe funcionar el día a día:*
+- [ ] Si se automatiza, ¿cada cuánto se debe "cerrar" el corte de ventas — diario, semanal, mensual?
+- [ ] ¿El contador quiere revisar las facturas antes de que salgan, o está bien que salgan automáticas
+  sin revisión previa?
+- [ ] Si un cliente pide su factura, ¿hasta cuánto tiempo después de la compra se le puede dar? (¿solo
+  el mismo mes, o hay más margen?)
+
+*Cancelaciones:*
+- [ ] Si se cancela/devuelve una venta que ya tenía factura personal (se engancha con
+  `cancelOrderByAdmin`), ¿se cancela la factura o se hace nota de crédito?
+- [ ] Si esa venta cancelada ya se había incluido en una factura global de un mes anterior, ¿cómo se
+  corrige?
+
+*Para dar de alta todo:*
+- [ ] ¿Ya hay cuenta con algún proveedor de facturación (Facturama, Facturapi, SW Sapien, Finkok)? Si ya
+  se usa uno para la tienda física, usar el mismo para no duplicar folios/series.
+- [ ] ¿Se tiene a la mano el certificado de sello digital (para timbrar), o hay que tramitarlo?
+
+**A resolver antes de escribir código (una vez con las respuestas de arriba):**
 - [ ] ¿El negocio la necesita hoy? (régimen fiscal, volumen, si los clientes la piden de verdad).
-- [ ] Proveedor: Facturama · SW Sapien · Finkok. Comparar costo por timbre, calidad de la API y
-  soporte de sandbox.
+- [ ] Proveedor definitivo, según la respuesta del contador sobre si ya usa uno para la tienda física.
+  Si parte de cero: comparar Facturama · SW Sapien · Finkok · Facturapi por costo por timbre, calidad de
+  la API y soporte de sandbox — Facturapi en particular ofrece un **portal de autofacturación** hospedado
+  por ellos (dominio propio, link de captura, sin que el cliente pase por el checkout), lo que encajaría
+  bien con el flujo opt-in.
 - [ ] Datos fiscales del cliente: hoy `createOrderSchema` **no** los pide (RFC, régimen, uso de CFDI,
-  CP fiscal). ¿Se capturan en el checkout o en un flujo aparte, posterior a la compra?
+  CP fiscal). ¿Se capturan en el checkout o en un flujo aparte, posterior a la compra (vía portal de
+  autofacturación)?
+- [ ] Si aplica factura global: diseñar cómo se excluyen del corte global los pedidos que ya se
+  facturaron individualmente (flag en `Order` o tabla `Invoice` como fuente de verdad).
 - [ ] Cancelación de factura cuando se cancela/reembolsa un pedido — se engancha con
   `cancelOrderByAdmin`.
 
@@ -1009,6 +1068,8 @@ que la necesita.
 - [ ] Servicio de timbrado con el patrón de siempre (`src/config/<proveedor>.ts` con `dotenv.config()`
   propio y hard-require, cliente compartido, errores tipados) y **mockeado en tests**.
 - [ ] Endpoints de solicitud y descarga (PDF/XML) + envío por correo.
+- [ ] Si aplica: job/endpoint para el corte de factura global, excluyendo pedidos ya facturados
+  individualmente.
 
 ---
 
