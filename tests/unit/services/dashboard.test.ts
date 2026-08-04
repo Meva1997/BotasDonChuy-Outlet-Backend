@@ -267,7 +267,7 @@ describe("dashboard.service — getDashboardData (Parte 10)", () => {
     expect(gastosKpi(data, "30").subtitle).toContain("de única vez");
   });
 
-  it("sin gastos capturados el KPI es $0 y GANANCIA NETA iguala a la BRUTA", async () => {
+  it("sin gastos capturados el KPI es $0 y GANANCIA OPERATIVA iguala a la BRUTA", async () => {
     jest.useFakeTimers().setSystemTime(new Date("2026-07-20T12:00:00Z"));
     const order = buildOrder({
       id: 1,
@@ -283,7 +283,7 @@ describe("dashboard.service — getDashboardData (Parte 10)", () => {
       data.profitKpisByPeriod["30"].find((k) => k.label === label)!.value;
 
     expect(gastosKpi(data, "30").value).toBe(formatMoney(0));
-    expect(kpi("GANANCIA NETA")).toBe(kpi("GANANCIA BRUTA"));
+    expect(kpi("GANANCIA OPERATIVA")).toBe(kpi("GANANCIA BRUTA"));
   });
 
   it("inventory incluye el valor de cada producto (stock resuelto vía productSizes)", async () => {

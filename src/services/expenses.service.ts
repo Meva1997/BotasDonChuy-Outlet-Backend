@@ -36,9 +36,9 @@ import {
  * Todo se calcula en memoria: las dos tablas son de decenas de filas, no de miles.
  */
 
-/** Ventana de "próximos cargos" que devuelve `/summary`. Dos meses cubren hasta el gasto */
-/*  bimestral más lejano sin volver la lista inmanejable. */
-const UPCOMING_DAYS = 60;
+/** Ventana de "próximos cargos" que devuelve `/summary`. Un mes basta para responder */
+/*  "qué se cobra pronto" sin adelantarse a fechas que todavía no importan. */
+const UPCOMING_DAYS = 30;
 
 /**
  * Cuánto pesa cada frecuencia en un mes.

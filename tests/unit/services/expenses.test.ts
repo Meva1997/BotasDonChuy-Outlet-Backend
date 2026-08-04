@@ -353,11 +353,9 @@ describe("expenses.service — resumen / cuánto retirar (Fase N.3)", () => {
     expect(summary.upcomingCharges.map((c) => c.date)).toEqual([
       "2026-08-05",
       "2026-08-15",
-      "2026-09-05",
-      "2026-09-15",
     ]);
-    expect(summary.upcomingTotal).toBe(1380);
-    expect(summary.upcomingDays).toBe(60);
+    expect(summary.upcomingTotal).toBe(690);
+    expect(summary.upcomingDays).toBe(30);
   });
 
   it("un gasto con endsAt en el pasado no cuenta como activo ni suma carga", () => {
