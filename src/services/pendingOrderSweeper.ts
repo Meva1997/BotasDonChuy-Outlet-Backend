@@ -125,6 +125,17 @@ export async function sweepOnce(): Promise<void> {
   }
 }
 
+/**
+ * Olvida los fallos acumulados. Existe **solo para los tests**, igual que
+ * `resetShipmentRetryAttempts()` del barrido gemelo: el mapa vive en el módulo y sobrevive al
+ * `truncateAll` entre casos, así que sin esto un caso heredaría los fallos que otro dejó para el
+ * mismo id (los SERIAL se reinician con cada truncate) y la alerta del umbral saltaría antes de
+ * tiempo.
+ */
+export function resetPendingOrderFailures(): void {
+  consecutiveFailuresByOrderId.clear();
+}
+
 let timer: NodeJS.Timeout | null = null;
 
 /**

@@ -63,4 +63,27 @@ describe("config/sentry", () => {
     expect(sentryInitMock).not.toHaveBeenCalled();
     expect(loggerWarnMock).toHaveBeenCalledTimes(1);
   });
+
+  it("usa 'development' como fallback de environment cuando NODE_ENV no está definida", () => {
+    // A diferencia de los otros dos casos, aquí SÍ hace falta mockear `dotenv`: borrar
+    // NODE_ENV de process.env dejaría que el propio `dotenv.config()` de sentry.ts la
+    // repueble desde el .env real ("development"), y entonces la rama `?? "development"`
+    // nunca se ejecutaría — el valor ya vendría definido antes de llegar a esa línea.
+    process.env.SENTRY_DSN = "https://test-dsn@o0.ingest.sentry.io/1";
+    const originalNodeEnv = process.env.NODE_ENV;
+    delete process.env.NODE_ENV;
+
+    try {
+      jest.isolateModules(() => {
+        jest.doMock("dotenv", () => ({ config: jest.fn() }));
+        require("../../../src/config/sentry");
+      });
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv;
+    }
+
+    expect(sentryInitMock).toHaveBeenCalledWith(
+      expect.objectContaining({ environment: "development" }),
+    );
+  });
 });

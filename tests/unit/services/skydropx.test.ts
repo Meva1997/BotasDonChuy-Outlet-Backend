@@ -296,5 +296,338 @@ describe("skydropx.service (Parte 7)", () => {
         status: 503,
       });
     });
+
+    it("un fallo del propio OAuth lleva el path del token, no el de la llamada de negocio", async () => {
+      const fetchMock = buildFetchMock([{ status: 401, body: { error: "invalid_client" } }]);
+      (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      // Distinguirlos importa: un 401 aquí son credenciales mal configuradas (arreglable), no
+      // una petición de negocio rechazada.
+      await expect(resolveWithFakeTimers(skydropx.getSkydropxCredits())).rejects.toMatchObject({
+        name: "SkydropxRequestError",
+        status: 401,
+        path: "/api/v1/oauth/token",
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1); // ni siquiera se intentó la llamada de negocio
+    });
+  });
+
+  describe("ensureAccessToken", () => {
+    it("deja el token en caché para que la llamada siguiente no lo renueve", async () => {
+      const fetchMock = buildFetchMock([{ body: oauthBody() }, { body: { data: { balance: 1 } } }]);
+      (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      await resolveWithFakeTimers(skydropx.ensureAccessToken());
+      expect(fetchMock).toHaveBeenCalledTimes(1); // solo el OAuth
+
+      await resolveWithFakeTimers(skydropx.getSkydropxCredits());
+      expect(fetchMock).toHaveBeenCalledTimes(2); // reusó el token: solo la llamada de negocio
+    });
+
+    it("propaga el fallo del token para que `createShipment` no lo confunda con uno de la guía", async () => {
+      // Es su razón de existir: resolver el token FUERA del try de `createShipment`, porque un
+      // fallo de token nunca es "incierto" — el POST /shipments jamás salió.
+      const fetchMock = buildFetchMock([{ status: 500, body: { error: "oauth down" } }]);
+      (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(resolveWithFakeTimers(skydropx.ensureAccessToken())).rejects.toMatchObject({
+        name: "SkydropxRequestError",
+        path: "/api/v1/oauth/token",
+      });
+    });
+  });
+
+  describe("getQuotationRate — el destino debe coincidir con el que se cotizó", () => {
+    const otraDireccion: SkydropxService.SkydropxAddress = {
+      ...addr,
+      postal_code: "01000",
+      area_level2: "Ciudad de México",
+    };
+
+    /** Cotiza de verdad para que el servicio recuerde a qué dirección correspondió `q1`. */
+    async function cotizar(fetchMock: ReturnType<typeof buildFetchMock>) {
+      (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+      await resolveWithFakeTimers(skydropx.getShippingRates(addr, addr, parcel));
+    }
+
+    function quotationResponses(rates: unknown[]) {
+      return [
+        { body: oauthBody() },
+        { body: { id: "q1", is_completed: false, rates: [] } },
+        { body: { id: "q1", is_completed: true, rates } },
+        { body: { id: "q1", is_completed: true, rates } }, // la re-consulta de getQuotationRate
+      ];
+    }
+
+    it("devuelve la tarifa cuando la dirección de la orden es la misma", async () => {
+      await cotizar(buildFetchMock(quotationResponses([rate("r1"), rate("r2")])));
+
+      const result = await resolveWithFakeTimers(skydropx.getQuotationRate("q1", "r1", addr));
+
+      expect(result).toMatchObject({ rateId: "r1", total: 120, amount: 100, carrier: "DHL" });
+    });
+
+    it("devuelve null si la orden se manda a OTRA dirección, sin consultar a Skydropx", async () => {
+      // El fraude que esto tapa: cotizar barato a una dirección cercana y mandar el pedido a
+      // otra más cara pagando el envío de la primera.
+      const fetchMock = buildFetchMock(quotationResponses([rate("r1")]));
+      await cotizar(fetchMock);
+      const llamadasTrasCotizar = fetchMock.mock.calls.length;
+
+      const result = await resolveWithFakeTimers(
+        skydropx.getQuotationRate("q1", "r1", otraDireccion),
+      );
+
+      expect(result).toBeNull();
+      expect(fetchMock).toHaveBeenCalledTimes(llamadasTrasCotizar); // falla cerrado, sin red
+    });
+
+    it("devuelve null para una cotización que no recordamos (proceso reiniciado)", async () => {
+      const fetchMock = buildFetchMock([{ body: oauthBody() }]);
+      (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      // Sin el registro en memoria no se puede verificar el destino, así que se falla cerrado
+      // (el checkout responde 409 "vuelve a cotizar") en vez de confiar a ciegas.
+      const result = await resolveWithFakeTimers(
+        skydropx.getQuotationRate("q_desconocida", "r1", addr),
+      );
+
+      expect(result).toBeNull();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("devuelve null si el rate ya no está en la cotización", async () => {
+      await cotizar(buildFetchMock(quotationResponses([rate("r1")])));
+
+      const result = await resolveWithFakeTimers(skydropx.getQuotationRate("q1", "r_inexistente", addr));
+
+      expect(result).toBeNull();
+    });
+
+    it("devuelve null si el rate dejó de ser utilizable (sin montos o fallido)", async () => {
+      await cotizar(
+        buildFetchMock(
+          quotationResponses([rate("r_sin_monto", { amount: null, total: null, success: true })]),
+        ),
+      );
+
+      const result = await resolveWithFakeTimers(skydropx.getQuotationRate("q1", "r_sin_monto", addr));
+
+      expect(result).toBeNull();
+    });
+  });
+
+  describe("createShipment", () => {
+    const contacto: SkydropxService.SkydropxContact = {
+      name: "Don Chuy",
+      street1: "Calle Falsa 123",
+      company: "Botas Don Chuy",
+      phone: "4610000000",
+      email: "tienda@test.com",
+      reference: "Portón café",
+    };
+
+    const respuestaOk = {
+      body: {
+        data: {
+          id: "shipment_123",
+          type: "shipment",
+          attributes: { carrier_name: "DHL", workflow_status: "in_progress" },
+        },
+      },
+    };
+
+    it("devuelve el id de la guía y la paquetería, con los dos campos que Skydropx no documenta", async () => {
+      const fetchMock = buildFetchMock([{ body: oauthBody() }, respuestaOk]);
+      (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      const result = await resolveWithFakeTimers(
+        skydropx.createShipment("rate_1", contacto, contacto),
+      );
+
+      expect(result).toEqual({ shipmentId: "shipment_123", carrierName: "DHL" });
+
+      // Los dos hallazgos que costaron 422s contra el sandbox: `consignment_note` NO es texto
+      // libre (es la clave SAT de Carta Porte) y `package_type` es obligatorio pese a
+      // documentarse opcional. Si alguien los "limpia" por parecer mágicos, se rompe la guía.
+      // `buildFetchMock` se declara sin parámetros, así que sus `calls` no vienen tipadas.
+      const [, init] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+      const body = JSON.parse(init.body as string);
+      expect(body.shipment.rate_id).toBe("rate_1");
+      expect(body.shipment.packages[0]).toEqual({
+        package_number: "1",
+        package_type: "4G",
+        consignment_note: "53102400",
+      });
+    });
+
+    it("un 422 se propaga tal cual: Skydropx la rechazó, no creó ni cobró nada", async () => {
+      const fetchMock = buildFetchMock([
+        { body: oauthBody() },
+        { status: 422, body: { error: "rate no disponible" } },
+      ]);
+      (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      // NO se envuelve como incierto: es seguro reintentar y liberar el centinela.
+      await expect(
+        resolveWithFakeTimers(skydropx.createShipment("rate_1", contacto, contacto)),
+      ).rejects.toMatchObject({ name: "SkydropxRequestError", status: 422 });
+    });
+
+    it.each([
+      ["un 408 (timeout del lado de Skydropx)", 408],
+      ["un 429 (rate limit: pudo procesarse igual)", 429],
+      ["un 500", 500],
+      ["un 502", 502],
+    ])("%s deja la guía en duda: puede haberse creado y cobrado", async (_caso, status) => {
+      const fetchMock = buildFetchMock([{ body: oauthBody() }, { status, body: { error: "x" } }]);
+      (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        resolveWithFakeTimers(skydropx.createShipment("rate_1", contacto, contacto)),
+      ).rejects.toMatchObject({ name: "SkydropxShipmentUncertainError" });
+    });
+
+    it.each([
+      ["ECONNREFUSED", "ECONNREFUSED"],
+      ["ENOTFOUND", "ENOTFOUND"],
+      ["EAI_AGAIN", "EAI_AGAIN"],
+    ])("un %s NO es incierto: la petición nunca salió del proceso", async (_caso, code) => {
+      const fetchMock = jest
+        .fn()
+        // El OAuth sí resuelve (se pide fuera del try, y su fallo nunca sería incierto).
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => oauthBody(),
+          text: async () => "",
+        } as unknown as Response)
+        .mockImplementationOnce(async () => {
+          const err = new TypeError("fetch failed") as Error & { cause?: { code: string } };
+          err.cause = { code };
+          throw err;
+        });
+      (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      const error = await resolveWithFakeTimers(
+        skydropx.createShipment("rate_1", contacto, contacto).catch((e: Error) => e),
+      );
+
+      // Se propaga el error crudo: liberar el centinela y reintentar es seguro aquí.
+      expect(error).toBeInstanceOf(TypeError);
+      expect((error as Error).name).not.toBe("SkydropxShipmentUncertainError");
+    });
+
+    it("un socket cortado a media petición SÍ es incierto (a diferencia de ECONNREFUSED)", async () => {
+      const fetchMock = jest
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => oauthBody(),
+          text: async () => "",
+        } as unknown as Response)
+        .mockImplementationOnce(async () => {
+          const err = new Error("socket hang up") as Error & { cause?: { code: string } };
+          err.cause = { code: "ECONNRESET" };
+          throw err;
+        });
+      (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        resolveWithFakeTimers(skydropx.createShipment("rate_1", contacto, contacto)),
+      ).rejects.toMatchObject({ name: "SkydropxShipmentUncertainError" });
+    });
+
+    it("un timeout del AbortSignal es incierto y conserva la causa original", async () => {
+      const fetchMock = jest
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => oauthBody(),
+          text: async () => "",
+        } as unknown as Response)
+        .mockImplementationOnce(async () => {
+          const err = new Error("The operation was aborted due to timeout");
+          err.name = "TimeoutError";
+          throw err;
+        });
+      (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      const error = (await resolveWithFakeTimers(
+        skydropx.createShipment("rate_1", contacto, contacto).catch((e: Error) => e),
+      )) as Error & { reason?: Error };
+
+      expect(error.name).toBe("SkydropxShipmentUncertainError");
+      expect(error.message).toContain("rate_1");
+      // La causa se conserva para que la alerta `fatal` diga qué pasó realmente.
+      expect(error.reason).toBeInstanceOf(Error);
+    });
+
+    it("un fallo al pedir el token no se disfraza de guía incierta", async () => {
+      const fetchMock = buildFetchMock([{ status: 503, body: { error: "oauth down" } }]);
+      (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      // El token se resuelve fuera del try justo para esto: si se marcara incierto, el pedido
+      // quedaría bloqueado como "quizá cobrada" cuando la petición nunca salió.
+      await expect(
+        resolveWithFakeTimers(skydropx.createShipment("rate_1", contacto, contacto)),
+      ).rejects.toMatchObject({ name: "SkydropxRequestError", path: "/api/v1/oauth/token" });
+    });
+  });
+
+  describe("verifySkydropxWebhookSignature", () => {
+    const secret = process.env.SKYDROPX_WEBHOOK_SECRET!;
+    const body = Buffer.from(JSON.stringify({ data: { type: "packages" } }));
+
+    function firmar(payload: Buffer, key = secret): string {
+      return require("crypto").createHmac("sha512", key).update(payload).digest("hex");
+    }
+
+    it("acepta una firma HMAC-SHA512 válida sobre el cuerpo crudo", () => {
+      expect(skydropx.verifySkydropxWebhookSignature(body, `HMAC ${firmar(body)}`)).toBe(true);
+    });
+
+    it("acepta el esquema en minúsculas y con espacios de sobra", () => {
+      expect(skydropx.verifySkydropxWebhookSignature(body, `  hmac   ${firmar(body)}  `)).toBe(true);
+    });
+
+    it("rechaza una firma calculada con otro secreto", () => {
+      expect(
+        skydropx.verifySkydropxWebhookSignature(body, `HMAC ${firmar(body, "secreto-ajeno")}`),
+      ).toBe(false);
+    });
+
+    it("rechaza una firma válida pero de otro cuerpo (manipulación del payload)", () => {
+      const otroCuerpo = Buffer.from(JSON.stringify({ data: { type: "shipments" } }));
+
+      expect(skydropx.verifySkydropxWebhookSignature(body, `HMAC ${firmar(otroCuerpo)}`)).toBe(false);
+    });
+
+    it("rechaza header ausente, vacío o con otro esquema", () => {
+      expect(skydropx.verifySkydropxWebhookSignature(body, undefined)).toBe(false);
+      expect(skydropx.verifySkydropxWebhookSignature(body, "")).toBe(false);
+      expect(skydropx.verifySkydropxWebhookSignature(body, `Bearer ${firmar(body)}`)).toBe(false);
+      expect(skydropx.verifySkydropxWebhookSignature(body, "HMAC")).toBe(false);
+    });
+
+    it("rechaza una firma de longitud distinta sin lanzar", () => {
+      // `crypto.timingSafeEqual` LANZA si los buffers no miden igual; por eso la longitud se
+      // compara antes. Sin ese chequeo esto sería un 500 en vez de un 400.
+      expect(() =>
+        skydropx.verifySkydropxWebhookSignature(body, "HMAC abc123"),
+      ).not.toThrow();
+      expect(skydropx.verifySkydropxWebhookSignature(body, "HMAC abc123")).toBe(false);
+    });
+
+    it("rechaza una firma que no es hex sin descartar caracteres inválidos", () => {
+      // Se comparan las cadenas tal cual: decodificar con Buffer.from(x,"hex") descartaría lo
+      // inválido y podría hacer coincidir longitudes por accidente.
+      const firmaValida = firmar(body);
+      const noHex = "z".repeat(firmaValida.length);
+
+      expect(skydropx.verifySkydropxWebhookSignature(body, `HMAC ${noHex}`)).toBe(false);
+    });
   });
 });

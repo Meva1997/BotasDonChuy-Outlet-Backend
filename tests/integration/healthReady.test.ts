@@ -2,6 +2,7 @@ import request from "supertest";
 
 import app from "../../src/app";
 import { sequelize } from "../../src/config/database";
+import * as readiness from "../../src/services/readiness";
 import { markDraining, resetReadinessCache } from "../../src/services/readiness";
 import { setupTestDatabase, closeTestDatabase } from "../setup/db";
 
@@ -87,6 +88,34 @@ describe("GET /health (liveness) no cambia", () => {
       expect(authenticate).not.toHaveBeenCalled();
     } finally {
       authenticate.mockRestore();
+    }
+  });
+});
+
+describe("GET /health/ready — red de seguridad del handler", () => {
+  it("responde 503 (no 500) si el chequeo llegara a lanzar", async () => {
+    // `checkReadiness` está escrito para NUNCA lanzar (una BD caída es un `{ ready:false }`
+    // válido, no un error de request). Este catch es la red por si esa garantía se rompiera en
+    // un refactor: la ruta no debe llegar al `errorHandler`, que reportaría a Sentry en CADA
+    // sondeo —varios por minuto, para siempre— y devolvería copy en español a una máquina.
+    const check = jest
+      .spyOn(readiness, "checkReadiness")
+      .mockRejectedValue(new Error("fallo inesperado en el chequeo"));
+
+    try {
+      const res = await request(app).get("/health/ready");
+
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({
+        status: "unavailable",
+        database: "down",
+        timestamp: expect.any(String),
+      });
+      // Igual que el 503 normal: el detalle del error va al log, nunca al cuerpo de una ruta
+      // pública sin auth.
+      expect(JSON.stringify(res.body)).not.toContain("fallo inesperado");
+    } finally {
+      check.mockRestore();
     }
   });
 });

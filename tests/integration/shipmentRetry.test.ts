@@ -37,8 +37,13 @@ import {
 import {
   sweepShipmentsOnce,
   resetShipmentRetryAttempts,
+  startShipmentRetrySweeper,
+  stopShipmentRetrySweeper,
 } from "../../src/services/shipmentRetrySweeper";
-import { SHIPMENT_RETRY_DELAY_MINUTES } from "../../src/config/skydropx";
+import {
+  SHIPMENT_RETRY_DELAY_MINUTES,
+  SHIPMENT_RETRY_SWEEP_INTERVAL_MINUTES,
+} from "../../src/config/skydropx";
 
 let token: string;
 
@@ -647,5 +652,132 @@ describe("shipmentRetrySweeper — recuperación automática", () => {
     expect(createShipmentMock).toHaveBeenCalledTimes(3);
     expect(sendEmailMock).toHaveBeenCalledTimes(1);
     expect(sendEmailMock.mock.calls[0][0].subject).toMatch(/no se pudo generar la guía/i);
+  });
+
+  it("deja de intentar un pedido cuya guía pudo haberse cobrado, sin gastar sus intentos", async () => {
+    // Skydropx no respondió a media creación: pudo haber creado Y cobrado la guía. El barrido
+    // no puede reintentar a ciegas (pagaría una segunda), así que solo lo registra y lo suelta
+    // — la fila queda marcada y sale de la candidatura de los ciclos siguientes.
+    const order = await paidOrderWithoutLabel();
+    await ageOrder(order.id, STALE_MINUTES);
+    createShipmentMock.mockRejectedValue(
+      new SkydropxShipmentUncertainError("timeout sin respuesta", new Error("AbortError")),
+    );
+
+    await sweepShipmentsOnce();
+
+    const reloaded = await Order.findByPk(order.id);
+    expect(reloaded!.skydropxShipmentId).toBe("unreconciled:desconocido");
+
+    // Ciclos posteriores no vuelven a llamar a Skydropx aunque el pedido siga sin guía real.
+    await ageOrder(order.id, STALE_MINUTES);
+    await sweepShipmentsOnce();
+    await ageOrder(order.id, STALE_MINUTES);
+    await sweepShipmentsOnce();
+    expect(createShipmentMock).toHaveBeenCalledTimes(1);
+
+    // La alerta salió de `createShipmentForOrder` (incondicional y `fatal` para este caso), no
+    // de la ruta de "agotó sus 3 intentos": el pedido nunca gastó intentos.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(sendEmailMock).toHaveBeenCalledTimes(1);
+    expect(sendEmailMock.mock.calls[0][0].subject).not.toMatch(/reintentos/i);
+  });
+
+  it("un error de BD con un pedido no frena el barrido de los demás", async () => {
+    // `retryShipmentFromSweeper` no lanza por un fallo de Skydropx (lo traga
+    // `createShipmentForOrder`), pero sí puede lanzar por la BD. Si eso tumbara el ciclo, un
+    // solo pedido problemático dejaría sin guía a todos los que vinieran detrás.
+    const primero = await paidOrderWithoutLabel();
+    await ageOrder(primero.id, STALE_MINUTES + 10); // más viejo: se procesa primero
+    const segundo = await paidOrderWithoutLabel();
+    await ageOrder(segundo.id, STALE_MINUTES);
+
+    const findByPkSpy = jest
+      .spyOn(Order, "findByPk")
+      .mockRejectedValueOnce(new Error("connection terminated unexpectedly"));
+
+    await expect(sweepShipmentsOnce()).resolves.toBeUndefined();
+
+    findByPkSpy.mockRestore();
+    const reloadedSegundo = await Order.findByPk(segundo.id);
+    expect(reloadedSegundo!.skydropxShipmentId).toBe("shipment_creada_1");
+  });
+});
+
+describe("startShipmentRetrySweeper / stopShipmentRetrySweeper", () => {
+  /**
+   * El cron se salta bajo `NODE_ENV=test` a propósito (una suite no debe arrancar timers), así
+   * que para ejercitar el arranque real hay que fingir otro entorno. Se restaura siempre.
+   */
+  async function withProductionEnv(fn: () => Promise<void> | void): Promise<void> {
+    const original = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    try {
+      await fn();
+    } finally {
+      process.env.NODE_ENV = original;
+      stopShipmentRetrySweeper();
+    }
+  }
+
+  it("no arranca ningún timer bajo NODE_ENV=test", () => {
+    const setIntervalSpy = jest.spyOn(global, "setInterval");
+
+    startShipmentRetrySweeper();
+
+    expect(setIntervalSpy).not.toHaveBeenCalled();
+    setIntervalSpy.mockRestore();
+  });
+
+  it("arranca un timer con el intervalo configurado", async () => {
+    await withProductionEnv(() => {
+      const setIntervalSpy = jest.spyOn(global, "setInterval");
+
+      startShipmentRetrySweeper();
+
+      expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+      expect(setIntervalSpy.mock.calls[0][1]).toBe(
+        SHIPMENT_RETRY_SWEEP_INTERVAL_MINUTES * 60_000,
+      );
+      setIntervalSpy.mockRestore();
+    });
+  });
+
+  it("es idempotente: dos arranques no dejan dos barridos concurrentes", async () => {
+    await withProductionEnv(() => {
+      const setIntervalSpy = jest.spyOn(global, "setInterval");
+
+      startShipmentRetrySweeper();
+      startShipmentRetrySweeper();
+
+      // Dos timers duplicarían las llamadas a Skydropx, cuyo límite de 2 req/s es de la cuenta
+      // entera y se comparte con los checkouts en vivo.
+      expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+      setIntervalSpy.mockRestore();
+    });
+  });
+
+  it("stop detiene el timer y permite volver a arrancarlo", async () => {
+    await withProductionEnv(() => {
+      const clearIntervalSpy = jest.spyOn(global, "clearInterval");
+
+      startShipmentRetrySweeper();
+      stopShipmentRetrySweeper();
+      expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
+
+      const setIntervalSpy = jest.spyOn(global, "setInterval");
+      startShipmentRetrySweeper();
+      expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+
+      clearIntervalSpy.mockRestore();
+      setIntervalSpy.mockRestore();
+    });
+  });
+
+  it("stop es idempotente: el apagado ordenado puede llamarlo sin que haya arrancado", () => {
+    expect(() => {
+      stopShipmentRetrySweeper();
+      stopShipmentRetrySweeper();
+    }).not.toThrow();
   });
 });
