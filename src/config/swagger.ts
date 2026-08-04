@@ -1264,7 +1264,7 @@ const options: Options = {
                 },
               },
             },
-            upcomingDays: { type: "integer", example: 60 },
+            upcomingDays: { type: "integer", example: 30 },
             upcomingTotal: { type: "number", format: "float", example: 830.0 },
             upcomingCharges: {
               type: "array",

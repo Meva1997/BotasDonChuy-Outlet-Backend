@@ -509,7 +509,7 @@ historial. Sin API de tipo de cambio que se desactualice en silencio.
   única vez **no** entran aquí: cuentan completos en su mes y nunca más.
 
 `/summary` completa la respuesta con `upcomingCharges`: qué se cobra, de cuánto y **en qué fecha**
-durante los próximos 60 días.
+durante los próximos 30 días.
 
 Detalles que muerden y ya están resueltos: las fechas son `DATEONLY` (un cargo es un día de
 calendario, no un instante — esquiva el problema de zona horaria que los cupones tuvieron que
