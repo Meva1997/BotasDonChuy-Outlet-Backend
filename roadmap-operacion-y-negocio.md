@@ -1003,73 +1003,121 @@ confirme el contador. **No comprometer el diseño hasta tener las respuestas de 
 requisitos legales y de un proveedor externo de pago. No se compromete hasta que el negocio confirme
 que la necesita.
 
-**Preguntas enviadas al contador (2026-08-04) — esperando respuesta:**
+**Hallazgo del contador que no estaba contemplado (2026-08-04):** la venta en línea se da de alta como
+una **actividad fiscal aparte** — "venta de bienes por plataforma [tecnológica]" — con su propia
+comisión. Una vez dada de alta, el flujo de dinero cambia: el cliente le paga a la pasarela, y lo que
+le llega a Ale en el banco ya viene **neto de comisión + un porcentaje de IVA e ISR que la plataforma
+retiene y entera directo al SAT**. Se abrirá una **cuenta bancaria aparte** de la de la tienda física
+para no revolver los depósitos. Esto es información nueva del contador, no una respuesta a una de las
+preguntas de abajo, y falta aterrizar un detalle antes de diseñar nada: **a qué entidad se refiere
+"la plataforma"** en este esquema (¿Stripe, o alguna otra figura que el contador va a dar de alta?) —
+sin eso no se sabe qué reporta qué a quién.
+
+**Respuestas del contador (recibidas 2026-08-04):**
 
 *Lo más importante primero:*
-- [ ] Todo lo que entra al banco por las ventas, ¿tiene que llevar factura sí o sí? ¿O es válido juntar
-  en una sola "factura global" todo lo que la gente no pidió que se le facturara?
-- [ ] En la tienda física, ¿ya se hace esa factura global de lo que no se factura? ¿Cada cuándo — diario,
-  semanal, mensual?
-- [ ] Las ventas de la tienda en línea, ¿se pueden meter a esa misma factura global, o tienen que ir
-  aparte?
-- [ ] Si un cliente en línea sí pide su factura, ¿cómo se evita que esa venta se cuente doble (que
-  también aparezca en la factura global del mes)?
+- [x] Todo lo que entra al banco por las ventas, ¿tiene que llevar factura sí o sí? ¿O es válido juntar
+  en una sola "factura global" todo lo que la gente no pidió que se le facturara? →
+  **R:** todo lo que no se factura individual, pero que entra a la cuenta, sí se factura global — no
+  hay dinero que quede fuera de ambas.
+- [x] En la tienda física, ¿ya se hace esa factura global de lo que no se factura? ¿Cada cuándo — diario,
+  semanal, mensual? → **R:** puede ser semanal o mensual; normalmente la hacen mensual.
+- [x] Las ventas de la tienda en línea, ¿se pueden meter a esa misma factura global, o tienen que ir
+  aparte? → **R:** **no**, van aparte (consistente con la cuenta bancaria aparte del hallazgo de
+  arriba). Hay que armar un listado de quién pidió factura individual ese mes; la diferencia entre lo
+  depositado en el banco y lo ya facturado individual **es** el total de la global de la tienda en
+  línea.
+- [x] Si un cliente en línea sí pide su factura, ¿cómo se evita que esa venta se cuente doble (que
+  también aparezca en la factura global del mes)? → **R:** llevando control de lo facturado individual
+  vs. lo que no, y restando lo primero antes de armar la global del mes (mismo mecanismo que la
+  respuesta anterior).
 
 *Sobre cómo se cobra en línea:*
-- [ ] El dinero de las ventas en línea no llega directo del cliente al banco — lo deposita la pasarela
+- [x] El dinero de las ventas en línea no llega directo del cliente al banco — lo deposita la pasarela
   de pagos que procesa las tarjetas, y a veces junta varias ventas en un solo depósito. ¿Eso cambia algo
-  de cómo se debe facturar o de cómo se concilia?
+  de cómo se debe facturar o de cómo se concilia? → **R:** todo se basa en lo depositado, menos
+  comisión, menos los impuestos que la plataforma ya retuvo — ver el hallazgo de arriba, es la misma
+  respuesta.
 - [ ] Todas las ventas en línea se cobran de una sola exhibición con tarjeta, nunca a meses ni a
-  crédito — ¿hay algo especial que deba ir en la factura por eso?
+  crédito — ¿hay algo especial que deba ir en la factura por eso? → **sin respuesta explícita** (la
+  numeración de la respuesta saltó del 5 al 7); queda pendiente confirmar en el siguiente intercambio.
 
 *Datos necesarios para poder generar cualquier factura:*
-- [ ] Código de producto (clave SAT) a usar para botas, sombreros y ropa.
-- [ ] ¿Todo lleva el IVA normal del 16%, o hay algo que va diferente?
-- [ ] El costo del envío que se le cobra al cliente, ¿va como renglón aparte en la factura o se suma al
-  precio del producto?
-- [ ] Si se aplicó un descuento con cupón, ¿debe verse reflejado en la factura o solo se factura por lo
-  que realmente se cobró?
+- [x] Código de producto (clave SAT) a usar para botas, sombreros y ropa. → **R:** Lupita ya tiene las
+  claves de producto en el sistema Tralix; va a generar un catálogo para familiarizarse. **Bloquea**
+  la tarea de mapear categoría → clave SAT hasta tener ese catálogo.
+- [x] ¿Todo lleva el IVA normal del 16%, o hay algo que va diferente? → **R:** es el 16%, sin
+  excepciones.
+- [x] El costo del envío que se le cobra al cliente, ¿va como renglón aparte en la factura o se suma al
+  precio del producto? → **R:** el envío se cobra dentro del precio del producto — **no** lleva renglón
+  propio en la factura. (Nota: esto es solo para el CFDI; no cambia cómo `Order.shipping` se trata como
+  costo de venta en el dashboard — ver §"El envío es costo de venta (Fase N.5)" en `CLAUDE.md`, una
+  fase de otro roadmap ya cerrado que por coincidencia comparte el mismo número.)
+- [x] Si se aplicó un descuento con cupón, ¿debe verse reflejado en la factura o solo se factura por lo
+  que realmente se cobró? → **R:** el descuento ya va incluido en el total de la factura — **no** se
+  desglosa como renglón ni como nota aparte.
 
 *Cómo debe funcionar el día a día:*
-- [ ] Si se automatiza, ¿cada cuánto se debe "cerrar" el corte de ventas — diario, semanal, mensual?
-- [ ] ¿El contador quiere revisar las facturas antes de que salgan, o está bien que salgan automáticas
-  sin revisión previa?
-- [ ] Si un cliente pide su factura, ¿hasta cuánto tiempo después de la compra se le puede dar? (¿solo
-  el mismo mes, o hay más margen?)
+- [x] Si se automatiza, ¿cada cuánto se debe "cerrar" el corte de ventas — diario, semanal, mensual? →
+  **R:** mensual, es lo que prefiere el contador.
+- [x] ¿El contador quiere revisar las facturas antes de que salgan, o está bien que salgan automáticas
+  sin revisión previa? → **R:** las primeras sí conviene que las revise; después de eso, automáticas sin
+  revisión. Implica que el flujo automático necesita un modo "solo generar, no timbrar aún" para ese
+  arranque.
+- [x] Si un cliente pide su factura, ¿hasta cuánto tiempo después de la compra se le puede dar? (¿solo
+  el mismo mes, o hay más margen?) → **R:** depende del volumen de ventas por internet y de quién las
+  vaya a generar — con volumen bajo se harían el mismo día, con volumen alto durante el mes. No es una
+  regla fija todavía; se revisita cuando haya volumen real.
 
 *Cancelaciones:*
-- [ ] Si se cancela/devuelve una venta que ya tenía factura personal (se engancha con
-  `cancelOrderByAdmin`), ¿se cancela la factura o se hace nota de crédito?
-- [ ] Si esa venta cancelada ya se había incluido en una factura global de un mes anterior, ¿cómo se
-  corrige?
+- [x] Si se cancela/devuelve una venta que ya tenía factura personal (se engancha con
+  `cancelOrderByAdmin`), ¿se cancela la factura o se hace nota de crédito? → **R:** mejor cancelarla (no
+  nota de crédito).
+- [x] Si esa venta cancelada ya se había incluido en una factura global de un mes anterior, ¿cómo se
+  corrige? → **R:** hay una **ventana de 72 horas después del cierre del mes** para emitir la global, y
+  una política/cláusula del SAT que da cierto plazo para poder cancelar dentro de esa global — el
+  contador la va a mandar aparte. **Falta el texto de esa política** antes de poder diseñar la
+  corrección.
 
 *Para dar de alta todo:*
-- [ ] ¿Ya hay cuenta con algún proveedor de facturación (Facturama, Facturapi, SW Sapien, Finkok)? Si ya
-  se usa uno para la tienda física, usar el mismo para no duplicar folios/series.
-- [ ] ¿Se tiene a la mano el certificado de sello digital (para timbrar), o hay que tramitarlo?
+- [x] ¿Ya hay cuenta con algún proveedor de facturación (Facturama, Facturapi, SW Sapien, Finkok)? Si ya
+  se usa uno para la tienda física, usar el mismo para no duplicar folios/series. → **R:** sí, ya usan
+  **Tralix** para la tienda física; hay que configurarlo para las ventas por internet en vez de dar de
+  alta uno de los cuatro evaluados. **Cambia la tarea de "comparar proveedores" por "confirmar si Tralix
+  expone una API/integración programática"** — pendiente de investigar, no confirmado en esta respuesta.
+- [x] ¿Se tiene a la mano el certificado de sello digital (para timbrar), o hay que tramitarlo? →
+  **R:** ya hay sellos digitales vigentes, no hace falta tramitarlos.
 
-**A resolver antes de escribir código (una vez con las respuestas de arriba):**
-- [ ] ¿El negocio la necesita hoy? (régimen fiscal, volumen, si los clientes la piden de verdad).
-- [ ] Proveedor definitivo, según la respuesta del contador sobre si ya usa uno para la tienda física.
-  Si parte de cero: comparar Facturama · SW Sapien · Finkok · Facturapi por costo por timbre, calidad de
-  la API y soporte de sandbox — Facturapi en particular ofrece un **portal de autofacturación** hospedado
-  por ellos (dominio propio, link de captura, sin que el cliente pase por el checkout), lo que encajaría
-  bien con el flujo opt-in.
+**A resolver antes de escribir código (lo que las respuestas de arriba todavía no cierran):**
+- [ ] **A qué se refiere "la plataforma" en el esquema de retención de IVA/ISR** (ver hallazgo arriba) —
+  sin esto no se sabe si hay una integración nueva que construir o si es puramente un tema contable
+  ajeno al código.
+- [ ] Si Tralix tiene API/webhook para timbrar programáticamente, o si el timbrado seguirá siendo manual
+  y el backend solo necesita **exportar** lo que Tralix necesita (catálogo de ventas, clientes que
+  pidieron factura). Esto decide si esta fase es "integrar un proveedor" o "generar un reporte para
+  captura manual en Tralix" — cambia el tamaño de la fase por completo.
+- [ ] El catálogo de claves SAT por categoría (`bota`/`sombrero`/`ropa`), una vez que Lupita lo comparta.
+- [ ] El texto de la política/cláusula de cancelación dentro de la ventana de 72 h de la global.
 - [ ] Datos fiscales del cliente: hoy `createOrderSchema` **no** los pide (RFC, régimen, uso de CFDI,
-  CP fiscal). ¿Se capturan en el checkout o en un flujo aparte, posterior a la compra (vía portal de
-  autofacturación)?
-- [ ] Si aplica factura global: diseñar cómo se excluyen del corte global los pedidos que ya se
-  facturaron individualmente (flag en `Order` o tabla `Invoice` como fuente de verdad).
-- [ ] Cancelación de factura cuando se cancela/reembolsa un pedido — se engancha con
-  `cancelOrderByAdmin`.
+  CP fiscal). Las respuestas de arriba (factura individual es una excepción bajo petición, no el flujo
+  default) apuntan a capturarlos en un **flujo aparte, posterior a la compra** y no en el checkout —
+  falta confirmar si es un portal de autofacturación hospedado por Tralix o algo que este backend expone.
+- [ ] Diseño del corte global mensual: cómo se calcula "lo depositado" (requiere reconciliar los
+  depósitos netos de Stripe, ya después de comisión y retención, contra `Order.total`) y cómo se excluyen
+  del corte los pedidos ya facturados individualmente (flag en `Order` o tabla `Invoice` como fuente de
+  verdad).
+- [ ] ¿El negocio la necesita hoy? — el contador ya está dando de alta la actividad fiscal, lo que
+  empuja hacia "sí, pronto", pero sigue sin haber una fecha comprometida para el código.
 
 **Tareas (una vez decidido):**
 - [ ] Modelo `Invoice` + migración; datos fiscales opcionales en `Order`.
-- [ ] Servicio de timbrado con el patrón de siempre (`src/config/<proveedor>.ts` con `dotenv.config()`
-  propio y hard-require, cliente compartido, errores tipados) y **mockeado en tests**.
+- [ ] Servicio de timbrado con el patrón de siempre (`src/config/tralix.ts` — o el proveedor que
+  finalmente aplique — con `dotenv.config()` propio y hard-require, cliente compartido, errores
+  tipados) y **mockeado en tests**, **si Tralix resulta tener integración programática**; si no, un
+  endpoint/reporte de exportación en su lugar (ver primer punto pendiente de arriba).
 - [ ] Endpoints de solicitud y descarga (PDF/XML) + envío por correo.
-- [ ] Si aplica: job/endpoint para el corte de factura global, excluyendo pedidos ya facturados
-  individualmente.
+- [ ] Job/endpoint para el corte de factura global **mensual**, con ventana de 72 h tras el cierre del
+  mes, excluyendo pedidos ya facturados individualmente.
 
 ---
 

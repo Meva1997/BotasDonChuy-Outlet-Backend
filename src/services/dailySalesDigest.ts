@@ -153,26 +153,14 @@ export async function sendDailySalesDigest(day: string): Promise<void> {
   }
 
   try {
-    const previousDay = previousStoreDay(day);
-    const [orders, previousOrders] = await Promise.all([
-      Order.findAll({
-        where: salesOfDayWhere(day),
-        // Solo se leen las cantidades: el resumen cuenta piezas, no renglones de producto.
-        include: [{ model: OrderItem, as: "items", attributes: ["quantity"] }],
-        order: [["createdAt", "ASC"]],
-      }),
-      // La comparación solo necesita conteo e importe, así que va sin `include` ni columnas de más.
-      Order.findAll({
-        where: salesOfDayWhere(previousDay),
-        attributes: ["id", "total"],
-      }),
-    ]);
+    const orders = await Order.findAll({
+      where: salesOfDayWhere(day),
+      // Solo se leen las cantidades: el resumen cuenta piezas, no renglones de producto.
+      include: [{ model: OrderItem, as: "items", attributes: ["quantity"] }],
+      order: [["createdAt", "ASC"]],
+    });
 
     const { rows, totals } = summarize(orders);
-    const previous = {
-      orderCount: previousOrders.length,
-      revenue: previousOrders.reduce((acc, order) => acc + order.total, 0),
-    };
 
     await sendEmail({
       to,
@@ -185,7 +173,6 @@ export async function sendDailySalesDigest(day: string): Promise<void> {
         day,
         orders: rows,
         totals,
-        previous,
         adminUrl: `${FRONTEND_URL.replace(/\/+$/, "")}/admin`,
       }),
       // Segunda capa de idempotencia: ventana de 24 h de Resend, que coincide con la cadencia
