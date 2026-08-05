@@ -405,6 +405,35 @@ comparación a medias. **La forma de `DashboardData` no cambia**, así que el pa
 deploy. `src/seed.ts` crea una fila recurrente de `$2,000/mes` equivalente a la constante vieja para que la
 GANANCIA NETA no dé un salto ese día; es una fila normal y editable.
 
+**La línea derivada de envío** (`DerivedShippingCost`, Fase N.5) es el segundo costo más grande del
+negocio y **no es un gasto capturado**: sale de `Order.shipping` y aparece en `/summary` (mes en curso a
+la fecha) y en cada mes de `/history` como un campo `shippingCost` aparte. Tres decisiones que hay que
+leer juntas:
+
+1. **Nunca se persiste como `Expense`.** Una fila por pedido serían ~900 al mes a 30 ventas diarias:
+   inundaría el `activeCount` y el `byCategory` de `/summary`, el `byExpense` de `/history` y la lista
+   editable del panel, para representar algo que ya está en `orders`. Las dos tablas de gastos son de
+   decenas de filas justamente porque las captura un humano.
+2. **Va FUERA de `total`/`byCategory`/`byExpense`/`monthlyRunRate`.** El dashboard ya la resta en
+   GANANCIA BRUTA (el envío es costo de venta, ver **Dashboard**), y como `OPERATIVA = BRUTA − GASTOS`,
+   sumarla también a los totales de gastos la restaría **dos veces**. Se expone aparte para que el dueño
+   la *vea* sin que los dos paneles se contradigan; las banderas `derived: true` e
+   `includedInGrossProfit: true` son el contrato legible por máquina de eso.
+3. **⚠️ Cajas y empaque sí se capturan como `Expense` de categoría `paqueteria`; las guías NO.** Es el
+   único modo de reintroducir el doble conteo, y por eso está advertido en tres lugares: el comentario
+   del enum en `models/Expense.ts`, la bandera en la API, y el copy obligatorio del frontend.
+
+`buildSummary`/`buildHistory` **siguen siendo puras**: reciben el envío como **parámetro final con
+default `new Map()`** en vez de consultarlo adentro (sus tests unitarios corren sin BD y el default deja
+intacto a todo llamador anterior). La consulta vive en los wrappers, `loadShippingByMonth(from,
+toExclusive)`, con `paymentStatus: "paid"` —el mismo predicado del dashboard— y bucketing por
+`isoMonth` UTC para que los dos paneles nunca partan el mes distinto. **Sin `raw: true`**: el
+`parseFloat` de `shipping` vive en el getter del modelo, que `raw` no ejecuta, así que devolvería el
+string `"150.00"` y la suma **concatenaría**. `getExpenseSummary` toma **un solo `now`** para los límites
+del mes y para `buildSummary`, o una llamada a las 23:59:59.9 podría cruzar la medianoche entre ambos.
+Los campos `from`/`to`/`partial` de la línea existen para que un acumulado a media quincena no se lea
+contra un `monthlyRunRate` de mes completo y parezca que el envío sale baratísimo.
+
 ### Aviso de venta al dueño (Fase N.4)
 
 `src/services/ownerNotification.service.ts`, `dailySalesDigest.ts`,
@@ -823,14 +852,72 @@ sandbox algunos servicios literalmente llamados "Sin recolección" venían con `
 se prefiere sobre-avisar (el costo de un falso negativo es que el paquete nunca sale). Es un dato
 **operativo para el dueño**, no para el comprador.
 
-**Empaque y validación.** `src/services/packing.ts`'s `buildParcel` arma **una sola caja apilada** por
-pedido: peso y alto se suman por unidad, largo y ancho toman el máximo del carrito — nunca subcotiza el
-peso/alto, aunque puede sobrestimar. `shipping.controller.ts` valida, antes de cotizar, que cada producto
-tenga `weightKg`/`lengthCm`/`widthCm`/`heightCm` > 0 (mismo invariante que `productSchema` exige desde Fase
-8.2) — un producto con alguna dimensión en `0` haría que `buildParcel` arme una caja subdimensionada pero
-válida, así que en ese caso se **salta la cotización en vivo directo al fallback de tarifa plana**.
+**Empaque y validación (Fase N.6 — ver *Empaque multi-caja* abajo).** `src/services/packing.ts`'s
+`packOrder` acomoda el pedido en las cajas reales de la tienda y `buildParcels` devuelve un bulto por
+caja; la cotización manda ese arreglo completo como `parcels`. `shipping.controller.ts` valida, antes de
+cotizar, que cada producto tenga `weightKg`/`lengthCm`/`widthCm`/`heightCm` > 0 (mismo invariante que
+`productSchema` exige desde Fase 8.2) — un producto con alguna dimensión en `0` daría una caja válida
+pero subdimensionada, así que en ese caso se **salta la cotización en vivo directo al fallback de tarifa
+plana**; lo mismo pasa si el acomodo pasa de `MAX_PARCELS_QUOTED` (10) bultos.
 `POST /api/shipping/rates` está gateado por `shippingRateLimiter` (20 req/min por IP) — es público y sin
 él un solo cliente podría acaparar el presupuesto de 2 req/s de toda la cuenta.
+
+#### Empaque multi-caja (Fase N.6)
+
+`src/services/packing.ts` (`packOrder`/`buildParcels`/`DEFAULT_CARTONS`), `cart.computeShipping`,
+`Order.packageCount`.
+
+Hasta esta fase el envío se calculaba asumiendo **un solo bulto**, por dos caminos y los dos mal.
+`buildParcel` armaba **una caja apilada** (peso y alto sumados por unidad, largo/ancho al máximo): el
+volumen salía bien, pero producía bultos que la tienda nunca arma —3 botas + 1 sombrero daban 45×45×**80
+cm**— y como la paquetería cobra **por bulto**, la factura real llegaba más cara que lo cotizado. Peor:
+`computeShipping` era un `Math.max` por tipo que **ignoraba la cantidad**, así que 3 botas + 1 sombrero
+cobraba $160, lo mismo que una sola bota, y 50 piezas de ropa cobraban $100. Ese camino no es raro —se usa
+cada vez que Skydropx está caído, no devuelve tarifas a tiempo, o un producto trae una dimensión en 0— así
+que cada caja extra salía de la utilidad del dueño. Y la guía declaraba `packages: [1]` fijo.
+
+**`DEFAULT_CARTONS` es el catálogo de cajas de la tienda** (chica 40×35×25/8 kg, mediana 55×40×35/15 kg,
+grande 60×45×50/25 kg, con su tara) y es **el único lugar que editar** cuando el dueño mida las suyas: la
+cotización, la guía y la tarifa plana se mueven todas con él. El acomodo es un *first-fit-decreasing* por
+volumen contra la caja grande **más una pasada de downgrade** que reasigna cada caja cerrada al cartón más
+chico que la aguante — sin esa segunda pasada, un pedido de una bota se cotizaría con la caja maestra y se
+sobrecobraría el envío de **casi todas las ventas**. No es empaquetado 3D exacto (NP-difícil, y aquí no
+paga): aproxima por volumen con `FILL_FACTOR` (0.8 — el 20% restante son huecos de aire, relleno y cajas
+que no teselan), exige que cada pieza quepa **dimensionalmente** (con las medidas ordenadas, o sea
+girándola) y respeta el tope de peso. Puede abrir una caja de más; nunca mete más de lo que cabe.
+`FILL_FACTOR` es literalmente la constante que decide entre subcotizar y sobrecotizar.
+
+Los casos borde están todos sesgados a **no subcotizar**: una pieza más grande que cualquier cartón viaja
+sola con sus propias medidas (`carton: null`) en vez de tumbar la cotización, y una pieza con alguna
+dimensión ≤ 0 (fila anterior a que `productSchema` exigiera `.positive()`) **no comparte caja con nada** —
+no se puede afirmar que quepa, así que se cobra un bulto completo.
+
+**`computeShipping` y la cotización en vivo salen del MISMO `packOrder`**, y eso es el punto: caer al
+respaldo cambia el precio del bulto, nunca cuántos bultos son. El respaldo suma, por caja, la tarifa del
+tipo más caro que esa caja lleva (los montos `SHIPPING_BY_TYPE` no cambiaron). Por eso `CartLineItem` ganó
+las cuatro dimensiones — los tres llamadores (`createOrder`, `shipping.controller`, `previewCoupon`) ya
+tenían el `Product` cargado, así que no hay consulta nueva.
+
+**`isUsableRate` descarta los rates `multishipment`.** Skydropx ofrece tres formas de convertir una
+cotización en envío (`shipment_creation_type`): `single`, `multipackage` (una guía con varios bultos) y
+`multishipment` (**una guía por bulto**). Este modelo guarda un solo
+`skydropxShipmentId`/`trackingNumber`/`labelUrl` por pedido y el webhook localiza la orden por
+`relationships.shipment.data.id`, así que con un `multishipment` solo una de las N guías quedaría visible y
+las demás serían dinero cobrado que nadie puede rastrear ni entregar. Un rate **sin** el campo sigue siendo
+utilizable (el sandbox no siempre lo manda; leer la ausencia como `multishipment` apagaría la cotización en
+vivo entera).
+
+**`Order.packageCount`** (nullable, migración `20260804120000-orders-package-count.ts`) congela cuántos
+bultos ampara la tarifa cobrada, y `createShipment` declara ese número de `packages` numerados. Tiene que
+ser una columna y no un recálculo: la guía se genera minutos después y en otro proceso, donde las
+dimensiones del catálogo pudieron cambiar y `GET /quotations/{id}` **no devuelve los `parcels` cotizados**.
+`null` = tarifa plana o pedido previo a la fase, y el generador lo lee como 1 — que es exactamente lo que
+esos pedidos declararon. La rama de re-cotización de `createShipmentForOrder` rehace el acomodo con las
+dimensiones actuales y **persiste el conteo nuevo** (`order.shipping`/`order.total` siguen sin tocarse: ya
+se cobraron). El `packageCount` que viaja en `NormalizedShippingRate` sale de `parcels.length`, no de la
+respuesta de Skydropx, y `getQuotationRate` lo recupera del mismo `Map` en memoria donde ya recordaba la
+dirección cotizada (mismo TTL de 24 h; si el proceso se reinició esa función ya falla cerrado, así que
+siempre que hay rate hay conteo).
 
 `src/services/productAvailability.ts`'s `assertProductAvailable(product)` es la guardia compartida de
 "producto disponible" (existe, `visible`, no soft-deleted) entre `createOrder`, `getShippingRates` y
@@ -1036,10 +1123,53 @@ UTC (caught during manual testing on a `America/Mexico_City` dev machine).
 table: the recurring monthly run-rate prorated to each window (`× windowDays/30`, so `"7"`/`"90"` don't
 subtract a flat month from a week's or a quarter's gross profit) plus whatever one-time expenses fall
 inside that window, each window summing its own. `DESCUENTOS POR CUPÓN` is the Fase N.2 KPI. `recentSales`
-caps at the 20 most recent paid orders; `savings`/`total` per row reuse `Order.savings`/`Order.total`
-directly (already computed at checkout) rather than recomputing from items. `inventory` includes every
-non-soft-deleted product (including `visible: false`) since inventory value must reflect real holdings
-regardless of storefront visibility.
+caps at the 20 most recent paid orders; `savings`/`shipping`/`total` per row reuse the frozen `Order`
+columns directly (already computed at checkout) rather than recomputing from items. `inventory` includes
+every non-soft-deleted product (including `visible: false`) since inventory value must reflect real
+holdings regardless of storefront visibility.
+
+#### El envío es costo de venta (Fase N.5)
+
+`GANANCIA BRUTA = INGRESOS − costo de producto − COSTO DE ENVÍO`, and `GANANCIA OPERATIVA` stays
+`BRUTA − GASTOS`. The bug this fixes: `Order.total` has always included the shipping charged
+(`total = subtotal − savings − couponDiscount + shipping`) and `agg.revenue += order.total`, so INGRESOS
+carried it — but COGS is only `Σ unitCost × quantity`, so **nothing subtracted it**. A $2,000 sale with a
+$160 guía read as if all $2,000 bore margin, and gross/operating profit were inflated by exactly the
+shipping. `DayAggregate` gained a `shipping` field summed in the **same day-bucketed pass**, so the
+previous-window counterpart (and therefore the trend) comes for free; no query changed, since neither
+`Order.findAll` in `getDashboardData` passes `attributes`.
+
+**It is subtracted in gross profit and deliberately NOT added to `GASTOS`.** Shipping is a cost of sale —
+one guía per order, exactly like the `unitCost` of each piece — not an operating expense. Since
+`GANANCIA OPERATIVA = BRUTA − GASTOS`, routing it through both would subtract it **twice**. The same
+amount is exposed **read-only** in `/api/admin/expenses/summary` and `/history` as a *derived* line so
+the owner can see it in the expenses panel without the two numbers contradicting each other (see **Gastos
+y suscripciones**, `DerivedShippingCost`). ⚠️ The corollary the owner must respect: boxes and packing
+material **do** get captured as a `paqueteria` `Expense`; **the guías don't** — that's the double-count.
+
+The source is **`Order.shipping`** (no new column, no migration): with a live Skydropx quote it *is* the
+exact `rate.total` (pass-through, no markup), and the flat-rate fallback in `cart.ts` is calibrated to
+cost. **Fase N.6 closed the largest of the accepted inaccuracies** — the flat rate used to be a `Math.max`
+across cart item types that ignored quantity, so a 5-boot order charged $160 once while the carrier billed
+per box; it now packs the cart into real cartons and charges **per box**, the same boxes the live quote
+gets. Two accepted inaccuracies remain, both in the same direction (they **understate**, never inflate): a
+re-quote or a hand-made guía is never reconciled against the real invoice, and a refund leaves
+`paymentStatus: "paid"` so its already-paid guía drops out. Exactness would need an `Order.shippingCost`
+column written at label creation — deliberately still not done.
+
+`MARGEN BRUTO` now means `(INGRESOS − COGS − COSTO DE ENVÍO) / INGRESOS`, and its subtitle changed from
+"sobre precio de venta outlet" (which described the *denominator*) to **"después de producto y envío"**
+(which describes what changed — the numerator). The denominator is still cash collected, which *contains*
+the shipping charged, so a heavier shipping mix mechanically dilutes it. **The percentage drops the day
+this deploys** — that is the correction, not a regression.
+
+`computeTrend` gained an optional `{ lowerIsBetter }` that flips only `positive` (never the `label`),
+used by `COSTO DE ENVÍO`: without it the front would paint "shipping cost rose 40%" **green**.
+`DESCUENTOS POR CUPÓN` keeps the old behavior on purpose (an expensive coupon isn't unambiguously bad —
+it's the price of selling more) and `GASTOS` deliberately carries no trend at all.
+
+`SaleRow` gained `shipping` because `total` already includes it: without the field the panel can't tell
+`total − costoTotal` (inflated) from the row's real margin, `total − shipping − costoTotal`.
 
 `GET /api/admin/orders` `[auth]` returns a **paginated** page of orders (`page`/`perPage`, default
 `perPage: 20`, page clamped to `[1, totalPages]`) with their `items` included, most recent first,
@@ -1426,6 +1556,9 @@ resolve**; without it they default to `0`/`[]`. Images live in `images` (`JSONB`
 - `paymentIntentId` / `paymentStatus` (Fase 8; enum `unpaid|processing|paid|failed|refunded`);
 - `skydropxQuotationId` / `skydropxRateId` (Fase 8.4 — the live quotation/rate used, `null` on the flat
   rate) and `shippingRequiresDropoff` (admin-only "no home pickup" flag from that same rate);
+- `packageCount` (Fase N.6 — how many boxes the charged rate covers, frozen from `parcels.length` because
+  the label is created minutes later in another process, where the catalog's dimensions may have changed
+  and `GET /quotations/{id}` doesn't echo the quoted `parcels`; `null` on the flat rate, read as 1);
 - `skydropxShipmentId` / `trackingNumber` / `trackingUrl` / `labelUrl` / `shipmentStatus` (Fase 8.5 — the
   last four stay `null` until the Skydropx webhook reports them, since shipment creation is asynchronous);
 - `shipmentClaimedAt` (Fase O.3 — the moment `createShipmentForOrder` claimed the `"creating"` sentinel,
@@ -1501,13 +1634,14 @@ file, not an inline object — an inline `tsconfig` **replaces** the base config
 `roadmaps-completados/roadmap-testing.md` breaks the work into **independent parts** (0 = infra; 0.5 =
 dedicated test DB; 1 = pure services; 2 = auth; 3 = checkout; 4 = webhook idempotency; 5 = manual
 cancel/refund/release; 6 = live shipping rates; 7 = Skydropx HTTP client; 8 = admin product CRUD + images;
-9 = brand/admin users; 10 = dashboard/reports aggregations) — **all twelve are done** (43 suites / 495 tests
+9 = brand/admin users; 10 = dashboard/reports aggregations) — **all twelve are done** (57 suites / 703 tests
 at last count; new phases add their own suite, e.g. `adminOrderStatus.test.ts` (O.1),
 `checkoutIdempotency.test.ts` + `pendingOrderSweeper.test.ts` (O.2), `shipmentRetry.test.ts` (O.3),
 `orderLookup.test.ts` + `unit/services/orderConfirmationTemplate.test.ts` (O.4), the six coupon suites
 (N.2), `adminExpenses.test.ts` + `unit/services/expenses.test.ts` (N.3), and `newOrderNotification.test.ts`
 + `dailySalesDigest.test.ts` + `unit/utils/storeDay.test.ts` +
-`unit/services/newOrderNotificationTemplate.test.ts` (N.4)). Keep adding tests **part by part**, marking
+`unit/services/newOrderNotificationTemplate.test.ts` (N.4), and `unit/services/packing.test.ts` (N.6)).
+Keep adding tests **part by part**, marking
 `[x]` as each closes, and don't touch `src/` from a test change unless a test reveals a real bug.
 
 **Three levels, each behavior where it belongs:**

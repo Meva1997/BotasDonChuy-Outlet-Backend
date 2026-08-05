@@ -123,6 +123,75 @@ describe("POST /api/shipping/rates — fallback a tarifa plana", () => {
   });
 });
 
+describe("POST /api/shipping/rates — empaque multi-caja (Fase N.6)", () => {
+  it("REGRESIÓN: la tarifa plana de respaldo escala con la cantidad, ya no es un monto fijo", async () => {
+    // Antes de la Fase N.6 `computeShipping` era un `Math.max` por tipo que ignoraba la
+    // cantidad: este carrito de 20 piezas cobraba exactamente lo mismo que una sola, y las
+    // guías de los bultos extra salían de la utilidad del dueño.
+    const product = await createProduct({ type: "bota" });
+    getShippingRatesMock.mockRejectedValue(new Error("network down"));
+
+    const send = (quantity: number) =>
+      request(app)
+        .post("/api/shipping/rates")
+        .send({
+          customer: validCustomer,
+          items: [{ productId: product.id, size: 25, quantity }],
+        });
+
+    const una = await send(1);
+    const veinte = await send(20);
+
+    expect(una.body.rates[0].packageCount).toBe(1);
+    expect(veinte.body.rates[0].packageCount).toBe(2);
+    expect(veinte.body.rates[0].amount).toBe(una.body.rates[0].amount * 2);
+  });
+
+  it("cotiza en vivo un `parcels` con un elemento por bulto real", async () => {
+    const product = await createProduct({ type: "bota" });
+    getShippingRatesMock.mockResolvedValue({
+      quotationId: "quotation_multi",
+      rates: [sampleRate({ id: "rate_1", total: 300, packageCount: 2 })],
+    });
+
+    const res = await request(app)
+      .post("/api/shipping/rates")
+      .send({
+        customer: validCustomer,
+        items: [{ productId: product.id, size: 25, quantity: 20 }],
+      });
+
+    expect(res.status).toBe(200);
+    const [, , parcels] = getShippingRatesMock.mock.calls[0];
+    expect(Array.isArray(parcels)).toBe(true);
+    expect(parcels).toHaveLength(2);
+    // Cada bulto es una caja del catálogo, no una pila: su alto es el de la caja.
+    for (const parcel of parcels as Array<{ height: number; weight: number }>) {
+      expect(parcel.height).toBeLessThanOrEqual(50);
+      expect(parcel.weight).toBeGreaterThan(0);
+    }
+  });
+
+  it("un pedido con más bultos que el tope cotizable no llama a Skydropx y cae al respaldo", async () => {
+    // MAX_PARCELS_QUOTED = 10. Cientos de `parcels` no son una cotización que ninguna
+    // paquetería vaya a responder; el respaldo ya cobra por caja, así que tampoco subcotiza.
+    // 5 kg por pieza → solo 4 caben en la caja grande (25 kg), así que 99 piezas son 25 cajas.
+    const product = await createProduct({ type: "bota", weightKg: 5 });
+
+    const res = await request(app)
+      .post("/api/shipping/rates")
+      .send({
+        customer: validCustomer,
+        items: [{ productId: product.id, size: 25, quantity: 99 }],
+      });
+
+    expect(res.status).toBe(200);
+    expect(getShippingRatesMock).not.toHaveBeenCalled();
+    expect(res.body.rates[0].rateId).toBeNull();
+    expect(res.body.rates[0].packageCount).toBeGreaterThan(10);
+  });
+});
+
 describe("POST /api/shipping/rates — dimensión en 0 salta directo al fallback", () => {
   it("un producto con weightKg 0 nunca llama a Skydropx", async () => {
     const product = await createProduct({ type: "bota", weightKg: 0 });

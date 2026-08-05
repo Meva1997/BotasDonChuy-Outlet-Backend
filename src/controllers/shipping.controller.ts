@@ -4,7 +4,7 @@ import { asyncHandler } from "../middlewares/asyncHandler";
 import { shippingRatesSchema } from "../schemas/shipping";
 import { Product } from "../models/Product";
 import { assertProductAvailable } from "../services/productAvailability";
-import { buildParcel, type ParcelLineItem } from "../services/packing";
+import { packOrder, MAX_PARCELS_QUOTED, type ParcelLineItem } from "../services/packing";
 import { computeShipping, type CartLineItem } from "../services/cart";
 import {
   getOriginAddress,
@@ -18,12 +18,14 @@ import { Sentry } from "../config/sentry";
 /**
  * POST /api/shipping/rates — cotización de envío en vivo (checkout público).
  *
- * Arma una sola caja apilada (`buildParcel`) a partir de los productos del
- * carrito, cotiza contra Skydropx y normaliza las tarifas. Si Skydropx falla,
+ * Acomoda el carrito en las cajas reales de la tienda (`buildParcels`, Fase N.6),
+ * cotiza esos bultos contra Skydropx y normaliza las tarifas. Si Skydropx falla,
  * hace timeout, o no devuelve ninguna tarifa utilizable a tiempo, responde con
  * la tarifa plana existente (`computeShipping`) marcada con `rateId: null` /
  * `quotationId: null` — la tienda nunca debe dejar de cotizar porque la
- * paquetería esté caída (roadmap-skydropx.md §2/§8).
+ * paquetería esté caída (roadmap-skydropx.md §2/§8). Desde la Fase N.6 el
+ * respaldo también cobra por caja, así que caer a él cambia el precio pero
+ * nunca el número de bultos.
  */
 export const getShippingRates: RequestHandler = asyncHandler(
   async (req: Request, res: Response) => {
@@ -71,6 +73,7 @@ export const getShippingRates: RequestHandler = asyncHandler(
       }
       parcelItems.push({
         product: {
+          type: product.type,
           weightKg: product.weightKg,
           lengthCm: product.lengthCm,
           widthCm: product.widthCm,
@@ -79,13 +82,37 @@ export const getShippingRates: RequestHandler = asyncHandler(
         quantity,
       });
       cartItems.push({
-        product: { type: product.type, originalPrice: 0, salePrice: 0 },
+        product: {
+          type: product.type,
+          originalPrice: 0,
+          salePrice: 0,
+          weightKg: product.weightKg,
+          lengthCm: product.lengthCm,
+          widthCm: product.widthCm,
+          heightCm: product.heightCm,
+        },
         quantity,
       });
     }
 
-    if (!hasInvalidDimensions) {
-      const parcel = buildParcel(parcelItems);
+    // Un solo acomodo alimenta las dos ramas: los `parcels` que se cotizan en vivo y el
+    // `packageCount` que se reporta con la tarifa plana. Que salgan del mismo `packOrder` es lo
+    // que garantiza que caer al respaldo no cambie en cuántas cajas va el pedido.
+    const boxes = packOrder(parcelItems);
+    const parcels = boxes.map((box) => box.parcel);
+    // Un carrito puede traer miles de unidades (50 renglones × 99 piezas): cientos de `parcels`
+    // no son una cotización que ninguna paquetería vaya a responder, solo agotan el presupuesto
+    // de 8s del poll. Por arriba del tope se va al respaldo, que desde la Fase N.6 también cobra
+    // por caja y por lo tanto tampoco subcotiza.
+    const tooManyParcels = parcels.length > MAX_PARCELS_QUOTED;
+    if (tooManyParcels) {
+      logger.warn(
+        { parcels: parcels.length, max: MAX_PARCELS_QUOTED },
+        "[skydropx] el pedido excede los bultos cotizables en vivo; se usará la tarifa plana de respaldo",
+      );
+    }
+
+    if (!hasInvalidDimensions && !tooManyParcels) {
       const addressFrom = getOriginAddress();
       const addressTo = toSkydropxAddress(input.customer);
 
@@ -93,7 +120,7 @@ export const getShippingRates: RequestHandler = asyncHandler(
         const { quotationId, rates } = await getSkydropxRates(
           addressFrom,
           addressTo,
-          parcel,
+          parcels,
         );
         if (rates.length > 0) {
           res.json({ quotationId, rates });
@@ -131,6 +158,9 @@ export const getShippingRates: RequestHandler = asyncHandler(
           amount: fallbackAmount,
           total: fallbackAmount,
           days: null,
+          // Mismo acomodo que habría cotizado Skydropx: el respaldo cambia el precio del bulto,
+          // no cuántos bultos son.
+          packageCount: boxes.length,
         },
       ],
     });

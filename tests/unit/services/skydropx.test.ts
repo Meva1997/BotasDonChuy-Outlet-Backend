@@ -19,6 +19,8 @@ const addr: SkydropxService.SkydropxAddress = {
 };
 
 const parcel = { weight: 1, length: 10, width: 10, height: 10 };
+// Desde la Fase N.6 la cotización recibe un arreglo de bultos, no uno solo.
+const parcels = [parcel];
 
 function oauthBody(expiresIn = 7200) {
   return {
@@ -167,7 +169,7 @@ describe("skydropx.service (Parte 7)", () => {
       const fetchMock = buildFetchMock([{ body: oauthBody() }, { body: createResp }, { body: pollResp }]);
       (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-      const result = await resolveWithFakeTimers(skydropx.getShippingRates(addr, addr, parcel));
+      const result = await resolveWithFakeTimers(skydropx.getShippingRates(addr, addr, parcels));
 
       expect(fetchMock).toHaveBeenCalledTimes(3); // oauth + create + UN solo poll
       expect(result.rates).toHaveLength(3);
@@ -185,7 +187,7 @@ describe("skydropx.service (Parte 7)", () => {
       ]);
       (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-      const result = await resolveWithFakeTimers(skydropx.getShippingRates(addr, addr, parcel));
+      const result = await resolveWithFakeTimers(skydropx.getShippingRates(addr, addr, parcels));
 
       // Si el array vacío se tratara como "resuelto", el poll habría cortado tras el
       // primer GET (3 fetch calls) devolviendo 0 tarifas en vez de esperar la segunda lectura.
@@ -209,7 +211,7 @@ describe("skydropx.service (Parte 7)", () => {
       ]);
       (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-      const result = await resolveWithFakeTimers(skydropx.getShippingRates(addr, addr, parcel), 15_000);
+      const result = await resolveWithFakeTimers(skydropx.getShippingRates(addr, addr, parcels), 15_000);
 
       // Debe haber reintentado el poll varias veces (no solo una) antes de agotar el timeout.
       expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(2 + 6);
@@ -234,7 +236,7 @@ describe("skydropx.service (Parte 7)", () => {
       const fetchMock = buildFetchMock([{ body: oauthBody() }, { body: createResp }, { body: pollResp }]);
       (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-      const result = await resolveWithFakeTimers(skydropx.getShippingRates(addr, addr, parcel));
+      const result = await resolveWithFakeTimers(skydropx.getShippingRates(addr, addr, parcels));
 
       expect(result.rates).toHaveLength(5); // se descarta la más cara (500), quedan las 5 baratas
       expect(result.rates.map((r) => r.total)).toEqual([100, 150, 200, 300, 400]);
@@ -266,13 +268,156 @@ describe("skydropx.service (Parte 7)", () => {
       const fetchMock = buildFetchMock([{ body: oauthBody() }, { body: createResp }, { body: pollResp }]);
       (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
-      const result = await resolveWithFakeTimers(skydropx.getShippingRates(addr, addr, parcel));
+      const result = await resolveWithFakeTimers(skydropx.getShippingRates(addr, addr, parcels));
       const byId = Object.fromEntries(result.rates.map((r) => [r.rateId, r]));
 
       expect(byId["d1"].requiresDropoff).toBe(true);
       expect(byId["d2"].requiresDropoff).toBe(true);
       expect(byId["d3"].requiresDropoff).toBe(true);
       expect(byId["d4"].requiresDropoff).toBe(false);
+    });
+  });
+
+  describe("envío multi-bulto (Fase N.6)", () => {
+    const tresBultos = [
+      { weight: 3, length: 40, width: 35, height: 25 },
+      { weight: 5, length: 55, width: 40, height: 35 },
+      { weight: 2, length: 40, width: 35, height: 25 },
+    ];
+
+    it("manda un elemento de `parcels` por bulto, no uno solo apilado", async () => {
+      const createResp = { id: "qm1", is_completed: false, rates: [] };
+      const pollResp = { id: "qm1", is_completed: true, rates: [rate("r1")] };
+      const fetchMock = buildFetchMock([
+        { body: oauthBody() },
+        { body: createResp },
+        { body: pollResp },
+      ]);
+      (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      await resolveWithFakeTimers(skydropx.getShippingRates(addr, addr, tresBultos));
+
+      const [, init] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+      const body = JSON.parse(init.body as string);
+      expect(body.quotation.parcels).toEqual(tresBultos);
+    });
+
+    it("cada tarifa reporta cuántos bultos ampara", async () => {
+      const fetchMock = buildFetchMock([
+        { body: oauthBody() },
+        { body: { id: "qm2", is_completed: false, rates: [] } },
+        { body: { id: "qm2", is_completed: true, rates: [rate("r1"), rate("r2")] } },
+      ]);
+      (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      const result = await resolveWithFakeTimers(
+        skydropx.getShippingRates(addr, addr, tresBultos),
+      );
+
+      expect(result.rates).toHaveLength(2);
+      expect(result.rates.every((r) => r.packageCount === 3)).toBe(true);
+    });
+
+    it("`getQuotationRate` recuerda el número de bultos de la cotización original", async () => {
+      // La re-consulta autoritativa de `createOrder` tiene que devolver el mismo conteo que se
+      // cotizó: es el que se congela en `Order.packageCount` y el que la guía va a declarar.
+      const fetchMock = buildFetchMock([
+        { body: oauthBody() },
+        { body: { id: "qm3", is_completed: false, rates: [] } },
+        { body: { id: "qm3", is_completed: true, rates: [rate("r1")] } },
+        { body: { id: "qm3", is_completed: true, rates: [rate("r1")] } },
+      ]);
+      (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+      await resolveWithFakeTimers(skydropx.getShippingRates(addr, addr, tresBultos));
+
+      const result = await resolveWithFakeTimers(skydropx.getQuotationRate("qm3", "r1", addr));
+
+      expect(result).toMatchObject({ rateId: "r1", packageCount: 3 });
+    });
+
+    it("descarta las tarifas `multishipment` (una guía por bulto: el modelo solo guarda una)", async () => {
+      // Un rate `multishipment` crea N guías y este modelo guarda un solo `skydropxShipmentId`
+      // por pedido: N−1 quedarían cobradas y sin forma de rastrearlas ni entregarlas.
+      const multi = rate("rm", { shipment_creation_type: "multishipment", total: "50.00" });
+      const multipackage = rate("rp", { shipment_creation_type: "multipackage", total: "200.00" });
+      const single = rate("rs", { shipment_creation_type: "single", total: "300.00" });
+      const fetchMock = buildFetchMock([
+        { body: oauthBody() },
+        { body: { id: "qm4", is_completed: false, rates: [] } },
+        { body: { id: "qm4", is_completed: true, rates: [multi, multipackage, single] } },
+      ]);
+      (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      const result = await resolveWithFakeTimers(
+        skydropx.getShippingRates(addr, addr, tresBultos),
+      );
+
+      // La descartada era LA MÁS BARATA: sin el filtro el ordenamiento por precio la habría
+      // puesto de primera y el checkout la habría mostrado como la opción recomendada.
+      expect(result.rates.map((r) => r.rateId)).toEqual(["rp", "rs"]);
+    });
+
+    it("una tarifa sin `shipment_creation_type` sigue siendo utilizable", async () => {
+      // El sandbox no siempre manda el campo; ausente no puede leerse como "multishipment" o
+      // se descartarían todas las tarifas y la tienda dejaría de cotizar en vivo.
+      const fetchMock = buildFetchMock([
+        { body: oauthBody() },
+        { body: { id: "qm5", is_completed: false, rates: [] } },
+        { body: { id: "qm5", is_completed: true, rates: [rate("r1")] } },
+      ]);
+      (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      const result = await resolveWithFakeTimers(skydropx.getShippingRates(addr, addr, parcels));
+
+      expect(result.rates.map((r) => r.rateId)).toEqual(["r1"]);
+    });
+  });
+
+  describe("createShipment — bultos declarados (Fase N.6)", () => {
+    const contacto = {
+      name: "Quien sea",
+      street1: "Calle 1",
+      company: "Botas Don Chuy Outlet",
+      phone: "4611234567",
+      email: "a@b.com",
+      reference: "Centro",
+    };
+
+    async function crearGuia(packageCount?: number) {
+      const fetchMock = buildFetchMock([
+        { body: oauthBody() },
+        {
+          body: {
+            data: { id: "shp_1", attributes: { carrier_name: "DHL", workflow_status: "in_progress" } },
+          },
+        },
+      ]);
+      (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+      await resolveWithFakeTimers(
+        skydropx.createShipment("r1", contacto, contacto, packageCount),
+      );
+      const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
+      const shipmentCall = calls.find(([url]) => String(url).includes("/api/v1/shipments"))!;
+      return JSON.parse(shipmentCall[1].body as string);
+    }
+
+    it("declara un `package` por bulto, numerados desde 1", async () => {
+      // Declarar menos bultos de los que se entregan es exactamente lo que la paquetería cobra
+      // aparte al recibir el envío.
+      const body = await crearGuia(3);
+      expect(body.shipment.packages).toHaveLength(3);
+      expect(body.shipment.packages.map((p: { package_number: string }) => p.package_number)).toEqual([
+        "1",
+        "2",
+        "3",
+      ]);
+      // El resto del paquete no cambia: la clave SAT de Carta Porte va en cada uno.
+      expect(body.shipment.packages.every((p: { consignment_note: string }) => p.consignment_note === "53102400")).toBe(true);
+    });
+
+    it("sin `packageCount` declara un solo bulto (pedidos previos a la fase)", async () => {
+      const body = await crearGuia();
+      expect(body.shipment.packages).toHaveLength(1);
     });
   });
 
@@ -347,7 +492,7 @@ describe("skydropx.service (Parte 7)", () => {
     /** Cotiza de verdad para que el servicio recuerde a qué dirección correspondió `q1`. */
     async function cotizar(fetchMock: ReturnType<typeof buildFetchMock>) {
       (global as unknown as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
-      await resolveWithFakeTimers(skydropx.getShippingRates(addr, addr, parcel));
+      await resolveWithFakeTimers(skydropx.getShippingRates(addr, addr, parcels));
     }
 
     function quotationResponses(rates: unknown[]) {

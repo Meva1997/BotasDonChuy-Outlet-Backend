@@ -40,6 +40,13 @@ export interface SaleRow {
    */
   couponCode: string | null;
   couponDiscount: number;
+  /**
+   * Envío cobrado en este pedido — que es también lo que se le paga a la paquetería (ver el KPI
+   * `COSTO DE ENVÍO`). Va en la fila porque sin él la ganancia real del pedido no se puede sacar
+   * del panel: `total` ya trae el envío sumado, así que lo que gana la tienda es
+   * `total − shipping − costoTotal`, no `total − costoTotal`.
+   */
+  shipping: number;
   total: number;
   costoTotal: number;
 }
@@ -66,7 +73,16 @@ const RECENT_SALES_LIMIT = 20;
 const REVENUE_WINDOW_DAYS = 90;
 const PERIODS: Period[] = ["7", "30", "90"];
 
-function computeTrend(current: number, previous: number): { label: string; positive: boolean } | undefined {
+function computeTrend(
+  current: number,
+  previous: number,
+  // `lowerIsBetter` NO cambia el `label` (el porcentaje sigue siendo el mismo dato), solo de qué
+  // color lo pinta el front, que lee `positive`. Hace falta en los KPIs que son COSTOS: sin él,
+  // "el costo de envío subió 40%" saldría en verde, que es activamente engañoso. `DESCUENTOS POR
+  // CUPÓN` tiene hoy esa misma inconsistencia y se deja como está a propósito (un cupón caro no es
+  // inequívocamente malo: es el precio de vender más); `GASTOS` deliberadamente no lleva trend.
+  { lowerIsBetter = false }: { lowerIsBetter?: boolean } = {},
+): { label: string; positive: boolean } | undefined {
   if (previous === 0) return undefined;
   // Se divide entre |previous| para que una base negativa (p. ej. ganancia neta
   // en rojo) no invierta el signo: pasar de -2000 a -500 es una mejora (+75%),
@@ -74,7 +90,7 @@ function computeTrend(current: number, previous: number): { label: string; posit
   const pct = Math.round(((current - previous) / Math.abs(previous)) * 100);
   return {
     label: `${pct >= 0 ? "+" : ""}${pct}% vs periodo anterior`,
-    positive: pct >= 0,
+    positive: lowerIsBetter ? pct <= 0 : pct >= 0,
   };
 }
 
@@ -92,6 +108,16 @@ interface DayAggregate {
   orders: number;
   /** Descuento otorgado por cupones ese día (Fase N.2). Ver el KPI del mismo nombre. */
   couponDiscount: number;
+  /**
+   * Envío cobrado ese día = lo que se le paga a la paquetería. Con cotización viva de Skydropx es
+   * el `rate.total` exacto (pass-through, sin margen); con la tarifa plana de respaldo es la tabla
+   * de `cart.ts`, calibrada a costo.
+   *
+   * Es **costo de venta, no gasto**: se paga una guía por pedido, igual que se paga el `unitCost`
+   * de cada pieza. Por eso se resta en `gananciaBruta` y NO se suma al KPI `GASTOS` — sumarlo ahí
+   * lo restaría dos veces de la GANANCIA OPERATIVA.
+   */
+  shipping: number;
 }
 
 function buildDailyAggregates(orders: Order[]): Map<string, DayAggregate> {
@@ -100,7 +126,7 @@ function buildDailyAggregates(orders: Order[]): Map<string, DayAggregate> {
     const key = isoDay(order.createdAt);
     let agg = byDay.get(key);
     if (!agg) {
-      agg = { revenue: 0, cogs: 0, pieces: 0, orders: 0, couponDiscount: 0 };
+      agg = { revenue: 0, cogs: 0, pieces: 0, orders: 0, couponDiscount: 0, shipping: 0 };
       byDay.set(key, agg);
     }
     // `order.total` ya viene NETO de cupón, y así se queda: lo que suma "INGRESOS" es el
@@ -108,6 +134,10 @@ function buildDailyAggregates(orders: Order[]): Map<string, DayAggregate> {
     // aparte para poder explicarlo (ver `buildKpisForWindow`).
     agg.revenue += order.total;
     agg.cogs += orderCost(order);
+    // No hace falta tocar la consulta: ningún `Order.findAll` de `getDashboardData` pasa
+    // `attributes`, así que la columna ya viene y el getter DECIMAL del modelo la entrega como
+    // número (sin ese getter la suma concatenaría strings).
+    agg.shipping += order.shipping;
     agg.pieces += (order.items ?? []).reduce((a, i) => a + i.quantity, 0);
     agg.orders += 1;
     agg.couponDiscount += order.couponDiscount;
@@ -161,6 +191,8 @@ function buildKpisForWindow(
   let cogsPrev = 0;
   let descuentoCupones = 0;
   let descuentoCuponesPrev = 0;
+  let costoEnvio = 0;
+  let costoEnvioPrev = 0;
   let gastosUnicos = 0;
   let gastosUnicosPrev = 0;
   let mejorDia: { date: Date; revenue: number } | null = null;
@@ -176,6 +208,7 @@ function buildKpisForWindow(
     piezasVendidas += agg?.pieces ?? 0;
     currentOrderCount += agg?.orders ?? 0;
     descuentoCupones += agg?.couponDiscount ?? 0;
+    costoEnvio += agg?.shipping ?? 0;
     if (!mejorDia || revenue > mejorDia.revenue) {
       mejorDia = { date: day, revenue };
     }
@@ -184,12 +217,18 @@ function buildKpisForWindow(
     ingresosPrev += prevAgg?.revenue ?? 0;
     cogsPrev += prevAgg?.cogs ?? 0;
     descuentoCuponesPrev += prevAgg?.couponDiscount ?? 0;
+    costoEnvioPrev += prevAgg?.shipping ?? 0;
   }
 
   const ticketPromedio = currentOrderCount ? ingresos / currentOrderCount : 0;
 
-  const gananciaBruta = ingresos - cogs;
-  const gananciaBrutaPrev = ingresosPrev - cogsPrev;
+  // El envío se resta aquí junto al costo del producto porque es COSTO DE VENTA (ver
+  // `DayAggregate.shipping`). Hasta antes de esta fase `order.total` sumaba el envío cobrado a
+  // INGRESOS y nada lo restaba, así que una venta de $2,000 con $160 de guía se leía como si los
+  // $2,000 cargaran margen. El envío NO entra en `gastos` — restarlo en los dos lados lo quitaría
+  // dos veces de `gananciaNeta`.
+  const gananciaBruta = ingresos - cogs - costoEnvio;
+  const gananciaBrutaPrev = ingresosPrev - cogsPrev - costoEnvioPrev;
   const margenBruto = ingresos ? Math.round((gananciaBruta / ingresos) * 100) : 0;
 
   // Los recurrentes se prorratean (la carga mensual es la misma en las dos ventanas: lo que se
@@ -225,7 +264,20 @@ function buildKpisForWindow(
       value: formatMoney(gananciaBruta),
       trend: computeTrend(gananciaBruta, gananciaBrutaPrev),
     },
-    { label: "MARGEN BRUTO", value: `${margenBruto}%`, subtitle: "sobre precio de venta outlet" },
+    // El subtítulo dice qué se descontó (el numerador), no sobre qué se divide: desde que el envío
+    // es costo de venta, "sobre precio de venta outlet" ya no describía lo que cambió.
+    { label: "MARGEN BRUTO", value: `${margenBruto}%`, subtitle: "después de producto y envío" },
+    // El envío es costo de venta, no gasto: se paga una guía por pedido, igual que el `unitCost` de
+    // cada pieza. Aparece como KPI propio porque es el segundo costo más grande del negocio después
+    // del producto y, al ir sumado dentro de `order.total`, no se ve por ningún lado en INGRESOS.
+    // OJO: va restado en GANANCIA BRUTA y NO en GASTOS (ese KPI son gastos capturados) — sumarlo
+    // ahí también lo restaría dos veces de la GANANCIA OPERATIVA.
+    {
+      label: "COSTO DE ENVÍO",
+      value: formatMoney(costoEnvio),
+      subtitle: "guías pagadas a la paquetería · ya restado en la ganancia bruta",
+      trend: computeTrend(costoEnvio, costoEnvioPrev, { lowerIsBetter: true }),
+    },
     // Sin este KPI, una campaña de cupones se lee como una CAÍDA de ingresos contra el periodo
     // anterior (el `total` de cada pedido baja) aunque se hayan vendido más piezas, y el dueño no
     // tendría nada en pantalla que lo explique. No se suma a "Ahorraste"/`savings`, que significa
@@ -279,6 +331,7 @@ function buildSaleRow(order: Order): SaleRow {
     savings: order.savings,
     couponCode: order.couponCode,
     couponDiscount: order.couponDiscount,
+    shipping: order.shipping,
     total: order.total,
     costoTotal: orderCost(order),
   };

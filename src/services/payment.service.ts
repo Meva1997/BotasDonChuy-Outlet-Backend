@@ -17,7 +17,7 @@ import { sendEmail } from "./email.service";
 import { sendAlertEmail } from "./alert.service";
 import { sendNewOrderNotification } from "./ownerNotification.service";
 import { orderConfirmationTemplate } from "./email/templates/orderConfirmation";
-import { buildParcel, type ParcelLineItem } from "./packing";
+import { buildParcels, type ParcelLineItem } from "./packing";
 import {
   createShipment,
   getOriginAddress,
@@ -339,6 +339,10 @@ export async function createShipmentForOrder(
     });
 
     let rateId = order.skydropxRateId;
+    // Cuántos bultos declarar en la guía. Sale de la columna congelada en el checkout; `null`
+    // (tarifa plana o pedido anterior a la Fase N.6) se lee como el único bulto que esos
+    // pedidos cotizaron. Si hay que re-cotizar, más abajo lo reemplaza el conteo fresco.
+    let packageCount = order.packageCount ?? 1;
     const currentRate = await getQuotationRate(
       order.skydropxQuotationId,
       order.skydropxRateId,
@@ -363,6 +367,7 @@ export async function createShipmentForOrder(
         }
         return {
           product: {
+            type: product.type,
             weightKg: product.weightKg,
             lengthCm: product.lengthCm,
             widthCm: product.widthCm,
@@ -371,8 +376,8 @@ export async function createShipmentForOrder(
           quantity: item.quantity,
         };
       });
-      const parcel = buildParcel(parcelItems);
-      const requoted = await getShippingRates(getOriginAddress(), destinationAddress, parcel);
+      const parcels = buildParcels(parcelItems);
+      const requoted = await getShippingRates(getOriginAddress(), destinationAddress, parcels);
       const matched =
         requoted.rates.find((r) => r.carrier === order.shippingCarrier) ?? requoted.rates[0];
       if (!matched) {
@@ -381,8 +386,17 @@ export async function createShipmentForOrder(
         );
       }
       rateId = matched.rateId;
+      // El acomodo se rehace con las dimensiones ACTUALES del catálogo, así que puede dar un
+      // número de bultos distinto al del checkout. Manda el nuevo: es el que ampara el rate con
+      // el que se va a crear la guía. `order.shipping`/`order.total` siguen sin tocarse — ya se
+      // cobraron.
+      packageCount = matched.packageCount;
       await Order.update(
-        { skydropxQuotationId: requoted.quotationId, skydropxRateId: matched.rateId },
+        {
+          skydropxQuotationId: requoted.quotationId,
+          skydropxRateId: matched.rateId,
+          packageCount: matched.packageCount,
+        },
         { where: { id: order.id } },
       );
     }
@@ -404,7 +418,12 @@ export async function createShipmentForOrder(
       reference: order.neighborhood,
     };
 
-    const { shipmentId } = await createShipment(rateId, addressFrom, addressTo);
+    const { shipmentId } = await createShipment(
+      rateId,
+      addressFrom,
+      addressTo,
+      packageCount,
+    );
     createdShipmentId = shipmentId; // a partir de aquí, Skydropx ya cobró la guía
 
     const persisted = await persistShipmentId(order.id, shipmentId);
