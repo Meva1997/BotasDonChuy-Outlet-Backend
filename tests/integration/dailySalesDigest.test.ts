@@ -154,8 +154,8 @@ describe("sendDailySalesDigest — ventana del día (Fase N.4)", () => {
     expect(digest.html).toContain("llevarlo a la sucursal");
   });
 
-  it("compara contra el día anterior", async () => {
-    await paidOrder({ createdAt: MIDDAY, subtotal: 800, shipping: 150 }); // 950 el día objetivo
+  it("no menciona el día anterior: cada correo reporta solo el día que cubre", async () => {
+    await paidOrder({ createdAt: MIDDAY, subtotal: 800, shipping: 150 });
     await paidOrder({
       createdAt: new Date("2026-07-28T18:00:00Z"), // día anterior
       subtotal: 200,
@@ -164,7 +164,7 @@ describe("sendDailySalesDigest — ventana del día (Fase N.4)", () => {
 
     await sendDailySalesDigest(DAY);
 
-    expect(theDigest().html).toContain("Día anterior:");
+    expect(theDigest().html).not.toContain("Día anterior");
   });
 
   it("sin destinatario configurado no manda nada", async () => {

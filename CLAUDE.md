@@ -489,12 +489,13 @@ Tras una caída de varios días manda **solo el más reciente**, no un backfill.
 reconstruir, además de que el dashboard también agrupa por `createdAt`; consecuencia asumida: un pedido
 creado 11:55pm y pagado 00:05 cuenta en el día anterior. El resumen filtra **`paymentStatus: "paid"`** (ver
 **Dashboard**: filtrar por `status` le quitaría justo los pedidos despachados ese mismo día, lo peor que le
-puede pasar a un correo de reconciliación). Trae totales del día, tabla por pedido con su hora local,
-comparación contra el día anterior **en pesos y no en porcentaje** (con un día previo en cero el porcentaje
-sería una división entre cero) y una sección **"requieren acción"** con los pedidos sin guía
-(`skydropxShipmentId` en `null` o el centinela) o con dropoff. `runDigestTick(now?)` acepta el instante para
-situarse a una hora concreta en los tests sin timers falsos, y `resetDailySalesDigestState()` se exporta
-**solo para tests**.
+puede pasar a un correo de reconciliación). Trae totales del día y tabla por pedido con su hora local, y
+una sección **"requieren acción"** con los pedidos sin guía (`skydropxShipmentId` en `null` o el centinela)
+o con dropoff. **No compara contra el día anterior** (se probó y se quitó: un correo con el propio día en
+cero junto a un día previo con ventas se leía como "perdiste dinero" en vez de "hoy no hubo ventas" — el
+resumen reporta exclusivamente el día que cubre). `runDigestTick(now?)` acepta el instante para situarse a
+una hora concreta en los tests sin timers falsos, y `resetDailySalesDigestState()` se exporta **solo para
+tests**.
 
 `escapeHtml` se extrajo de `orderConfirmation.ts` a **`src/services/email/templates/escapeHtml.ts`**: con
 tres plantillas, tres copias de una función de escape es lo que se desincroniza. **Sin migración, sin

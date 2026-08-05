@@ -39,8 +39,6 @@ export interface DailySalesDigestInput {
     couponDiscount: number;
     savings: number;
   };
-  /** Mismo corte del día anterior, para la comparación. `null` si no se pudo calcular. */
-  previous: { orderCount: number; revenue: number } | null;
   adminUrl?: string;
 }
 
@@ -60,22 +58,6 @@ export function dailySalesDigestSubject(input: {
   if (input.orderCount === 0) return `Resumen del ${label} — sin ventas`;
   const orders = `${input.orderCount} ${input.orderCount === 1 ? "venta" : "ventas"}`;
   return `Resumen del ${label} — ${orders} — ${formatMoney(input.revenue)}`;
-}
-
-function comparisonLine(input: DailySalesDigestInput): string {
-  const prev = input.previous;
-  if (!prev) return "";
-  const delta = input.totals.revenue - prev.revenue;
-  // Se compara en pesos y no en porcentaje: con un día previo en cero (perfectamente normal al
-  // lanzamiento) el porcentaje sería una división entre cero, y a este volumen "+$1,850" dice más
-  // que "+∞%". Colores claros porque este bloque va sobre el encabezado oscuro.
-  const sign = delta >= 0 ? "+" : "−";
-  const color = delta >= 0 ? "#bbf7d0" : "#fecaca";
-  return `<p style="margin:8px 0 0;font-size:13px;color:#fed7aa;">
-                  Día anterior: ${prev.orderCount} ${prev.orderCount === 1 ? "venta" : "ventas"} ·
-                  ${formatMoney(prev.revenue)}
-                  <span style="color:${color};font-weight:bold;">(${sign}${formatMoney(Math.abs(delta))})</span>
-                </p>`;
 }
 
 function totalsRow(label: string, value: string, opts?: { strong?: boolean }): string {
@@ -200,7 +182,6 @@ export function dailySalesDigestTemplate(input: DailySalesDigestInput): string {
                 <p style="margin:4px 0 0;font-size:14px;color:#fed7aa;">
                   ${totals.orderCount} ${totals.orderCount === 1 ? "venta" : "ventas"} · ${formatMoney(totals.revenue)}
                 </p>
-                ${comparisonLine(input)}
               </td>
             </tr>
             <tr>
