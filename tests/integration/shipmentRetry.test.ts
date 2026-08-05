@@ -152,6 +152,35 @@ describe("POST /api/admin/orders/:id/shipment/retry — reintento exitoso", () =
     expect(reloaded!.skydropxShipmentId).toBe("shipment_creada_1");
   });
 
+  it("declara en la guía los bultos congelados en el pedido (Fase N.6)", async () => {
+    // El acomodo en cajas se decidió en el checkout y se guardó en `Order.packageCount`. La
+    // guía se genera minutos después, así que si no leyera esa columna declararía un solo
+    // bulto y la paquetería cobraría los otros dos aparte al recibir el envío.
+    const order = await paidOrderWithoutLabel({ packageCount: 3 });
+
+    await retryShipment(order.id);
+
+    expect(createShipmentMock).toHaveBeenCalledWith(
+      "rate_test_1",
+      expect.any(Object),
+      expect.any(Object),
+      3,
+    );
+  });
+
+  it("un pedido sin `packageCount` (previo a la fase o con tarifa plana) declara un bulto", async () => {
+    const order = await paidOrderWithoutLabel({ packageCount: null });
+
+    await retryShipment(order.id);
+
+    expect(createShipmentMock).toHaveBeenCalledWith(
+      "rate_test_1",
+      expect.any(Object),
+      expect.any(Object),
+      1,
+    );
+  });
+
   it("libera el centinela huérfano y genera una sola guía", async () => {
     // El proceso murió entre reclamar "creating" y llamar a Skydropx: sin liberarlo, este pedido
     // no podría volver a generar guía nunca.

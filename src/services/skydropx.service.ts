@@ -267,6 +267,9 @@ interface SkydropxRate {
   amount: string | null;
   total: string | null;
   days: number | null;
+  // `single` | `multipackage` | `multishipment` (Fase N.6). Decide cuántas GUÍAS produce el
+  // rate, no cuántos bultos: `multishipment` crea una guía por paquete. Ver `isUsableRate`.
+  shipment_creation_type?: string | null;
   // Bandera de recolección de Skydropx (confirmada en el rate crudo del sandbox,
   // 2026-07-20): `true` = la paquetería pasa a recoger el paquete al domicilio de
   // origen; `false` = NO hay recolección, el dueño debe llevar el paquete a la
@@ -288,6 +291,12 @@ export interface NormalizedShippingRate {
   amount: number;
   total: number;
   days: number | null;
+  /**
+   * Cuántos bultos ampara esta tarifa (Fase N.6). Sale de `parcels.length`, no de la respuesta
+   * de Skydropx. `createOrder` lo congela en `Order.packageCount` para que
+   * `createShipmentForOrder` —que corre minutos después— sepa cuántos `packages` declarar.
+   */
+  packageCount: number;
   // `true` cuando el servicio NO incluye recolección a domicilio: el dueño tiene
   // que llevar el paquete a la sucursal de la paquetería. Dato operativo para el
   // panel de admin, no para el checkout del cliente. Se persiste en la orden
@@ -345,15 +354,23 @@ export function toSkydropxAddress(customer: {
 const QUOTATION_ADDRESS_TTL_MS = 24 * 60 * 60 * 1000;
 const quotationDestinations = new Map<
   string,
-  { address: SkydropxAddress; recordedAt: number }
+  { address: SkydropxAddress; packageCount: number; recordedAt: number }
 >();
 
-function rememberQuotationDestination(quotationId: string, address: SkydropxAddress): void {
+function rememberQuotationDestination(
+  quotationId: string,
+  address: SkydropxAddress,
+  // `GET /quotations/{id}` tampoco devuelve los `parcels` que se cotizaron, así que el número
+  // de bultos se recuerda aquí junto con la dirección, en el mismo mapa y con el mismo TTL. No
+  // hace falta más: si el proceso se reinició, `getQuotationRate` ya falla cerrado (null → 409
+  // "vuelve a cotizar"), así que siempre que hay rate hay `packageCount`.
+  packageCount: number,
+): void {
   const now = Date.now();
   for (const [id, entry] of quotationDestinations) {
     if (now - entry.recordedAt > QUOTATION_ADDRESS_TTL_MS) quotationDestinations.delete(id);
   }
-  quotationDestinations.set(quotationId, { address, recordedAt: now });
+  quotationDestinations.set(quotationId, { address, packageCount, recordedAt: now });
 }
 
 function sameAddress(a: SkydropxAddress, b: SkydropxAddress): boolean {
@@ -368,7 +385,7 @@ function sameAddress(a: SkydropxAddress, b: SkydropxAddress): boolean {
 async function createQuotation(
   addressFrom: SkydropxAddress,
   addressTo: SkydropxAddress,
-  parcel: Parcel,
+  parcels: Parcel[],
 ): Promise<SkydropxQuotationResponse> {
   return skydropxRequest<SkydropxQuotationResponse>("/api/v1/quotations", {
     method: "POST",
@@ -376,7 +393,9 @@ async function createQuotation(
       quotation: {
         address_from: addressFrom,
         address_to: addressTo,
-        parcels: [parcel],
+        // Un elemento por bulto real (Fase N.6). Skydropx documenta explícitamente el envío
+        // multi-paquete por esta vía y devuelve rates con `shipment_creation_type`.
+        parcels,
         // Restringe las paqueterías a cotizar cuando SKYDROPX_CARRIERS está
         // definido (menos proveedores = respuesta más rápida). Sin él, Skydropx
         // cotiza todas y el controlador recorta a las más baratas.
@@ -406,9 +425,26 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Tarifa lista para mostrar: resuelta (no `pending`), exitosa y con montos. */
+/**
+ * Tarifa lista para mostrar: resuelta (no `pending`), exitosa, con montos y que produzca **una
+ * sola guía**.
+ *
+ * El filtro de `multishipment` es la decisión de seguridad de la Fase N.6. Skydropx documenta
+ * tres formas de convertir una cotización en envío: `single` (un bulto), `multipackage` (una
+ * guía con varios bultos) y `multishipment` (**una guía por bulto**). Este modelo guarda un
+ * solo `skydropxShipmentId`/`trackingNumber`/`labelUrl` por pedido, y el webhook localiza la
+ * orden por `relationships.shipment.data.id` — con un rate `multishipment` solo una de las N
+ * guías quedaría visible y las demás serían dinero cobrado que nadie puede rastrear ni
+ * entregar. Se descartan aquí, en la misma puerta por la que ya no pasan las tarifas colgadas.
+ */
 function isUsableRate(r: SkydropxRate): boolean {
-  return r.status !== "pending" && r.success && r.amount != null && r.total != null;
+  return (
+    r.status !== "pending" &&
+    r.success &&
+    r.amount != null &&
+    r.total != null &&
+    r.shipment_creation_type !== "multishipment"
+  );
 }
 
 async function pollQuotation(quotationId: string): Promise<SkydropxQuotationResponse> {
@@ -445,10 +481,10 @@ async function pollQuotation(quotationId: string): Promise<SkydropxQuotationResp
 export async function getShippingRates(
   addressFrom: SkydropxAddress,
   addressTo: SkydropxAddress,
-  parcel: Parcel,
+  parcels: Parcel[],
 ): Promise<{ quotationId: string; rates: NormalizedShippingRate[] }> {
-  const created = await createQuotation(addressFrom, addressTo, parcel);
-  rememberQuotationDestination(created.id, addressTo);
+  const created = await createQuotation(addressFrom, addressTo, parcels);
+  rememberQuotationDestination(created.id, addressTo, parcels.length);
   const resolved = await pollQuotation(created.id);
 
   // Ordenadas de más barata a más cara y recortadas a MAX_RATES_RETURNED: el
@@ -456,7 +492,7 @@ export async function getShippingRates(
   // arriba son las que al cliente le interesan.
   const rates = resolved.rates
     .filter(isUsableRate)
-    .map(normalizeRate)
+    .map((r) => normalizeRate(r, parcels.length))
     .sort((a, b) => a.total - b.total)
     .slice(0, MAX_RATES_RETURNED);
 
@@ -476,7 +512,7 @@ function rateRequiresDropoff(r: SkydropxRate): boolean {
   return r.pickup === false || /sin\s+recolecci[oó]n/i.test(r.provider_service_name ?? "");
 }
 
-function normalizeRate(r: SkydropxRate): NormalizedShippingRate {
+function normalizeRate(r: SkydropxRate, packageCount: number): NormalizedShippingRate {
   return {
     rateId: r.id,
     carrier: r.provider_display_name,
@@ -484,6 +520,7 @@ function normalizeRate(r: SkydropxRate): NormalizedShippingRate {
     amount: parseFloat(r.amount!),
     total: parseFloat(r.total!),
     days: r.days,
+    packageCount,
     requiresDropoff: rateRequiresDropoff(r),
   };
 }
@@ -521,7 +558,7 @@ export async function getQuotationRate(
   if (!rate || !rate.success || rate.amount == null || rate.total == null) {
     return null;
   }
-  return normalizeRate(rate);
+  return normalizeRate(rate, remembered.packageCount);
 }
 
 /**
@@ -577,24 +614,34 @@ interface SkydropxCreateShipmentResponse {
 
 // Clave del catálogo SAT "c_ClaveProdServ" para Carta Porte — "Calzado". Ver nota arriba: no es
 // texto libre, Skydropx valida contra ese catálogo. Fijo para todos los envíos (la tienda vende
-// sobre todo calzado; no vale la pena mapear por categoría de producto para un solo paquete
-// combinado por pedido).
+// sobre todo calzado; no vale la pena mapear por categoría de producto, y menos ahora que un
+// pedido puede repartirse en varias cajas con mercancía mezclada).
 const CONSIGNMENT_NOTE_SAT_CODE = "53102400";
 // Valor de ejemplo de la documentación oficial, confirmado válido en sandbox real.
 const DEFAULT_PACKAGE_TYPE = "4G";
 
 const SHIPMENTS_PATH = "/api/v1/shipments";
 
+/**
+ * `packageCount` (Fase N.6) es cuántos bultos ampara el rate — el mismo número de `parcels` con
+ * el que se cotizó. Skydropx numera cada paquete por su índice en la cotización
+ * (`package_number`), así que mandar menos de los cotizados declara un envío más chico del que
+ * se entrega y la paquetería cobra la diferencia al recibirlo.
+ */
 export async function createShipment(
   rateId: string,
   addressFrom: SkydropxContact,
   addressTo: SkydropxContact,
+  packageCount = 1,
 ): Promise<{ shipmentId: string; carrierName: string }> {
-  const pkg: SkydropxShipmentPackage = {
-    package_number: "1",
-    package_type: DEFAULT_PACKAGE_TYPE,
-    consignment_note: CONSIGNMENT_NOTE_SAT_CODE,
-  };
+  const packages: SkydropxShipmentPackage[] = Array.from(
+    { length: Math.max(1, packageCount) },
+    (_, i) => ({
+      package_number: String(i + 1),
+      package_type: DEFAULT_PACKAGE_TYPE,
+      consignment_note: CONSIGNMENT_NOTE_SAT_CODE,
+    }),
+  );
   // El token se resuelve FUERA del try de abajo: si falla aquí, el `POST /shipments` nunca salió
   // y el fallo es concluyente. Dentro del try, cualquier timeout ya es ambiguo.
   await ensureAccessToken();
@@ -608,7 +655,7 @@ export async function createShipment(
           rate_id: rateId,
           address_from: addressFrom,
           address_to: addressTo,
-          packages: [pkg],
+          packages,
         },
       }),
     });

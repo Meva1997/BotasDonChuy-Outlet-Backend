@@ -1,8 +1,18 @@
+import { packOrder, type ParcelLineItem } from "./packing";
+
 export interface CartLineItem {
   product: {
     type: "bota" | "sombrero" | "ropa";
     originalPrice: number;
     salePrice: number;
+    // Dimensiones de envío (Fase N.6): la tarifa plana cobra POR CAJA, así que necesita
+    // acomodar el carrito igual que lo hace la cotización en vivo. Los dos llamadores
+    // (`orders.service.createOrder` y `shipping.controller`) ya tienen el `Product` cargado,
+    // así que no hay consulta nueva.
+    weightKg: number;
+    lengthCm: number;
+    widthCm: number;
+    heightCm: number;
   };
   quantity: number;
 }
@@ -14,9 +24,9 @@ export interface CartTotals {
   total: number;
 }
 
-// Tarifa fija por tipo de producto (el tipo más caro del carrito determina el costo).
+// Tarifa fija POR CAJA según el tipo de producto (dentro de una caja manda el tipo más caro).
 // Bota: caja grande y pesada. Sombrero: voluminoso. Ropa: ligera.
-// ⚠️ Duplicado a propósito con frontend/lib/cart.ts (este backend es la autoridad
+// ⚠️ Duplicado a propósito con frontend/lib/domain/cart.ts (este backend es la autoridad
 // de precios). Si cambias una tarifa, cámbiala también allí o el formulario del
 // checkout mostrará un envío y la confirmación otro.
 const SHIPPING_BY_TYPE: Record<string, number> = {
@@ -26,11 +36,39 @@ const SHIPPING_BY_TYPE: Record<string, number> = {
 };
 const SHIPPING_FALLBACK = 150;
 
+function rateForBox(types: Array<CartLineItem["product"]["type"]>): number {
+  if (types.length === 0) return 0;
+  return Math.max(...types.map((type) => SHIPPING_BY_TYPE[type] ?? SHIPPING_FALLBACK));
+}
+
+/**
+ * Tarifa plana de respaldo, cobrada **por bulto** (Fase N.6).
+ *
+ * Hasta esta fase era un `Math.max` sobre los tipos del carrito **sin mirar la cantidad**: 3
+ * botas + 1 sombrero cobraba $160, exactamente lo mismo que una sola bota, y 50 piezas de ropa
+ * cobraban $100. Como la paquetería cobra una guía **por bulto**, cada pedido de más de una
+ * caja se despachaba con la diferencia salida de la utilidad — y este camino no es un caso
+ * raro: se usa cada vez que Skydropx está caído, no devuelve tarifas utilizables a tiempo, o
+ * algún producto trae una dimensión en 0.
+ *
+ * Ahora acomoda el carrito con el **mismo `packOrder`** que arma los bultos de la cotización en
+ * vivo y de la guía, y suma por caja la tarifa del tipo más caro que esa caja lleva. Que sea la
+ * misma función es el punto: el respaldo y la cotización cuentan los mismos bultos, así que
+ * caer al respaldo cambia el precio, nunca el número de cajas.
+ */
 export function computeShipping(items: CartLineItem[]): number {
   if (items.length === 0) return 0;
-  return Math.max(
-    ...items.map((item) => SHIPPING_BY_TYPE[item.product.type] ?? SHIPPING_FALLBACK)
-  );
+  const parcelItems: ParcelLineItem[] = items.map((item) => ({
+    product: {
+      type: item.product.type,
+      weightKg: item.product.weightKg,
+      lengthCm: item.product.lengthCm,
+      widthCm: item.product.widthCm,
+      heightCm: item.product.heightCm,
+    },
+    quantity: item.quantity,
+  }));
+  return packOrder(parcelItems).reduce((acc, box) => acc + rateForBox(box.types), 0);
 }
 
 export function computeTotals(items: CartLineItem[]): CartTotals {

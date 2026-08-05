@@ -39,6 +39,9 @@ function buildOrder(overrides: {
   savings?: number;
   couponCode?: string | null;
   couponDiscount?: number;
+  /** Envío cobrado = costo pagado a la paquetería. Default 0 para que las pruebas que no van de
+   *  envío sigan leyendo exactamente los mismos números que antes de la Fase N.5. */
+  shipping?: number;
   items?: OrderItem[];
 } = {}): Order {
   const total = overrides.total ?? 1000;
@@ -47,7 +50,7 @@ function buildOrder(overrides: {
     status: "paid",
     subtotal: total,
     savings: overrides.savings ?? 0,
-    shipping: 0,
+    shipping: overrides.shipping ?? 0,
     couponCode: overrides.couponCode ?? null,
     couponDiscount: overrides.couponDiscount ?? 0,
     total,
@@ -363,5 +366,121 @@ describe("dashboard.service — getDashboardData (Parte 10)", () => {
     );
     expect(cupones).toBeDefined();
     expect(cupones!.value).toBe(formatMoney(0));
+  });
+
+  // ── El envío como costo de venta (Fase N.5) ─────────────────────────────────
+  // `order.total` ya trae sumado el envío cobrado, así que INGRESOS siempre lo incluyó — pero nada
+  // lo restaba, y la ganancia salía inflada por exactamente ese monto. Estos casos fijan que se
+  // resta en la GANANCIA BRUTA y que se resta **una sola vez** (no también en GASTOS).
+
+  const profitKpi = (
+    data: Awaited<ReturnType<typeof getDashboardData>>,
+    period: "7" | "30" | "90",
+    label: string,
+  ) => data.profitKpisByPeriod[period].find((k) => k.label === label)!;
+
+  it("COSTO DE ENVÍO suma el envío de la ventana y compara contra la previa", async () => {
+    jest.useFakeTimers().setSystemTime(new Date("2026-07-20T12:00:00Z"));
+    const orders = [
+      // Ventana actual de 7 días (14–20 de julio): 160 + 130 = 290.
+      buildOrder({ id: 1, createdAt: new Date("2026-07-20T10:00:00Z"), shipping: 160 }),
+      buildOrder({ id: 2, createdAt: new Date("2026-07-19T10:00:00Z"), shipping: 130 }),
+      // Ventana previa (7–13 de julio): 100.
+      buildOrder({ id: 3, createdAt: new Date("2026-07-10T10:00:00Z"), shipping: 100 }),
+    ];
+    mockQueries(orders, [], []);
+
+    const data = await getDashboardData();
+
+    const envio = profitKpi(data, "7", "COSTO DE ENVÍO");
+    expect(envio.value).toBe(formatMoney(290));
+    // 290 vs 100 → +190%. Y `positive: false` porque en un COSTO subir es malo: sin el
+    // `lowerIsBetter` de `computeTrend` el front pintaría de verde un alza de 190% en la guía.
+    expect(envio.trend).toEqual({ label: "+190% vs periodo anterior", positive: false });
+  });
+
+  it("un COSTO DE ENVÍO a la baja se pinta como buena noticia", async () => {
+    jest.useFakeTimers().setSystemTime(new Date("2026-07-20T12:00:00Z"));
+    const orders = [
+      buildOrder({ id: 1, createdAt: new Date("2026-07-20T10:00:00Z"), shipping: 50 }),
+      buildOrder({ id: 2, createdAt: new Date("2026-07-10T10:00:00Z"), shipping: 100 }),
+    ];
+    mockQueries(orders, [], []);
+
+    const data = await getDashboardData();
+
+    expect(profitKpi(data, "7", "COSTO DE ENVÍO").trend).toEqual({
+      label: "-50% vs periodo anterior",
+      positive: true,
+    });
+  });
+
+  it("GANANCIA BRUTA descuenta el envío además del costo de producto", async () => {
+    // La regresión que prueba que el bug murió: 1000 cobrados − 400 de producto − 160 de guía.
+    jest.useFakeTimers().setSystemTime(new Date("2026-07-20T12:00:00Z"));
+    const order = buildOrder({
+      id: 1,
+      createdAt: new Date("2026-07-18T12:00:00Z"),
+      total: 1000,
+      shipping: 160,
+      items: [buildOrderItem({ unitCost: 400, quantity: 1 })],
+    });
+    mockQueries([order], [], []);
+
+    const data = await getDashboardData();
+
+    expect(profitKpi(data, "30", "GANANCIA BRUTA").value).toBe(formatMoney(440));
+    // 440 / 1000. El denominador sigue siendo el efectivo cobrado (que incluye el envío).
+    expect(profitKpi(data, "30", "MARGEN BRUTO").value).toBe("44%");
+  });
+
+  it("el envío se resta UNA sola vez: no aparece también en GASTOS", async () => {
+    jest.useFakeTimers().setSystemTime(new Date("2026-07-20T12:00:00Z"));
+    const order = buildOrder({
+      id: 1,
+      createdAt: new Date("2026-07-18T12:00:00Z"),
+      total: 1000,
+      shipping: 160,
+      items: [buildOrderItem({ unitCost: 400, quantity: 1 })],
+    });
+    mockQueries([order], [], [], [buildExpense({ frequency: "monthly", amount: 2000 })]);
+
+    const data = await getDashboardData();
+
+    // GASTOS son SOLO los gastos capturados: el envío no se cuela aquí.
+    expect(gastosKpi(data, "30").value).toBe(formatMoney(2000));
+    // Y por lo tanto la operativa es 440 − 2000, no 440 − 2160.
+    expect(profitKpi(data, "30", "GANANCIA OPERATIVA").value).toBe(formatMoney(-1560));
+  });
+
+  it("sin envío el KPI queda en cero, no ausente", async () => {
+    jest.useFakeTimers().setSystemTime(new Date("2026-07-20T12:00:00Z"));
+    mockQueries([], [], []);
+
+    const data = await getDashboardData();
+
+    const envio = data.profitKpisByPeriod["30"].find((k) => k.label === "COSTO DE ENVÍO");
+    expect(envio).toBeDefined();
+    expect(envio!.value).toBe(formatMoney(0));
+  });
+
+  it("recentSales expone el envío para que la ganancia de la fila se pueda calcular", async () => {
+    // `total` ya trae el envío sumado, así que sin este campo el panel no puede distinguir
+    // `total − costoTotal` (inflado) de la ganancia real `total − shipping − costoTotal`.
+    jest.useFakeTimers().setSystemTime(new Date("2026-07-20T12:00:00Z"));
+    const order = buildOrder({
+      id: 7,
+      createdAt: new Date("2026-07-20T10:00:00Z"),
+      total: 1000,
+      shipping: 160,
+      items: [buildOrderItem({ unitCost: 400, quantity: 1 })],
+    });
+    mockQueries([order], [order], []);
+
+    const data = await getDashboardData();
+
+    const fila = data.recentSales[0];
+    expect(fila).toEqual(expect.objectContaining({ shipping: 160, total: 1000, costoTotal: 400 }));
+    expect(fila.total - fila.shipping - fila.costoTotal).toBe(440);
   });
 });

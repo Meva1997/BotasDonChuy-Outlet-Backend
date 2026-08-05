@@ -81,6 +81,13 @@ router.get("/", adminListExpenses);
  *
  *       `upcomingCharges` es la otra mitad de la pregunta: qué se cobra, de cuánto y en qué fecha
  *       durante los próximos `upcomingDays` días.
+ *
+ *
+ *       **`shippingCost`** es una línea **derivada** de `Order.shipping` (el envío pagado a la
+ *       paquetería en el mes en curso, a la fecha): no hay filas de gasto detrás, no se edita ni se
+ *       borra, y **no entra en `monthlyRunRate`, `annualRunRate`, `activeCount` ni `byCategory`** —
+ *       el dashboard ya la resta en GANANCIA BRUTA, así que sumarla aquí la restaría dos veces.
+ *       Píntala aparte y nunca la sumes al total de gastos.
  *     tags: [Admin - Expenses]
  *     security:
  *       - bearerAuth: []
@@ -112,6 +119,13 @@ router.get("/summary", adminExpenseSummary);
  *       curso viene con `partial: true`. Los cargos se atribuyen a **su** mes con el monto que
  *       estaba vigente en esa fecha: una anualidad aparece completa en su mes de renovación, y un
  *       aumento de precio nunca reescribe los meses anteriores.
+ *
+ *
+ *       Cada mes trae además **`shippingCost`**, el envío pagado a la paquetería derivado de
+ *       `Order.shipping`. Va **fuera de `total`, `byCategory` y `byExpense`**: el dashboard ya lo
+ *       resta en GANANCIA BRUTA (el envío es costo de venta, no gasto), así que meterlo en los
+ *       totales lo restaría dos veces. Al capturar gastos, cajas y empaque sí van como gasto de
+ *       categoría `paqueteria`; **las guías no**, ya están aquí.
  *     tags: [Admin - Expenses]
  *     security:
  *       - bearerAuth: []

@@ -606,6 +606,14 @@ const options: Options = {
                 "Dato operativo SOLO para el panel admin (se excluye de la respuesta pública de POST /api/orders): true = la paquetería elegida no recoge a domicilio, el dueño debe llevar el paquete a su sucursal. null cuando la orden usó la tarifa plana de respaldo o es previa a esta columna.",
               example: false,
             },
+            packageCount: {
+              type: "integer",
+              nullable: true,
+              minimum: 1,
+              description:
+                "En cuántos bultos va el pedido, congelado desde la tarifa que se cobró (el pedido se acomoda en las cajas reales de la tienda). Es lo que la guía declara en Skydropx: declarar menos bultos de los que se entregan es justo lo que la paquetería cobra aparte al recibir el envío.\n\nnull cuando la orden usó la tarifa plana de respaldo (no hay guía automática que generar) o es previa a esta columna; en ese caso el generador de guía lo lee como 1.",
+              example: 1,
+            },
             skydropxShipmentId: {
               type: "string",
               nullable: true,
@@ -1282,6 +1290,50 @@ const options: Options = {
                 },
               },
             },
+            shippingCost: {
+              allOf: [{ $ref: "#/components/schemas/DerivedShippingCost" }],
+              description:
+                "Envío pagado a la paquetería en el mes en curso, a la fecha. NO entra en `monthlyRunRate`, `annualRunRate`, `activeCount` ni `byCategory`.",
+            },
+          },
+        },
+        DerivedShippingCost: {
+          type: "object",
+          description:
+            "Envío pagado a la paquetería, DERIVADO de `Order.shipping`: no hay filas de gasto detrás, no se puede editar ni borrar y no aparece en el CRUD. Se calcula en vez de persistirse porque una fila por pedido serían ~900 al mes, que inundarían el listado y los agregados.\n\n**Ya está restado en la GANANCIA BRUTA del dashboard** (el envío es costo de venta, no gasto: se paga una guía por pedido, igual que el costo unitario de cada pieza). Por eso va FUERA de los totales de gastos: como `GANANCIA OPERATIVA = BRUTA − GASTOS`, sumarlo ahí lo restaría dos veces.\n\n⚠️ Al capturar gastos: cajas y empaque SÍ van como gasto de categoría `paqueteria`; las guías NO, ya están aquí.",
+          properties: {
+            category: { type: "string", enum: ["paqueteria"], example: "paqueteria" },
+            derived: {
+              type: "boolean",
+              enum: [true],
+              description: "Siempre `true`: derivado de `orders`, sin fila editable detrás.",
+              example: true,
+            },
+            includedInGrossProfit: {
+              type: "boolean",
+              enum: [true],
+              description:
+                "Siempre `true`: ya restado en la GANANCIA BRUTA. El consumidor no debe volver a restarlo ni sumarlo al total de gastos que pinta.",
+              example: true,
+            },
+            from: { type: "string", example: "2026-08-01" },
+            to: {
+              type: "string",
+              description: "Último día cubierto, inclusive. En el mes en curso es HOY, no fin de mes.",
+              example: "2026-08-04",
+            },
+            partial: {
+              type: "boolean",
+              description:
+                "La ventana no ha terminado: el monto puede crecer. Es lo que evita leer un acumulado a media quincena contra un `monthlyRunRate` de mes completo.",
+              example: true,
+            },
+            amount: { type: "number", format: "float", example: 4500.0 },
+            orders: {
+              type: "integer",
+              description: "Cuántos pedidos pagados lo generaron.",
+              example: 30,
+            },
           },
         },
         ExpenseMonth: {
@@ -1342,6 +1394,11 @@ const options: Options = {
                 },
               },
             },
+            shippingCost: {
+              allOf: [{ $ref: "#/components/schemas/DerivedShippingCost" }],
+              description:
+                "Envío pagado a la paquetería ese mes. NO entra en `total`, `byCategory` ni `byExpense`.",
+            },
           },
         },
         ShippingRatesInput: {
@@ -1389,6 +1446,13 @@ const options: Options = {
               description:
                 "true = el servicio no incluye recolección a domicilio (el paquete se lleva a la sucursal). Dato operativo para el dueño; el checkout no necesita mostrarlo. Se persiste en la orden como shippingRequiresDropoff.",
               example: false,
+            },
+            packageCount: {
+              type: "integer",
+              minimum: 1,
+              description:
+                "Cuántos bultos ampara la tarifa. El pedido se acomoda en las cajas reales de la tienda (chica/mediana/grande), así que un carrito grande viaja en varias — y la paquetería cobra una guía POR BULTO.\n\nÚtil para el checkout: cuando es > 1, explica por qué el envío subió (\"tu pedido va en 2 cajas\"). Viene también en la tarifa plana de respaldo, con el mismo acomodo: caer al respaldo cambia el precio del bulto, nunca cuántos bultos son.",
+              example: 1,
             },
           },
         },
@@ -1469,6 +1533,11 @@ const options: Options = {
           properties: {
             id: { type: "string", example: "5" },
             date: { type: "string", example: "12 jun · 07:33" },
+            day: {
+              type: "string",
+              description: "Clave ISO en UTC, para filtrar por día en el front.",
+              example: "2026-06-12",
+            },
             pieces: { type: "integer", example: 1 },
             items: { type: "string", example: "Bota Ranchera 1972, Bota Exótica de Avestruz ×2" },
             savings: {
@@ -1486,8 +1555,20 @@ const options: Options = {
                 "total = subtotal − savings − couponDiscount + shipping.",
               example: 150.0,
             },
+            shipping: {
+              type: "number",
+              format: "float",
+              description:
+                "Envío cobrado en este pedido = lo que se le paga a la paquetería. Va en la fila porque sin él la ganancia real del pedido no se puede sacar del panel: `total` ya trae el envío sumado, así que lo que gana la tienda es `total − shipping − costoTotal`.",
+              example: 160.0,
+            },
             total: { type: "number", format: "float", example: 1509.0 },
-            costoTotal: { type: "number", format: "float", example: 800.0 },
+            costoTotal: {
+              type: "number",
+              format: "float",
+              description: "Costo del producto (Σ unitCost × quantity). NO incluye el envío.",
+              example: 800.0,
+            },
           },
         },
         InventoryRow: {
@@ -1521,7 +1602,8 @@ const options: Options = {
             },
             profitKpisByPeriod: {
               type: "object",
-              description: "Las tres ventanas juntas; el front alterna en cliente.",
+              description:
+                "Las tres ventanas juntas; el front alterna en cliente. Etiquetas: GANANCIA BRUTA, MARGEN BRUTO, COSTO DE ENVÍO, DESCUENTOS POR CUPÓN, GASTOS, GANANCIA OPERATIVA.\n\nAritmética: `GANANCIA BRUTA = INGRESOS − costo de producto − COSTO DE ENVÍO` y `GANANCIA OPERATIVA = GANANCIA BRUTA − GASTOS`. El envío es costo de venta (una guía por pedido, igual que el costo unitario de cada pieza) y por eso NO está dentro de GASTOS, que son los gastos capturados en `/api/admin/expenses`: sumarlo en los dos lados lo restaría dos veces.\n\nOJO con `trend.positive` de COSTO DE ENVÍO: está invertido (bajar es bueno) para que un alza no se pinte de verde.",
               properties: {
                 "7": { type: "array", items: { $ref: "#/components/schemas/KpiData" } },
                 "30": { type: "array", items: { $ref: "#/components/schemas/KpiData" } },

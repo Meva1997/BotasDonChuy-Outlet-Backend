@@ -28,6 +28,7 @@ import {
   signToken,
 } from "../setup/factories";
 import { Product } from "../../src/models/Product";
+import { formatMoney } from "../../src/utils/formatMoney";
 
 let token: string;
 let bota: Product;
@@ -147,6 +148,28 @@ describe("GET /api/admin/dashboard", () => {
     const totales = res.body.recentSales.map((s: { total: number }) => s.total).sort();
     // 3200 − 800 + 150 = 2550 (pagado) y 1600 − 400 + 150 = 1350 (despachado). Nada más.
     expect(totales).toEqual([1350, 2550]);
+  });
+
+  // ── El envío como costo de venta (Fase N.5) ───────────────────────────────
+  it("descuenta el envío de la ganancia bruta, y una sola vez", async () => {
+    const res = await request(app)
+      .get("/api/admin/dashboard")
+      .set("Authorization", `Bearer ${token}`);
+
+    // La fila trae el envío para que la ganancia real del pedido salga del panel: `total` ya lo
+    // incluye, así que sin este campo `total − costoTotal` sobrestima lo que se ganó.
+    expect(res.body.recentSales.map((s: { shipping: number }) => s.shipping)).toEqual([150, 150]);
+
+    const kpi = (label: string) =>
+      res.body.profitKpisByPeriod["30"].find((k: { label: string }) => k.label === label).value;
+
+    // Ingresos 2550 + 1350 = 3900 · producto 800×2 + 800×1 = 2400 · envío 150×2 = 300.
+    expect(kpi("COSTO DE ENVÍO")).toBe(formatMoney(300));
+    expect(kpi("GANANCIA BRUTA")).toBe(formatMoney(1200)); // 3900 − 2400 − 300
+    expect(kpi("MARGEN BRUTO")).toBe("31%"); // 1200 / 3900 = 30.77 → 31
+    // Sin gastos capturados, la operativa iguala a la bruta: el envío NO se restó otra vez aquí.
+    expect(kpi("GASTOS")).toBe(formatMoney(0));
+    expect(kpi("GANANCIA OPERATIVA")).toBe(formatMoney(1200));
   });
 
   it("el inventario incluye el producto sin ventas", async () => {

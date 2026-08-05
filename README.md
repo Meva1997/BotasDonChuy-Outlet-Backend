@@ -523,10 +523,19 @@ El seed crea una fila recurrente de `$2,000/mes` equivalente a la constante viej
 GANANCIA NETA no dé un salto el día del deploy. Es una fila normal: se edita, se parte en gastos
 reales o se borra.
 
+**Línea derivada de envío (Fase N.5):** `/summary` y cada mes de `/history` traen además un campo
+`shippingCost` con lo que costó la paquetería ese periodo (`derived: true`,
+`includedInGrossProfit: true`) — informativo, **nunca** se persiste como `Expense` ni entra a
+`total`/`byCategory`/`byExpense`/`monthlyRunRate` (el dashboard ya lo resta en GANANCIA BRUTA;
+sumarlo aquí también lo restaría dos veces). ⚠️ Cajas y material de empaque sí se capturan como
+`Expense` de categoría `paqueteria`; las guías de Skydropx no — mezclar las dos es la forma de
+reintroducir el doble conteo.
+
 ### `GET /api/admin/dashboard` y `GET /api/admin/orders` (panel admin)
 
 `GET /api/admin/dashboard` calcula todo en memoria a partir de `Order`/`OrderItem`/`Product`
-(sin tablas de agregación): solo cuentan las órdenes con `status: "paid"`.
+(sin tablas de agregación): solo cuentan las órdenes con `paymentStatus: "paid"` (no `status`, que
+avanza a `shipped`/`delivered` y sacaría del reporte cada pedido ya despachado).
 
 - `kpisByPeriod` / `profitKpisByPeriod`: igual patrón que `revenueByPeriod` — las tres ventanas
   `"7" | "30" | "90"` juntas, cada una comparada contra su propio periodo anterior (p. ej. "30"
@@ -544,6 +553,13 @@ reales o se borra.
 - `recentSales`: últimas 20 órdenes pagadas.
 - `inventory`: todos los productos no borrados (incluye `visible: false`); `valorInventario = stock
   × unitCost`.
+
+**El envío es costo de venta (Fase N.5):** `GANANCIA BRUTA = INGRESOS − costo de producto − COSTO DE
+ENVÍO` (antes el envío cobrado en `Order.total` sumaba a INGRESOS sin restarse en ningún lado, así
+que un pedido con guía cara mostraba más margen del real). Se resta ahí y **no** se suma a `GASTOS`
+(el envío ya está en la venta, no es una suscripción/gasto operativo — sumarlo también a `GASTOS` lo
+restaría dos veces, ya que `GANANCIA OPERATIVA = BRUTA − GASTOS`). La misma cifra se expone además,
+de solo lectura, en `/api/admin/expenses/summary` y `/history` como una línea derivada (ver abajo).
 
 `GET /api/admin/orders` devuelve una página de órdenes (`page`/`perPage`, `perPage` por defecto
 `20`) con sus `items`, más recientes primero, sin excluir `unitCost` (a diferencia de las rutas
@@ -664,11 +680,20 @@ exitosas, con montos), se ordenan de más barata a más cara y se recortan a 5 (
 `SKYDROPX_CARRIERS` (env opcional) restringe de antemano qué paqueterías se cotizan, para respuestas
 más rápidas. Cada tarifa incluye `requiresDropoff` (`true` = el dueño debe llevar el paquete a la
 sucursal de la paquetería, no hay recolección a domicilio — dato operativo, el checkout no necesita
-mostrarlo). `src/services/packing.ts` arma una sola caja apilada por pedido a partir de las
-dimensiones/peso de cada producto. La ruta está limitada por `shippingRateLimiter` (20 req/min por
-IP) para no acaparar el presupuesto de 2 req/s compartido por toda la cuenta. `POST /api/orders`
-usa la cotización elegida como fuente autoritativa del costo de envío (ver la sección de checkout
-arriba).
+mostrarlo). La ruta está limitada por `shippingRateLimiter` (20 req/min por IP) para no acaparar el
+presupuesto de 2 req/s compartido por toda la cuenta. `POST /api/orders` usa la cotización elegida
+como fuente autoritativa del costo de envío (ver la sección de checkout arriba).
+
+**Empaque multi-caja (Fase N.6):** `src/services/packing.ts`'s `packOrder` acomoda el carrito en las
+cajas reales de la tienda (`DEFAULT_CARTONS`: chica/mediana/grande, el único lugar a editar cuando el
+dueño mida las suyas) en vez de una sola caja apilada — la paquetería cobra **por bulto**, así que un
+pedido de varias piezas ahora cotiza y factura el número real de cajas, no una caja gigante
+subestimada. `buildParcels` manda un bulto por caja a Skydropx; `computeShipping` (la tarifa plana de
+respaldo) usa el **mismo** acomodo, así que caer al fallback cambia el precio del bulto pero nunca
+cuántos bultos son. `Order.packageCount` congela cuántas cajas amparó la tarifa cobrada para que la
+guía declare ese número (antes `packages: [1]` fijo). Un producto que no cabe en ninguna caja viaja
+solo con sus propias medidas en vez de tumbar la cotización; si el acomodo pasa de
+`MAX_PARCELS_QUOTED` (10) bultos se cae al fallback de tarifa plana.
 
 **Guía automática al pagar (Fase 8.5):** en cuanto el webhook de Stripe confirma el pago,
 `createShipmentForOrder` (`src/services/payment.service.ts`) crea la guía real contra Skydropx

@@ -14,7 +14,7 @@ jest.mock("express-rate-limit", () => ({
 
 import app from "../../src/app";
 import { setupTestDatabase, truncateAll, closeTestDatabase } from "../setup/db";
-import { createAdminUser, signToken } from "../setup/factories";
+import { createAdminUser, createOrder, signToken } from "../setup/factories";
 import { Expense } from "../../src/models/Expense";
 import { ExpenseAmount } from "../../src/models/ExpenseAmount";
 
@@ -314,6 +314,72 @@ describe("GET /api/admin/expenses/summary", () => {
     expect(res.body.byCategory).toEqual([
       expect.objectContaining({ category: "infraestructura", count: 2 }),
     ]);
+    // Sin pedidos, la línea derivada de envío sale en cero — y NO altera nada de lo de arriba.
+    expect(res.body.shippingCost).toMatchObject({
+      category: "paqueteria",
+      derived: true,
+      includedInGrossProfit: true,
+      amount: 0,
+      orders: 0,
+      partial: true,
+    });
+  });
+});
+
+// ── Envío derivado (Fase N.5) ─────────────────────────────────────────────────────
+// El envío pagado a la paquetería sale de `Order.shipping`, no de filas `Expense`. Estas pruebas
+// cuidan las dos mitades del trato: que el monto llegue, y que NO se cuele en los totales de
+// gastos (el dashboard ya lo resta en GANANCIA BRUTA, así que ahí se restaría dos veces).
+describe("GET /api/admin/expenses — envío derivado", () => {
+  it("suma el envío de los pedidos pagados y excluye reembolsados y no pagados", async () => {
+    await createOrder({ paymentStatus: "paid", shipping: 150 });
+    await createOrder({ paymentStatus: "paid", shipping: 150 });
+    // La guía de un reembolso normalmente ya se pagó, pero el predicado es el mismo del dashboard
+    // (`paymentStatus: "paid"`): se asume que subestima antes que contradecir a los otros paneles.
+    await createOrder({ paymentStatus: "refunded", shipping: 150 });
+    await createOrder({ paymentStatus: "unpaid", shipping: 150 });
+
+    const res = await request(app).get("/api/admin/expenses/summary").set(auth());
+
+    expect(res.status).toBe(200);
+    expect(res.body.shippingCost.amount).toBe(300);
+    expect(res.body.shippingCost.orders).toBe(2);
+  });
+
+  it("no se cuela en la carga mensual, en activeCount ni en byCategory", async () => {
+    await createRender(); // $290 mensuales, categoría infraestructura
+    await createOrder({ paymentStatus: "paid", shipping: 150 });
+
+    const res = await request(app).get("/api/admin/expenses/summary").set(auth());
+
+    expect(res.body.shippingCost.amount).toBe(150);
+    // Lo que tiene que quedar intacto, o la GANANCIA OPERATIVA restaría el envío dos veces:
+    expect(res.body.monthlyRunRate).toBe(290);
+    expect(res.body.activeCount).toBe(1);
+    expect(res.body.byCategory.map((c: { category: string }) => c.category)).not.toContain(
+      "paqueteria",
+    );
+  });
+
+  it("el historial lo atribuye a su mes sin sumarlo al total del mes", async () => {
+    await createRender();
+    await createOrder({ paymentStatus: "paid", shipping: 150 });
+    await createOrder({ paymentStatus: "paid", shipping: 200 });
+
+    const mesActual = new Date().toISOString().slice(0, 7);
+    const res = await request(app)
+      .get("/api/admin/expenses/history")
+      .query({ from: mesActual, to: mesActual })
+      .set(auth());
+
+    expect(res.status).toBe(200);
+    const [mes] = res.body;
+    expect(mes.shippingCost.amount).toBe(350);
+    expect(mes.shippingCost.orders).toBe(2);
+    // `total` sigue siendo solo lo capturado, y ninguna fila de envío se coló en el desglose.
+    expect(mes.total).toBe(290);
+    expect(mes.byExpense).toHaveLength(1);
+    expect(mes.byCategory).toEqual([{ category: "infraestructura", amount: 290 }]);
   });
 });
 

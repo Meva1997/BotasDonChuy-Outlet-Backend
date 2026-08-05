@@ -36,6 +36,12 @@ export interface OrderAttributes {
   // cotización Skydropx) u órdenes previas a esta columna. Se excluye de la
   // respuesta pública de checkout — el cliente no la ve (ver orders.service.ts).
   shippingRequiresDropoff: boolean | null;
+  // Cuántos bultos ampara el envío cotizado (Fase N.6). Congelado en el checkout desde
+  // `parcels.length` porque la guía se genera minutos después, en otro proceso, y para entonces
+  // no hay forma de reconstruir el acomodo: las dimensiones del catálogo pudieron cambiar y
+  // `getQuotationRate` ya no devuelve los `parcels` cotizados. `null` = pedido con tarifa plana
+  // de respaldo o anterior a esta columna; `createShipmentForOrder` lo lee como 1.
+  packageCount: number | null;
   // Guía automática al pagar (Fase 8.5). `skydropxShipmentId` es el guard anti-doble-guía:
   // se reclama con un valor centinela ANTES de llamar a Skydropx (crear una guía cuesta dinero
   // real) y se reemplaza por el id real de la guía al terminar — ver createShipmentForOrder en
@@ -92,6 +98,7 @@ interface OrderCreationAttributes extends Optional<
   | "skydropxQuotationId"
   | "skydropxRateId"
   | "shippingRequiresDropoff"
+  | "packageCount"
   | "skydropxShipmentId"
   | "shipmentClaimedAt"
   | "trackingNumber"
@@ -131,6 +138,7 @@ export class Order
   declare skydropxQuotationId: string | null;
   declare skydropxRateId: string | null;
   declare shippingRequiresDropoff: boolean | null;
+  declare packageCount: number | null;
   declare skydropxShipmentId: string | null;
   declare shipmentClaimedAt: Date | null;
   declare trackingNumber: string | null;
@@ -260,6 +268,11 @@ Order.init(
     },
     shippingRequiresDropoff: {
       type: DataTypes.BOOLEAN,
+      allowNull: true,
+      defaultValue: null,
+    },
+    packageCount: {
+      type: DataTypes.INTEGER,
       allowNull: true,
       defaultValue: null,
     },

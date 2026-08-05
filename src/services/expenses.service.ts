@@ -8,6 +8,7 @@ import {
   type ExpenseFrequency,
 } from "../models/Expense";
 import { ExpenseAmount } from "../models/ExpenseAmount";
+import { Order, type OrderAttributes } from "../models/Order";
 import type { ExpenseInput, ExpenseUpdateInput } from "../schemas/expense";
 import {
   addDays,
@@ -107,6 +108,9 @@ export interface ExpenseSummary {
     date: string;
     amount: number;
   }>;
+  /** Envío pagado a la paquetería en el mes en curso, a la fecha. **No entra en `monthlyRunRate`,
+   *  `annualRunRate`, `activeCount` ni `byCategory`** — ver `DerivedShippingCost`. */
+  shippingCost: DerivedShippingCost;
 }
 
 export interface ExpenseMonthRow {
@@ -144,12 +148,85 @@ export interface ExpenseMonth {
    *  causa visible. Se devuelve crudo (`previousAmount` → `amount`); el delta y el % los calcula
    *  el front, como el resto de métricas derivadas (ver CLAUDE.md). */
   changes: ExpenseMonthChange[];
+  /** Envío pagado a la paquetería ese mes. **Fuera de `total`/`byCategory`/`byExpense`** — ver
+   *  `DerivedShippingCost`. */
+  shippingCost: DerivedShippingCost;
 }
+
+/**
+ * Envío pagado a la paquetería, **derivado de `Order.shipping`**: no hay filas `Expense`/
+ * `ExpenseAmount` detrás, no se puede editar ni borrar, y no aparece en el listado del CRUD.
+ *
+ * **Por qué se calcula y no se persiste.** Una fila por pedido serían ~900 al mes a 30 ventas
+ * diarias: inundaría el `activeCount` y el `byCategory` de `/summary`, el `byExpense` de
+ * `/history` y la lista editable del panel — todo para representar algo que ya está en `orders`.
+ * Las dos tablas de gastos son de decenas de filas justamente porque las captura un humano.
+ *
+ * **Por qué va FUERA de `total`/`byCategory`/`monthlyRunRate`.** El dashboard ya lo resta en
+ * GANANCIA BRUTA (es costo de venta, no gasto: se paga una guía por pedido, igual que el
+ * `unitCost` de cada pieza). Como `GANANCIA OPERATIVA = BRUTA − GASTOS`, sumarlo también a los
+ * totales de gastos lo restaría **dos veces**. Se expone aparte para que el dueño lo *vea* —es su
+ * segundo costo más grande después del producto— sin que los dos números se contradigan.
+ *
+ * ⚠️ **Regla que hay que respetar al capturar gastos:** cajas y empaque **sí** van como `Expense`
+ * de categoría `paqueteria`; **las guías no**, ya están aquí. Ver el comentario en
+ * `src/models/Expense.ts`.
+ */
+export interface DerivedShippingCost {
+  category: "paqueteria";
+  /** Siempre `true`: derivado de `orders`, sin fila editable detrás. */
+  derived: true;
+  /** Siempre `true`: ya restado en GANANCIA BRUTA. El consumidor no debe volver a restarlo. */
+  includedInGrossProfit: true;
+  /** Ventana cubierta, días de calendario UTC, ambos inclusive. */
+  from: string;
+  to: string;
+  /** La ventana no ha terminado: el monto puede crecer. Mismo criterio que `ExpenseMonth.partial`. */
+  partial: boolean;
+  amount: number;
+  /** Cuántos pedidos pagados lo generaron. Sin esto un `amount` raro no se puede sanity-checkear. */
+  orders: number;
+}
+
+/** Envío agregado por mes UTC (`"YYYY-MM"`), para inyectarlo en las funciones puras. */
+export type ShippingByMonth = Map<string, { amount: number; orders: number }>;
 
 // ── Helpers puros ───────────────────────────────────────────────────────────────
 
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+/**
+ * Arma la línea derivada de un mes. Devuelve **cero, nunca ausente** (misma regla que el KPI de
+ * cupones y que los meses en `$0` del historial: un campo faltante se leería como "no hay dato"
+ * en vez de "no hubo envíos").
+ */
+function shippingLine(
+  isoMonthKey: string,
+  todayIso: string,
+  currentMonth: string,
+  shippingByMonth: ShippingByMonth,
+): DerivedShippingCost {
+  const entry = shippingByMonth.get(isoMonthKey);
+  const partial = isoMonthKey === currentMonth;
+  const monthStart = utcDayFromIso(`${isoMonthKey}-01`);
+  const monthEnd = isoDay(
+    new Date(Date.UTC(monthStart.getUTCFullYear(), monthStart.getUTCMonth() + 1, 0)),
+  );
+  return {
+    category: "paqueteria",
+    derived: true,
+    includedInGrossProfit: true,
+    from: `${isoMonthKey}-01`,
+    // En el mes en curso la ventana llega hasta hoy y no hasta fin de mes: `from`/`to`/`partial`
+    // son lo que evita que un acumulado a media quincena se lea contra un `monthlyRunRate` de mes
+    // completo y parezca que el envío sale baratísimo.
+    to: partial ? todayIso : monthEnd,
+    partial,
+    amount: round2(entry?.amount ?? 0),
+    orders: entry?.orders ?? 0,
+  };
 }
 
 /**
@@ -307,6 +384,10 @@ export function buildHistory(
   fromMonth: Date,
   toMonth: Date,
   today: Date,
+  // Se **inyecta** en vez de consultarse aquí adentro: esta función es pura sobre `Expense[]` y sus
+  // tests unitarios la llaman sin tocar la BD. La consulta vive en `getExpenseHistory`, que ya hace
+  // acceso a datos. El default deja intacto a todo llamador existente (lee cero).
+  shippingByMonth: ShippingByMonth = new Map(),
 ): ExpenseMonth[] {
   const todayIso = isoDay(today);
   const currentMonth = isoMonth(today);
@@ -396,11 +477,19 @@ export function buildHistory(
       changes: (changesByMonth.get(key) ?? []).sort((a, b) =>
         a.effectiveFrom < b.effectiveFrom ? -1 : 1,
       ),
+      // Deliberadamente NO entra en `total` ni en `byCategory` de arriba: el dashboard ya lo restó
+      // en GANANCIA BRUTA.
+      shippingCost: shippingLine(key, todayIso, currentMonth, shippingByMonth),
     };
   });
 }
 
-export function buildSummary(expenses: Expense[], today: Date): ExpenseSummary {
+export function buildSummary(
+  expenses: Expense[],
+  today: Date,
+  // Inyectado, por lo mismo que en `buildHistory`: mantener esta función pura y testeable sin BD.
+  shippingByMonth: ShippingByMonth = new Map(),
+): ExpenseSummary {
   const todayIso = isoDay(today);
   const horizon = isoDay(addDays(today, UPCOMING_DAYS));
 
@@ -457,6 +546,9 @@ export function buildSummary(expenses: Expense[], today: Date): ExpenseSummary {
     upcomingDays: UPCOMING_DAYS,
     upcomingTotal: round2(upcomingCharges.reduce((acc, c) => acc + c.amount, 0)),
     upcomingCharges,
+    // Mes calendario en curso, a la fecha (siempre `partial: true`). Fuera de `monthlyRunRate` y
+    // de `byCategory` a propósito: el dashboard ya lo restó en GANANCIA BRUTA.
+    shippingCost: shippingLine(isoMonth(today), todayIso, isoMonth(today), shippingByMonth),
   };
 }
 
@@ -477,6 +569,43 @@ export async function loadExpenses(
     include: [amountsInclude],
     order: [["id", "DESC"]],
   });
+}
+
+/**
+ * Envío pagado a la paquetería, agregado por mes UTC — la fuente de la línea derivada
+ * (`DerivedShippingCost`). `to` es **exclusivo**.
+ *
+ * `paymentStatus: "paid"` y **no** `status`, el mismo predicado que el dashboard: un pedido
+ * `shipped`/`delivered` sigue siendo una venta con su guía pagada, y un `refunded`/`failed` sale
+ * solo. Consecuencia asumida: en un reembolso la guía normalmente ya se pagó, así que esta línea
+ * **subestima** por esos pedidos — misma dirección que el sesgo que ya tienen ingresos y COGS.
+ *
+ * ⚠️ **Sin `raw: true`.** `Order.shipping` es `DECIMAL(10,2)` y el `parseFloat` que lo vuelve
+ * número vive en el getter del modelo, que `raw` no ejecuta: devolvería el string `"150.00"` y la
+ * suma **concatenaría** en vez de sumar.
+ */
+export async function loadShippingByMonth(
+  from: Date,
+  toExclusive: Date,
+): Promise<ShippingByMonth> {
+  const orders = await Order.findAll({
+    where: {
+      paymentStatus: "paid",
+      createdAt: { [Op.gte]: from, [Op.lt]: toExclusive },
+    } as WhereOptions<OrderAttributes>,
+    attributes: ["createdAt", "shipping"],
+  });
+
+  const byMonth: ShippingByMonth = new Map();
+  for (const order of orders) {
+    // Mismo bucketing UTC que el dashboard, para que los dos paneles nunca partan el mes distinto.
+    const key = isoMonth(order.createdAt);
+    const entry = byMonth.get(key) ?? { amount: 0, orders: 0 };
+    entry.amount += order.shipping;
+    entry.orders += 1;
+    byMonth.set(key, entry);
+  }
+  return byMonth;
 }
 
 function toView(expense: Expense, today: string): ExpenseView {
@@ -679,8 +808,18 @@ export async function deleteExpense(
 }
 
 export async function getExpenseSummary(): Promise<ExpenseSummary> {
-  const expenses = await loadExpenses();
-  return buildSummary(expenses, new Date());
+  // Un solo `now` para todo: si los límites del mes y el `today` de `buildSummary` se tomaran por
+  // separado, una llamada a las 23:59:59.9 podría cruzar la medianoche entre uno y otro y pedir el
+  // envío de un mes distinto al que se está resumiendo.
+  const now = new Date();
+  const monthStart = utcMonthStart(now);
+  const nextMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+
+  const [expenses, shippingByMonth] = await Promise.all([
+    loadExpenses(),
+    loadShippingByMonth(monthStart, nextMonthStart),
+  ]);
+  return buildSummary(expenses, now, shippingByMonth);
 }
 
 /**
@@ -705,5 +844,12 @@ export async function getExpenseHistory(
     : utcMonthStart(earliest ? utcDayFromIso(earliest) : now);
   const to = toMonth ? utcDayFromIso(`${toMonth}-01`) : utcMonthStart(now);
 
-  return buildHistory(expenses, from, to, now);
+  // Secuencial y no en `Promise.all` con `loadExpenses`: el rango depende de `earliest`, que sale
+  // de los gastos ya cargados. El límite superior es el primer día del mes SIGUIENTE al último
+  // pedido, y es exclusivo a propósito: un `createdAt` futuro (reloj desfasado, fila sembrada a
+  // mano) caería si no en un mes que el llamador nunca pidió.
+  const toExclusive = new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth() + 1, 1));
+  const shippingByMonth = await loadShippingByMonth(from, toExclusive);
+
+  return buildHistory(expenses, from, to, now, shippingByMonth);
 }

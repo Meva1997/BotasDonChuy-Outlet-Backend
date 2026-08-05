@@ -393,6 +393,14 @@ export async function previewCoupon(
         type: product.type,
         originalPrice: product.originalPrice,
         salePrice: product.salePrice,
+        // El descuento del cupón nunca toca el envío (ver `computeCouponDiscount`), así que
+        // estas dimensiones no cambian nada aquí — pero `CartLineItem` las exige desde la Fase
+        // N.6 y armar el renglón igual que `createOrder` es justo la garantía de que el preview
+        // y el cobro salen del mismo código.
+        weightKg: product.weightKg,
+        lengthCm: product.lengthCm,
+        widthCm: product.widthCm,
+        heightCm: product.heightCm,
       },
       quantity,
     });

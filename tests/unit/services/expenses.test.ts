@@ -373,3 +373,88 @@ describe("expenses.service — resumen / cuánto retirar (Fase N.3)", () => {
     expect(summary.upcomingCharges).toEqual([]);
   });
 });
+
+// ── Línea derivada de envío (Fase N.5) ────────────────────────────────────────────
+// El envío pagado a la paquetería NO se persiste como gasto (serían ~900 filas al mes) y NO entra
+// en los totales de gastos: el dashboard ya lo resta en GANANCIA BRUTA. Se inyecta como parámetro
+// para que estas funciones sigan siendo puras — la consulta vive en los wrappers.
+describe("expenses.service — envío derivado (Fase N.5)", () => {
+  const today = new Date("2026-07-30T12:00:00Z");
+
+  it("sin el argumento nuevo el envío es cero y nada más cambia", () => {
+    // Fija que el default no rompe a ningún llamador anterior: son los mismos números del caso
+    // "suma la carga mensual de todo lo vivo y la anualiza".
+    const render = buildExpense({ frequency: "monthly", startsAt: "2026-01-15", amounts: [{ amount: 290 }] });
+    const dominio = buildExpense({ frequency: "yearly", startsAt: "2026-04-10", amounts: [{ amount: 1200 }] });
+
+    const summary = buildSummary([render, dominio], today);
+
+    expect(summary.monthlyRunRate).toBe(390);
+    expect(summary.annualRunRate).toBe(4680);
+    expect(summary.shippingCost).toEqual({
+      category: "paqueteria",
+      derived: true,
+      includedInGrossProfit: true,
+      from: "2026-07-01",
+      to: "2026-07-30", // el mes en curso llega hasta HOY, no hasta fin de mes
+      partial: true,
+      amount: 0, // cero, NO ausente
+      orders: 0,
+    });
+  });
+
+  it("con envío, el resumen lo expone SIN meterlo en la carga mensual ni en byCategory", () => {
+    const render = buildExpense({ frequency: "monthly", startsAt: "2026-01-15", amounts: [{ amount: 290 }] });
+
+    const summary = buildSummary(
+      [render],
+      today,
+      new Map([["2026-07", { amount: 4500, orders: 30 }]]),
+    );
+
+    expect(summary.shippingCost.amount).toBe(4500);
+    expect(summary.shippingCost.orders).toBe(30);
+    // Lo que NO se movió: si se moviera, la GANANCIA OPERATIVA restaría el envío dos veces.
+    expect(summary.monthlyRunRate).toBe(290);
+    expect(summary.annualRunRate).toBe(3480);
+    expect(summary.byCategory.map((c) => c.category)).not.toContain("paqueteria");
+  });
+
+  it("el historial atribuye el envío a su mes sin tocar total/byCategory/byExpense", () => {
+    const render = buildExpense({
+      frequency: "monthly",
+      startsAt: "2026-05-15",
+      amounts: [{ amount: 290 }],
+    });
+    const from = new Date(Date.UTC(2026, 4, 1));
+    const to = new Date(Date.UTC(2026, 6, 1));
+    const shipping = new Map([
+      ["2026-05", { amount: 1200, orders: 8 }],
+      ["2026-06", { amount: 900, orders: 6 }],
+    ]);
+
+    const sinEnvio = buildHistory([render], from, to, today);
+    const conEnvio = buildHistory([render], from, to, today, shipping);
+
+    expect(conEnvio.map((m) => m.shippingCost.amount)).toEqual([1200, 900, 0]);
+    expect(conEnvio.map((m) => m.shippingCost.orders)).toEqual([8, 6, 0]);
+    // Los agregados de gastos capturados son idénticos con y sin envío.
+    expect(conEnvio.map((m) => m.total)).toEqual(sinEnvio.map((m) => m.total));
+    expect(conEnvio.map((m) => m.byCategory)).toEqual(sinEnvio.map((m) => m.byCategory));
+    expect(conEnvio.map((m) => m.byExpense)).toEqual(sinEnvio.map((m) => m.byExpense));
+  });
+
+  it("un mes cerrado cubre hasta su último día; el mes en curso, hasta hoy", () => {
+    const render = buildExpense({ frequency: "monthly", startsAt: "2026-06-15", amounts: [{ amount: 290 }] });
+
+    const [junio, julio] = buildHistory(
+      [render],
+      new Date(Date.UTC(2026, 5, 1)),
+      new Date(Date.UTC(2026, 6, 1)),
+      today,
+    );
+
+    expect(junio.shippingCost).toMatchObject({ from: "2026-06-01", to: "2026-06-30", partial: false });
+    expect(julio.shippingCost).toMatchObject({ from: "2026-07-01", to: "2026-07-30", partial: true });
+  });
+});

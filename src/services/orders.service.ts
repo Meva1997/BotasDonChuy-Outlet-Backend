@@ -83,6 +83,7 @@ export async function createOrder(
         rateId: string;
         carrier: string;
         requiresDropoff: boolean;
+        packageCount: number;
       }
     | null = null;
   if (input.quotationId && input.rateId) {
@@ -116,6 +117,10 @@ export async function createOrder(
       // Autoritativo: sale de la re-consulta a Skydropx, no del cliente. Le dice
       // al dueño si tiene que llevar el paquete a la sucursal (sin recolección).
       requiresDropoff: rate.requiresDropoff,
+      // Cuántos bultos ampara la tarifa que se está cobrando (Fase N.6). Se congela en la
+      // orden porque la guía se genera minutos después y para entonces el acomodo ya no se
+      // puede reconstruir.
+      packageCount: rate.packageCount,
     };
   }
 
@@ -184,6 +189,12 @@ export async function createOrder(
           type: product.type,
           originalPrice: product.originalPrice,
           salePrice: product.salePrice,
+          // Dimensiones para el acomodo en cajas de la tarifa plana (Fase N.6). El `Product` ya
+          // está cargado aquí, así que no hay consulta extra.
+          weightKg: product.weightKg,
+          lengthCm: product.lengthCm,
+          widthCm: product.widthCm,
+          heightCm: product.heightCm,
         },
         quantity: line.quantity,
       });
@@ -255,6 +266,7 @@ export async function createOrder(
         // Solo se sabe con cotización en vivo; en tarifa plana de respaldo queda
         // null (no aplica: la tienda no manda por Skydropx en ese caso).
         shippingRequiresDropoff: shippingOverride?.requiresDropoff ?? undefined,
+        packageCount: shippingOverride?.packageCount ?? undefined,
         // Credencial de la consulta pública (Fase O.4). Se genera aquí, con el resto de la
         // orden, para que exista desde el primer instante: el correo de confirmación lo manda
         // como link y la respuesta del checkout lo devuelve al comprador.

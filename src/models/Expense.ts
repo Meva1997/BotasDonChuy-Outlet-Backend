@@ -14,7 +14,11 @@ export const EXPENSE_CATEGORIES = [
   "software", // SaaS y suscripciones que no son infra (diseño, contabilidad)
   "renta",
   "servicios", // luz, agua, internet, teléfono
-  "paqueteria", // saldo de guías, cajas, empaque
+  // ⚠️ Cajas y empaque **sí**; las GUÍAS **no**. El costo de cada guía ya sale de `Order.shipping`
+  // y el dashboard lo resta en GANANCIA BRUTA (ver `DerivedShippingCost` en
+  // `services/expenses.service.ts`). Capturar aquí la factura de la paquetería lo restaría **dos
+  // veces** de la GANANCIA OPERATIVA, que es `BRUTA − GASTOS`.
+  "paqueteria", // cajas y empaque
   "publicidad",
   "nomina",
   "impuestos",

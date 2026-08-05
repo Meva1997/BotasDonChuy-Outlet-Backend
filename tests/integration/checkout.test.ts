@@ -11,6 +11,16 @@ jest.mock("../../src/services/payment.service", () => ({
   createPaymentIntentForOrder: jest.fn(),
 }));
 
+/**
+ * Solo `getQuotationRate` se reemplaza: `createOrder` también usa `toSkydropxAddress` y
+ * `SkydropxRequestError` del mismo módulo, y mockearlo entero los volvería `undefined`.
+ */
+const getQuotationRateMock = jest.fn();
+jest.mock("../../src/services/skydropx.service", () => ({
+  ...jest.requireActual("../../src/services/skydropx.service"),
+  getQuotationRate: getQuotationRateMock,
+}));
+
 import app from "../../src/app";
 import { setupTestDatabase, truncateAll, closeTestDatabase } from "../setup/db";
 import { createProduct } from "../setup/factories";
@@ -43,6 +53,7 @@ beforeEach(() => {
     clientSecret: "secret_test_123",
     paymentIntentId: "pi_test_123",
   });
+  getQuotationRateMock.mockReset();
 });
 
 describe("POST /api/orders — descuento atómico de stock", () => {
@@ -143,5 +154,57 @@ describe("POST /api/orders — refine quotationId/rateId", () => {
       });
 
     expect(res.status).toBe(400);
+  });
+});
+
+describe("POST /api/orders — bultos congelados en el pedido (Fase N.6)", () => {
+  const quoted = {
+    items: (productId: number) => [{ productId, size: 25, quantity: 4 }],
+    ids: { quotationId: "quotation_multi", rateId: "rate_multi" },
+  };
+
+  it("congela el `packageCount` de la tarifa re-consultada, no uno que mande el cliente", async () => {
+    // La guía se genera minutos después y en otro proceso: para entonces el acomodo ya no se
+    // puede reconstruir (las dimensiones del catálogo pudieron cambiar y `GET /quotations/{id}`
+    // no devuelve los `parcels` cotizados), así que el conteo tiene que quedar guardado aquí.
+    const product = await createProduct({ sizes: { 25: 10 } });
+    getQuotationRateMock.mockResolvedValue({
+      rateId: "rate_multi",
+      carrier: "DHL",
+      service: "Estándar",
+      amount: 300,
+      total: 300,
+      days: 3,
+      packageCount: 2,
+      requiresDropoff: false,
+    });
+
+    const res = await request(app)
+      .post("/api/orders")
+      .send({
+        items: quoted.items(product.id),
+        customer: validCustomer,
+        ...quoted.ids,
+        // Un `packageCount` inventado por el cliente no debe llegar a la orden, igual que
+        // tampoco llega un monto de envío.
+        packageCount: 99,
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.order.packageCount).toBe(2);
+    expect(res.body.order.shipping).toBe(300);
+  });
+
+  it("sin cotización en vivo (tarifa plana) el pedido no guarda bultos", async () => {
+    // `null` = "este pedido no tiene guía de Skydropx que declarar"; el generador la lee como 1.
+    const product = await createProduct({ sizes: { 25: 10 } });
+
+    const res = await request(app)
+      .post("/api/orders")
+      .send({ items: quoted.items(product.id), customer: validCustomer });
+
+    expect(res.status).toBe(201);
+    expect(res.body.order.packageCount).toBeNull();
+    expect(getQuotationRateMock).not.toHaveBeenCalled();
   });
 });
