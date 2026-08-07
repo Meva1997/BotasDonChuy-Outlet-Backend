@@ -8,6 +8,7 @@ import { SHIPMENT_CREATION_SENTINEL } from "./payment.service";
 import {
   dailySalesDigestSubject,
   dailySalesDigestTemplate,
+  type DigestOrderItemLine,
   type DigestOrderRow,
 } from "./email/templates/dailySalesDigest";
 import {
@@ -111,10 +112,38 @@ function needsLabel(order: Order): boolean {
   );
 }
 
+/**
+ * Colapsa los renglones de `OrderItem` de un pedido en líneas por modelo/talla/precio: mismo
+ * `nameSnapshot` + `size` + `unitSalePrice` se suma en una sola entrada en vez de repetirse una vez
+ * por unidad — así "2 piezas del mismo modelo" se lee como un solo grupo descriptivo y no como dos
+ * renglones idénticos. El precio entra en la llave por si el mismo modelo/talla se vendió a dos
+ * precios distintos dentro del mismo pedido (edge case, pero `unitSalePrice` ya viene congelado por
+ * línea, así que no hay forma de saber si eso pasó sin distinguirlo).
+ */
+function groupOrderItems(items: OrderItem[]): DigestOrderItemLine[] {
+  const groups = new Map<string, DigestOrderItemLine>();
+  for (const item of items) {
+    const key = `${item.nameSnapshot}__${item.size}__${item.unitSalePrice}`;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.quantity += item.quantity;
+    } else {
+      groups.set(key, {
+        nameSnapshot: item.nameSnapshot,
+        size: item.size,
+        quantity: item.quantity,
+        unitSalePrice: item.unitSalePrice,
+      });
+    }
+  }
+  return Array.from(groups.values());
+}
+
 function summarize(orders: Order[]): { rows: DigestOrderRow[]; totals: DayTotals } {
   const totals = emptyTotals();
   const rows = orders.map((order) => {
-    const pieces = (order.items ?? []).reduce((acc, item) => acc + item.quantity, 0);
+    const orderItems = order.items ?? [];
+    const pieces = orderItems.reduce((acc, item) => acc + item.quantity, 0);
     totals.orderCount += 1;
     totals.pieces += pieces;
     totals.revenue += order.total;
@@ -130,6 +159,7 @@ function summarize(orders: Order[]): { rows: DigestOrderRow[]; totals: DayTotals
       status: order.status,
       needsLabel: needsLabel(order),
       requiresDropoff: order.shippingRequiresDropoff === true,
+      items: groupOrderItems(orderItems),
     };
   });
   return { rows, totals };
@@ -155,8 +185,16 @@ export async function sendDailySalesDigest(day: string): Promise<void> {
   try {
     const orders = await Order.findAll({
       where: salesOfDayWhere(day),
-      // Solo se leen las cantidades: el resumen cuenta piezas, no renglones de producto.
-      include: [{ model: OrderItem, as: "items", attributes: ["quantity"] }],
+      // nameSnapshot/size/unitSalePrice se leen para listar lo vendido en el correo (agrupado por
+      // `groupOrderItems`); unitCost se queda fuera a propósito, mismo criterio que el resto de esta
+      // fase: un correo no está autenticado y no debe llevar margen.
+      include: [
+        {
+          model: OrderItem,
+          as: "items",
+          attributes: ["nameSnapshot", "size", "quantity", "unitSalePrice"],
+        },
+      ],
       order: [["createdAt", "ASC"]],
     });
 

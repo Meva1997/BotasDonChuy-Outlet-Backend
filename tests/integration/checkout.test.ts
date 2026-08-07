@@ -21,6 +21,17 @@ jest.mock("../../src/services/skydropx.service", () => ({
   getQuotationRate: getQuotationRateMock,
 }));
 
+/**
+ * `orderRateLimiter` (10 req/min) comparte su store en memoria por todo el proceso de Jest, no
+ * por test, y esta suite ya pasa de 10 `POST /api/orders` (descuento atómico, sin tallas, totales
+ * autoritativos, quotationId/rateId, bultos). Mismo mock que `checkoutIdempotency.test.ts`/
+ * `auth.test.ts`/`shippingRates.test.ts`: el rate limit es una defensa contra el abuso, no lo que
+ * se prueba aquí.
+ */
+jest.mock("express-rate-limit", () => ({
+  rateLimit: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+}));
+
 import app from "../../src/app";
 import { setupTestDatabase, truncateAll, closeTestDatabase } from "../setup/db";
 import { createProduct } from "../setup/factories";
@@ -85,6 +96,66 @@ describe("POST /api/orders — descuento atómico de stock", () => {
       where: { productId: product.id, size: 25 },
     });
     expect(size!.stock).toBe(0);
+  });
+});
+
+describe("POST /api/orders — productos sin tallas (hasSizes:false)", () => {
+  it("compra un producto sin tallas con size:0 (centinela) y descuenta la única fila", async () => {
+    const product = await createProduct({ hasSizes: false, sizes: { 0: 12 } });
+
+    const res = await request(app)
+      .post("/api/orders")
+      .send({
+        items: [{ productId: product.id, size: 0, quantity: 2 }],
+        customer: validCustomer,
+      });
+
+    expect(res.status).toBe(201);
+
+    const row = await ProductSize.findOne({ where: { productId: product.id, size: 0 } });
+    expect(row!.stock).toBe(10);
+  });
+
+  it("un producto sin tallas se agota sin mencionar 'talla' en el mensaje", async () => {
+    const product = await createProduct({ hasSizes: false, sizes: { 0: 1 } });
+
+    const res = await request(app)
+      .post("/api/orders")
+      .send({
+        items: [{ productId: product.id, size: 0, quantity: 2 }],
+        customer: validCustomer,
+      });
+
+    expect(res.status).toBe(409);
+    expect(res.body.message).not.toMatch(/talla/i);
+  });
+
+  it("mandar una talla real (size != 0) para un producto sin tallas → 400", async () => {
+    const product = await createProduct({ hasSizes: false, sizes: { 0: 5 } });
+
+    const res = await request(app)
+      .post("/api/orders")
+      .send({
+        items: [{ productId: product.id, size: 25, quantity: 1 }],
+        customer: validCustomer,
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/no maneja tallas/i);
+  });
+
+  it("mandar size:0 para un producto CON tallas → 400", async () => {
+    const product = await createProduct({ sizes: { 25: 5 } });
+
+    const res = await request(app)
+      .post("/api/orders")
+      .send({
+        items: [{ productId: product.id, size: 0, quantity: 1 }],
+        customer: validCustomer,
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/selecciona una talla/i);
   });
 });
 

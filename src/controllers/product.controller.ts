@@ -18,6 +18,7 @@ import { formatMoney } from "../utils/formatMoney";
 import { CLOUDINARY_PRODUCTS_FOLDER } from "../config/cloudinary";
 import { uploadImageBuffer, destroyImage } from "../services/image.service";
 import { sizesToRows } from "../utils/sizesToRows";
+import { NO_SIZE_SENTINEL } from "../utils/noSizeSentinel";
 import { parseImportWorkbook, previewImport, commitImport } from "../services/productImport.service";
 import { productImportCommitSchema } from "../schemas/productImport";
 
@@ -156,6 +157,9 @@ export const getProducts: RequestHandler = asyncHandler(async (req: Request, res
      WHERE ps.stock > 0
        AND p.visible = true
        AND p."deletedAt" IS NULL
+       -- Sin este filtro, la fila centinela (size: NO_SIZE_SENTINEL) de un producto sin tallas
+       -- se colaría como "talla 0" en el selector de tallas del catálogo.
+       AND p."hasSizes" = true
        ${categoria ? `AND p.type = :categoria` : ""}
        ${patron ? `AND (p.name ILIKE :patron OR p.code ILIKE :patron)` : ""}
        ${precioMin !== undefined ? `AND p."salePrice" >= :precioMin` : ""}
@@ -244,11 +248,16 @@ export const adminCreateProduct: RequestHandler = asyncHandler(async (req: Reque
         widthCm: data.widthCm,
         heightCm: data.heightCm,
         visible: data.visible,
+        hasSizes: data.hasSizes,
       },
       { transaction: t },
     );
 
-    const rows = sizesToRows(data.sizes);
+    // El schema ya garantizó que el campo del modo vigente llegó (sizes si hasSizes, stockQuantity
+    // si no), así que las aserciones `!` son seguras: ver productSchema en src/schemas/product.ts.
+    const rows = data.hasSizes
+      ? sizesToRows(data.sizes!)
+      : [{ size: NO_SIZE_SENTINEL, stock: data.stockQuantity! }];
     await ProductSize.bulkCreate(
       rows.map((r) => ({ productId: created.id, ...r })),
       { transaction: t },
@@ -283,15 +292,49 @@ export const adminUpdateProduct: RequestHandler = asyncHandler(async (req: Reque
     );
   }
 
+  // Mismo patrón que el cruce de precios de arriba: el refine del schema solo atrapa
+  // contradicciones cuando AMBOS campos comparados vienen en el body (`hasSizes` incluido). Un
+  // PUT parcial puede traer `sizes`/`stockQuantity` sin repetir `hasSizes`, así que hay que
+  // resolver el modo efectivo contra lo ya guardado antes de decidir qué es obligatorio.
+  const effectiveHasSizes = data.hasSizes ?? product.hasSizes;
+  if (effectiveHasSizes && data.stockQuantity !== undefined) {
+    throw new AppError(
+      `"${product.name}" maneja tallas; usa el campo de tallas en vez de la cantidad en existencia.`,
+      400,
+    );
+  }
+  if (!effectiveHasSizes && data.sizes !== undefined) {
+    throw new AppError(
+      `"${product.name}" no maneja tallas; usa la cantidad en existencia en vez de tallas.`,
+      400,
+    );
+  }
+  if (effectiveHasSizes !== product.hasSizes) {
+    // Cambio de modo: el campo del modo nuevo es obligatorio, no hay "cantidad anterior" que
+    // reutilizar (una repartición por talla no se puede convertir en una cantidad única, ni al
+    // revés).
+    if (effectiveHasSizes && data.sizes === undefined) {
+      throw new AppError(`Agrega las tallas de "${product.name}" al activarle tallas.`, 400);
+    }
+    if (!effectiveHasSizes && data.stockQuantity === undefined) {
+      throw new AppError(
+        `Indica la cantidad en existencia de "${product.name}" al quitarle las tallas.`,
+        400,
+      );
+    }
+  }
+
   await sequelize.transaction(async (t) => {
-    const { sizes, ...fields } = data;
+    const { sizes, stockQuantity, ...fields } = data;
     if (Object.keys(fields).length) {
       await product.update(fields, { transaction: t });
     }
 
-    if (sizes !== undefined) {
+    if (sizes !== undefined || stockQuantity !== undefined) {
       await ProductSize.destroy({ where: { productId: id }, transaction: t });
-      const rows = sizesToRows(sizes);
+      const rows = effectiveHasSizes
+        ? sizesToRows(sizes!)
+        : [{ size: NO_SIZE_SENTINEL, stock: stockQuantity! }];
       await ProductSize.bulkCreate(
         rows.map((r) => ({ productId: id, ...r })),
         { transaction: t },

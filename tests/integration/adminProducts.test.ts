@@ -93,6 +93,139 @@ describe("adminCreateProduct / adminUpdateProduct — sizes string vs array", ()
   });
 });
 
+describe("adminCreateProduct / adminUpdateProduct — hasSizes (existencia manual sin tallas)", () => {
+  it("hasSizes:false con stockQuantity crea una sola ProductSize con el centinela", async () => {
+    const res = await authed().send({
+      ...validProductBody,
+      hasSizes: false,
+      stockQuantity: 12,
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.body.hasSizes).toBe(false);
+    expect(res.body.stock).toBe(12);
+
+    const rows = await ProductSize.findAll({ where: { productId: res.body.id } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ size: 0, stock: 12 });
+  });
+
+  it("hasSizes:true (default) sin sizes → 400", async () => {
+    const res = await authed().send({ ...validProductBody });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/talla/i);
+  });
+
+  it("hasSizes:false sin stockQuantity → 400", async () => {
+    const res = await authed().send({ ...validProductBody, hasSizes: false });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/cantidad en existencia/i);
+  });
+
+  it("hasSizes:true con stockQuantity (contradicción) → 400", async () => {
+    const res = await authed().send({
+      ...validProductBody,
+      sizes: "25,26",
+      stockQuantity: 5,
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/maneja tallas/i);
+  });
+
+  it("hasSizes:false con sizes (contradicción) → 400", async () => {
+    const res = await authed().send({
+      ...validProductBody,
+      hasSizes: false,
+      stockQuantity: 5,
+      sizes: "25,26",
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/no maneja tallas/i);
+  });
+
+  it("PUT cambia de hasSizes:true a false con stockQuantity → reemplaza las filas por el centinela", async () => {
+    const created = await authed().send({ ...validProductBody, sizes: "25,26" });
+    const productId = created.body.id;
+
+    const res = await request(app)
+      .put(`/api/admin/products/${productId}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ hasSizes: false, stockQuantity: 7 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.hasSizes).toBe(false);
+
+    const rows = await ProductSize.findAll({ where: { productId } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ size: 0, stock: 7 });
+  });
+
+  it("PUT cambia de hasSizes:true a false SIN stockQuantity → 400, no toca nada", async () => {
+    const created = await authed().send({ ...validProductBody, sizes: "25,26" });
+    const productId = created.body.id;
+
+    const res = await request(app)
+      .put(`/api/admin/products/${productId}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ hasSizes: false });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/cantidad en existencia/i);
+
+    const rows = await ProductSize.findAll({ where: { productId } });
+    expect(rows).toHaveLength(2);
+  });
+
+  it("PUT cambia de hasSizes:false a true SIN sizes → 400", async () => {
+    const created = await authed().send({
+      ...validProductBody,
+      hasSizes: false,
+      stockQuantity: 4,
+    });
+    const productId = created.body.id;
+
+    const res = await request(app)
+      .put(`/api/admin/products/${productId}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ hasSizes: true });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/tallas/i);
+  });
+
+  it("PUT solo actualizando stockQuantity de un producto ya sin tallas (sin resituar hasSizes)", async () => {
+    const created = await authed().send({
+      ...validProductBody,
+      hasSizes: false,
+      stockQuantity: 4,
+    });
+    const productId = created.body.id;
+
+    const res = await request(app)
+      .put(`/api/admin/products/${productId}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ stockQuantity: 9 });
+
+    expect(res.status).toBe(200);
+    const rows = await ProductSize.findAll({ where: { productId } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ size: 0, stock: 9 });
+  });
+
+  it("GET /api/products (público) no ofrece talla 0 en availableSizes para un producto sin tallas", async () => {
+    await authed().send({ ...validProductBody, hasSizes: false, stockQuantity: 3, visible: true });
+
+    const res = await request(app).get("/api/products");
+
+    expect(res.status).toBe(200);
+    expect(res.body.availableSizes).not.toContain(0);
+  });
+});
+
 describe("DELETE /api/admin/products/:id", () => {
   it("soft-delete cuando el producto está referenciado por un OrderItem (conserva imágenes)", async () => {
     const product = await createProduct({

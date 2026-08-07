@@ -44,21 +44,30 @@ export const productBaseSchema = z.object({
   unitCost: z
     .number("El costo unitario es requerido")
     .nonnegative("El costo unitario no puede ser negativo"),
-  stock: z
-    .number()
-    .int("El stock debe ser un número entero")
-    .nonnegative("El stock no puede ser negativo")
-    .default(0),
   type: z.enum(["bota", "sombrero", "ropa"], {
     message: "Selecciona una categoría válida",
   }),
-  sizes: z.union(
-    [
-      sizesFromString,
-      z.array(z.number().int().positive()).min(1, "Agrega al menos una talla"),
-    ],
-    { error: "Agrega al menos una talla (p. ej. \"25, 26, 26\")" },
-  ),
+  // `true` (default) = el producto se vende por talla, vía `sizes` (comportamiento de siempre).
+  // `false` = existencia manual sin tallas (un corbatín, una hebilla): la cantidad va en
+  // `stockQuantity`. Cuál de los dos es obligatorio se decide en el refine cruzado de abajo, no
+  // aquí a nivel de campo, porque depende de este flag.
+  hasSizes: z.boolean().default(true),
+  sizes: z
+    .union(
+      [
+        sizesFromString,
+        z.array(z.number().int().positive()).min(1, "Agrega al menos una talla"),
+      ],
+      { error: "Agrega al menos una talla (p. ej. \"25, 26, 26\")" },
+    )
+    .optional(),
+  // Cantidad en existencia para un producto SIN tallas (`hasSizes: false`). Se traduce a una
+  // única fila `ProductSize` con `size: NO_SIZE_SENTINEL` — ver product.controller.ts.
+  stockQuantity: z
+    .number("La cantidad en existencia debe ser un número")
+    .int("La cantidad en existencia debe ser un número entero")
+    .nonnegative("La cantidad en existencia no puede ser negativa")
+    .optional(),
   // Las imágenes NO se setean por POST/PUT: se gestionan solo por los endpoints
   // dedicados (POST/DELETE /api/admin/products/:id/images), que mantienen la BD
   // sincronizada con Cloudinary. `imageSrc` ya no se acepta aquí.
@@ -89,9 +98,65 @@ export function salePriceNotAboveOriginal(data: {
   );
 }
 
-export const productSchema = productBaseSchema.refine(salePriceNotAboveOriginal, {
-  message: "El precio de oferta no puede ser mayor al precio original",
-  path: ["salePrice"],
+/**
+ * Reglas cruzadas entre `hasSizes`/`sizes`/`stockQuantity`, compartidas por crear y editar (mismo
+ * patrón que `couponRuleIssues` en `src/schemas/coupon.ts`): cada regla solo dispara cuando los
+ * campos que compara están presentes, para que sea reusable con el `.partial()` del update. Las
+ * contradicciones (el campo del modo contrario llegó igual) se atrapan aquí en los dos; la
+ * *obligatoriedad* del campo del modo vigente en un update parcial se valida aparte en el
+ * controller, contra el `hasSizes` ya guardado (ver `adminUpdateProduct`).
+ */
+function productSizeModeIssues(d: {
+  hasSizes?: boolean;
+  sizes?: number[];
+  stockQuantity?: number;
+}): Array<{ message: string; path: [string] }> {
+  const issues: Array<{ message: string; path: [string] }> = [];
+
+  if (d.hasSizes === false && d.sizes !== undefined) {
+    issues.push({
+      message: "Este producto no maneja tallas; usa la cantidad en existencia en vez de tallas.",
+      path: ["sizes"],
+    });
+  }
+  if (d.hasSizes === true && d.stockQuantity !== undefined) {
+    issues.push({
+      message: "Este producto maneja tallas; usa el campo de tallas en vez de la cantidad en existencia.",
+      path: ["stockQuantity"],
+    });
+  }
+
+  return issues;
+}
+
+export const productSchema = productBaseSchema.superRefine((d, ctx) => {
+  if (!salePriceNotAboveOriginal(d)) {
+    ctx.addIssue({
+      code: "custom",
+      message: "El precio de oferta no puede ser mayor al precio original",
+      path: ["salePrice"],
+    });
+  }
+  for (const issue of productSizeModeIssues(d)) {
+    ctx.addIssue({ code: "custom", ...issue });
+  }
+  // A diferencia del update parcial, aquí `hasSizes` siempre resuelve (tiene `.default(true)`),
+  // así que el campo del modo vigente es completamente obligatorio: un alta sin él no es "no
+  // tocar esa columna", es un producto a medio capturar.
+  if (d.hasSizes && d.sizes === undefined) {
+    ctx.addIssue({
+      code: "custom",
+      message: 'Agrega al menos una talla (p. ej. "25, 26, 26")',
+      path: ["sizes"],
+    });
+  }
+  if (!d.hasSizes && d.stockQuantity === undefined) {
+    ctx.addIssue({
+      code: "custom",
+      message: "Indica la cantidad en existencia (este producto no maneja tallas).",
+      path: ["stockQuantity"],
+    });
+  }
 });
 
 export type ProductInput = z.infer<typeof productSchema>;
@@ -101,19 +166,35 @@ export type ProductInput = z.infer<typeof productSchema>;
  *
  * `.extend()` va DESPUÉS de `.partial()` a propósito. En zod 4 `.partial()` NO quita los
  * `.default()`, así que `productBaseSchema.partial().parse({})` devuelve `{ visible: true,
- * stock: 0 }`: un PUT que solo cambiaba el nombre reactivaba un producto oculto sin que nadie
- * lo pidiera. Re-declarar ambos campos como opcionales puros los deja fuera del objeto parseado
+ * hasSizes: true }`: un PUT que solo cambiaba el nombre reactivaba un producto oculto, o forzaba
+ * de vuelta a `hasSizes: true` un producto que el dueño había marcado sin tallas, sin que nadie lo
+ * pidiera. Re-declarar ambos campos como opcionales puros los deja fuera del objeto parseado
  * cuando el body no los menciona.
+ *
+ * A diferencia de `productSchema`, aquí NO se exige la obligatoriedad total de `sizes`/
+ * `stockQuantity` según `hasSizes` — un PUT parcial que no toca el modo del producto no debe
+ * forzar a resituarlos. Esa obligatoriedad, solo al *cambiar* de modo, se valida en el controller
+ * contra el `hasSizes` ya guardado (mismo patrón que el cruce de precios en `adminUpdateProduct`).
+ * Las contradicciones explícitas (el campo del modo contrario sí llegó) se atrapan aquí, vía
+ * `productSizeModeIssues`, igual que en `productSchema`.
  */
 export const productUpdateSchema = productBaseSchema
   .partial()
   .extend({
     visible: z.boolean().optional(),
-    stock: z.number().int("El stock debe ser un número entero").nonnegative("El stock no puede ser negativo").optional(),
+    hasSizes: z.boolean().optional(),
   })
-  .refine(salePriceNotAboveOriginal, {
-    message: "El precio de oferta no puede ser mayor al precio original",
-    path: ["salePrice"],
+  .superRefine((d, ctx) => {
+    if (!salePriceNotAboveOriginal(d)) {
+      ctx.addIssue({
+        code: "custom",
+        message: "El precio de oferta no puede ser mayor al precio original",
+        path: ["salePrice"],
+      });
+    }
+    for (const issue of productSizeModeIssues(d)) {
+      ctx.addIssue({ code: "custom", ...issue });
+    }
   });
 
 export type ProductUpdateInput = z.infer<typeof productUpdateSchema>;

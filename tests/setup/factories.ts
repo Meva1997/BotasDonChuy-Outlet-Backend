@@ -32,8 +32,11 @@ interface ProductOverrides {
   lengthCm?: number;
   widthCm?: number;
   heightCm?: number;
-  /** Stock por talla, p. ej. `{ 25: 3, 26: 1 }`. Crea las filas de ProductSize. */
+  /** Stock por talla, p. ej. `{ 25: 3, 26: 1 }`. Crea las filas de ProductSize.
+   *  Para un producto `hasSizes: false`, usa la clave `0` (NO_SIZE_SENTINEL), p. ej. `{ 0: 12 }`. */
   sizes?: Record<number, number>;
+  /** `false` = existencia manual sin tallas. Default `true` (comportamiento de siempre). */
+  hasSizes?: boolean;
 }
 
 /** Crea un Product (bota por defecto) con sus tallas/stock en ProductSize. */
