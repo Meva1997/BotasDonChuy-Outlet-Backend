@@ -185,6 +185,29 @@ non-visible rows and `unitCost`. Create/update validate with `productSchema`/`pr
 (`deletedAt` + `visible:false`) when the product is referenced by an `OrderItem`, otherwise
 hard-deletes (its `ProductSize` rows cascade).
 
+**Productos sin tallas (`Product.hasSizes`, default `true`)** cubren mercancía que no se vende por
+talla — un corbatín, una hebilla — donde la existencia es una sola cantidad capturada a mano. En vez
+de una segunda forma de stock, reusa `ProductSize` con un valor centinela de talla,
+`NO_SIZE_SENTINEL = 0` (`src/utils/noSizeSentinel.ts`): un producto `hasSizes:false` tiene **una
+sola** fila `ProductSize` con `size: 0`, así que `Product.stock`/`Product.sizes` (los `VIRTUAL`s) y
+todo el descuento/reingreso atómico de stock (`createOrder`, `releaseOrderStock`,
+`cancelOrderByAdmin`) siguen funcionando sin ninguna rama nueva — ya operan genéricamente sobre
+`(productId, size)`. `0` es seguro como centinela porque toda talla real se valida `>= 1` en todo el
+repo (`sizesSpec.ts`, `productSchema`, el filtro público `?talla=`).
+
+`productSchema`/`productUpdateSchema` agregan `hasSizes` y `stockQuantity` (la cantidad manual,
+obligatoria solo cuando `hasSizes:false`; `sizes` sigue siendo obligatorio cuando `hasSizes` es
+`true`, el default). Mandar el campo del modo contrario es `400` (mismo patrón de reglas cruzadas que
+`couponRuleIssues` en `src/schemas/coupon.ts`). En el `PUT` la obligatoriedad **al cambiar de modo**
+se valida en `adminUpdateProduct` contra el `hasSizes` ya guardado (mismo patrón que el cruce de
+precios que ya vivía ahí) — un `PUT` parcial que no toca el modo no debe forzar a resituar
+`sizes`/`stockQuantity`. `getProducts`'s `availableSizes` filtra `p."hasSizes" = true`, o la fila
+centinela se colaría como "talla 0" en el selector público. El checkout acepta `size: 0` en
+`orderItemSchema` solo para estos productos — `createOrder` valida que la talla mandada coincida con
+el modo del producto (400 en cualquier combinación cruzada) antes del descuento atómico. La
+importación masiva por Excel **no** soporta este modo todavía: toda fila importada crea/actualiza un
+producto `hasSizes:true`.
+
 ### Cupones y códigos de descuento (Fase N.2)
 
 `src/models/Coupon.ts`, `CouponRedemption.ts`, `src/services/coupon.service.ts`,

@@ -4,9 +4,13 @@ import { parseSizesSpec, SizesSpecError } from "../utils/sizesSpec";
 
 // `sizes` se valida aparte (ver sizesSpecSchema abajo) porque su persistencia difiere por
 // rama: bulkCreate en fila nueva vs. upsert aditivo (ON CONFLICT) en fila de actualización —
-// nunca destroy+recreate como adminUpdateProduct. `stock` es VIRTUAL (no tiene columna real,
-// ver Product.ts) y nunca se persiste, así que tampoco tiene sentido aquí.
-const { sizes: _sizes, stock: _stock, ...importFieldsShape } = productBaseSchema.shape;
+// nunca destroy+recreate como adminUpdateProduct. La importación masiva NO soporta productos sin
+// tallas en esta fase (el Excel sigue siendo para reabasto por talla, notación "26x20"): por eso
+// `hasSizes`/`stockQuantity` también se excluyen — toda fila importada crea/actualiza un producto
+// `hasSizes: true` (el modelo ya default a eso). Un producto sin tallas se da de alta por el CRUD
+// normal (POST/PUT /api/admin/products), no por el importador.
+const { sizes: _sizes, hasSizes: _hasSizes, stockQuantity: _stockQuantity, ...importFieldsShape } =
+  productBaseSchema.shape;
 const importFieldsBase = z.object(importFieldsShape);
 
 /** Fila nueva: mismos requisitos que crear por API (POST /api/admin/products). */

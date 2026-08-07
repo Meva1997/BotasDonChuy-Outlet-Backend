@@ -72,11 +72,17 @@ const options: Options = {
               enum: ["bota", "sombrero", "ropa"],
               example: "bota",
             },
+            hasSizes: {
+              type: "boolean",
+              description:
+                "`false` = existencia manual sin tallas (p. ej. un corbatín o una hebilla): el stock se captura como una sola cantidad, no por talla. Default `true`.",
+              example: true,
+            },
             sizes: {
               type: "array",
               readOnly: true,
               description:
-                "Tallas repetidas por unidad en stock (p. ej. [25, 25, 26]).",
+                "Tallas repetidas por unidad en stock (p. ej. [25, 25, 26]). Para un producto con hasSizes:false, es un arreglo del valor centinela 0 repetido `stock` veces.",
               items: { type: "integer" },
               example: [25, 25, 26],
             },
@@ -229,9 +235,14 @@ const options: Options = {
         },
         ProductInput: {
           type: "object",
+          description:
+            "Body de POST/PUT /api/admin/products (en PUT todos los campos son opcionales, solo se " +
+            "tocan las columnas presentes). `sizes` es obligatorio cuando `hasSizes` es `true` " +
+            "(default); `stockQuantity` es obligatorio cuando `hasSizes` es `false`. Enviar el campo " +
+            "del modo contrario es un 400 (contradicción).",
           required: [
             "name", "originalPrice", "salePrice", "unitCost",
-            "type", "sizes", "weightKg", "lengthCm", "widthCm", "heightCm",
+            "type", "weightKg", "lengthCm", "widthCm", "heightCm",
           ],
           properties: {
             name: { type: "string", example: "Bota vaquera de cuero" },
@@ -240,11 +251,24 @@ const options: Options = {
             salePrice: { type: "number", format: "float", example: 1499 },
             unitCost: { type: "number", format: "float", example: 800 },
             type: { type: "string", enum: ["bota", "sombrero", "ropa"] },
+            hasSizes: {
+              type: "boolean",
+              default: true,
+              description:
+                "`false` = existencia manual sin tallas (un corbatín, una hebilla). Decide si `sizes` o `stockQuantity` es el campo obligatorio.",
+            },
             sizes: {
               oneOf: [
                 { type: "string", description: "Tallas separadas por coma, repetidas para indicar stock", example: "25, 25, 26" },
                 { type: "array", items: { type: "integer" }, example: [25, 25, 26] },
               ],
+              description: "Obligatorio si hasSizes es true (o se omite). No enviar si hasSizes es false.",
+            },
+            stockQuantity: {
+              type: "integer",
+              description:
+                "Cantidad en existencia para un producto SIN tallas. Obligatorio si hasSizes es false. No enviar si hasSizes es true (o se omite).",
+              example: 12,
             },
             code: { type: "string", nullable: true, example: "BTA-001" },
             weightKg: { type: "number", format: "float", example: 1.2 },

@@ -12,6 +12,19 @@ import { escapeHtml } from "./escapeHtml";
  * margen (un correo no está autenticado; el margen vive en el dashboard).
  */
 
+/**
+ * Una línea de artículos ya agrupada: mismo `nameSnapshot` + `size` + `unitSalePrice` colapsados en
+ * una sola entrada con la cantidad sumada, para que el dueño vea "2 piezas de X talla 26" en vez de
+ * dos renglones idénticos. El agrupado ocurre en el servicio (`groupOrderItems`), no aquí — el
+ * template solo pinta lo que ya le llega agrupado.
+ */
+export interface DigestOrderItemLine {
+  nameSnapshot: string;
+  size: number;
+  quantity: number;
+  unitSalePrice: number;
+}
+
 export interface DigestOrderRow {
   id: number;
   /** Hora local de la tienda, ya formateada ("14:35"). */
@@ -25,6 +38,8 @@ export interface DigestOrderRow {
   needsLabel: boolean;
   /** La paquetería no recoge a domicilio. */
   requiresDropoff: boolean;
+  /** Artículos vendidos en este pedido, agrupados por modelo/talla/precio. */
+  items: DigestOrderItemLine[];
 }
 
 export interface DailySalesDigestInput {
@@ -69,6 +84,25 @@ function totalsRow(label: string, value: string, opts?: { strong?: boolean }): s
             </tr>`;
 }
 
+/**
+ * Una línea por grupo de artículo ("2 piezas · Bota Alta Café · talla 26 · $850.00 c/u"), para que el
+ * dueño vea qué se vendió sin entrar al panel. El "c/u" solo aparece cuando hay más de una pieza —
+ * con una sola pieza sería redundante.
+ */
+function itemLine(item: DigestOrderItemLine): string {
+  const piecesLabel = item.quantity === 1 ? "pieza" : "piezas";
+  const priceLabel =
+    item.quantity > 1 ? `${formatMoney(item.unitSalePrice)} c/u` : formatMoney(item.unitSalePrice);
+  return `${item.quantity} ${piecesLabel} · ${escapeHtml(item.nameSnapshot)} · talla ${item.size} · ${priceLabel}`;
+}
+
+function itemsBlock(items: DigestOrderItemLine[]): string {
+  if (items.length === 0) return "";
+  return `<div style="margin:6px 0 0;font-size:12px;line-height:1.6;color:#71717a;">
+                  ${items.map(itemLine).join("<br />\n                  ")}
+                </div>`;
+}
+
 function orderRow(order: DigestOrderRow): string {
   const flags: string[] = [];
   if (order.needsLabel) flags.push("sin guía");
@@ -83,6 +117,7 @@ function orderRow(order: DigestOrderRow): string {
                 <span style="font-size:12px;color:#52525b;">${escapeHtml(order.customerName)} · ${
     STATUS_LABELS[order.status] ?? escapeHtml(order.status)
   }</span>${flagLine}
+                ${itemsBlock(order.items)}
               </td>
               <td align="center" style="padding:10px 8px;border-bottom:1px solid #f4f4f5;font-size:14px;color:#18181b;white-space:nowrap;">
                 ${order.pieces}

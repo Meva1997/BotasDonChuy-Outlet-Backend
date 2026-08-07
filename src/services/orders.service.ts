@@ -25,6 +25,7 @@ import {
   createPaymentIntentForOrder,
 } from "./payment.service";
 import { IdempotencyStore, fingerprintOf } from "../utils/idempotency";
+import { NO_SIZE_SENTINEL } from "../utils/noSizeSentinel";
 import { stripe } from "../config/stripe";
 import { logger } from "../config/logger";
 import { Sentry } from "../config/sentry";
@@ -156,6 +157,18 @@ export async function createOrder(
       const product = await Product.findByPk(line.productId, { transaction: t });
       assertProductAvailable(product);
 
+      // La talla mandada debe coincidir con el modo del producto: uno con tallas nunca puede
+      // comprarse con el centinela (nadie eligió talla) y uno sin tallas nunca con una talla real
+      // (no existe esa fila de ProductSize).
+      if (product.hasSizes && line.size === NO_SIZE_SENTINEL) {
+        throw new AppError(`Selecciona una talla para "${product.name}".`, 400);
+      }
+      if (!product.hasSizes && line.size !== NO_SIZE_SENTINEL) {
+        throw new AppError(`"${product.name}" no maneja tallas.`, 400);
+      }
+      // "en talla X" no tiene sentido para un producto sin tallas (X sería el centinela 0).
+      const sizeLabel = product.hasSizes ? ` en talla ${line.size}` : "";
+
       // 3. Descuento atómico de stock por talla (pieza anti–race-condition).
       const [affected] = await ProductSize.update(
         { stock: sequelize.literal(`stock - ${line.quantity}`) },
@@ -178,8 +191,8 @@ export async function createOrder(
         const available = remaining?.stock ?? 0;
         throw new AppError(
           available > 0
-            ? `Solo ${available === 1 ? "queda 1 pieza" : `quedan ${available} piezas`} de "${product.name}" en talla ${line.size}. Ajusta la cantidad para continuar.`
-            : `"${product.name}" se agotó en talla ${line.size}. Quítalo del carrito para continuar.`,
+            ? `Solo ${available === 1 ? "queda 1 pieza" : `quedan ${available} piezas`} de "${product.name}"${sizeLabel}. Ajusta la cantidad para continuar.`
+            : `"${product.name}" se agotó${sizeLabel}. Quítalo del carrito para continuar.`,
           409,
         );
       }

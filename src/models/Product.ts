@@ -28,11 +28,13 @@ export interface ProductAttributes {
   heightCm: number;
   visible: boolean;
   deletedAt?: Date | null;
+  /** `false` = existencia manual sin tallas (ver `src/utils/noSizeSentinel.ts`). Default `true`. */
+  hasSizes: boolean;
 }
 
 interface ProductCreationAttributes extends Optional<
   ProductAttributes,
-  "id" | "description" | "imageSrc" | "images" | "code" | "discountPercent" | "stock" | "sizes" | "deletedAt"
+  "id" | "description" | "imageSrc" | "images" | "code" | "discountPercent" | "stock" | "sizes" | "deletedAt" | "hasSizes"
 > {}
 
 export class Product
@@ -58,6 +60,7 @@ export class Product
   declare heightCm: number;
   declare visible: boolean;
   declare deletedAt?: Date | null;
+  declare hasSizes: boolean;
   declare productSizes?: ProductSize[];
 
   toJSON() {
@@ -190,6 +193,11 @@ Product.init(
       type: DataTypes.DATE,
       allowNull: true,
       defaultValue: null,
+    },
+    hasSizes: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: true,
     },
   },
   {

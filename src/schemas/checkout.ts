@@ -73,7 +73,10 @@ export type ShippingInput = z.infer<typeof shippingSchema>;
 
 export const orderItemSchema = z.object({
   productId: z.number().int().positive(),
-  size: z.number().int().positive(),
+  // `0` es NO_SIZE_SENTINEL (src/utils/noSizeSentinel.ts): el artículo de un producto con
+  // `hasSizes: false` (existencia manual, sin tallas). `createOrder` valida que ese valor
+  // solo aparezca para productos realmente sin tallas — ver orders.service.ts.
+  size: z.number().int().nonnegative(),
   // Tope duro por renglón para evitar abusos. El límite REAL de existencias por
   // talla se valida en el servidor al descontar el stock de forma atómica
   // (orders.service.ts): si solo hay 1 unidad de esa talla, pedir más devuelve

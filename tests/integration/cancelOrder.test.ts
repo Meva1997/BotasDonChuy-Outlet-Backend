@@ -78,6 +78,16 @@ describe("releaseOrderStock — idempotencia", () => {
     expect(reloaded!.status).toBe("paid");
     expect(reloaded!.paymentStatus).toBe("paid");
   });
+
+  it("repone la fila centinela de un producto sin tallas (hasSizes:false) igual que cualquier otra", async () => {
+    const product = await createProduct({ hasSizes: false, sizes: { 0: 1 } });
+    const order = await createOrder({ status: "pending" });
+    await createOrderItem(order.id, product, { size: 0, quantity: 2 });
+
+    await releaseOrderStock(order.id);
+
+    expect(await stockOf(product.id, 0)).toBe(3);
+  });
 });
 
 describe("cancelOrderByAdmin — pending", () => {

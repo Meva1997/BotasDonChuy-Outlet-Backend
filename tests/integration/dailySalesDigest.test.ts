@@ -154,6 +154,29 @@ describe("sendDailySalesDigest — ventana del día (Fase N.4)", () => {
     expect(digest.html).toContain("llevarlo a la sucursal");
   });
 
+  it("lista los artículos vendidos, agrupando el mismo modelo/talla/precio en una sola línea", async () => {
+    const order = await createOrder({
+      status: "paid",
+      paymentStatus: "paid",
+      createdAt: MIDDAY,
+      subtotal: 800,
+      shipping: 150,
+    });
+    const botas = await createProduct({ name: "Bota Alta Café", sizes: { 26: 5 } });
+    const sombrero = await createProduct({ name: "Sombrero Tejano", sizes: { 58: 3 } });
+    // Dos renglones del mismo modelo/talla: deben colapsar en una sola línea con cantidad 3 (1+2).
+    await createOrderItem(order.id, botas, { size: 26, quantity: 1 });
+    await createOrderItem(order.id, botas, { size: 26, quantity: 2 });
+    // Modelo distinto: aparece como su propia línea.
+    await createOrderItem(order.id, sombrero, { size: 58, quantity: 1 });
+
+    await sendDailySalesDigest(DAY);
+
+    const digest = theDigest();
+    expect(digest.html).toContain("3 piezas · Bota Alta Café · talla 26");
+    expect(digest.html).toContain("1 pieza · Sombrero Tejano · talla 58");
+  });
+
   it("no menciona el día anterior: cada correo reporta solo el día que cubre", async () => {
     await paidOrder({ createdAt: MIDDAY, subtotal: 800, shipping: 150 });
     await paidOrder({
