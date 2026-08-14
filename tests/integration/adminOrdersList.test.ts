@@ -276,6 +276,111 @@ describe("GET /api/admin/orders — filtro por día", () => {
   });
 });
 
+describe("GET /api/admin/orders — filtro por estado", () => {
+  /** Un pedido en cada estado del panel, para poder afirmar que cada pestaña recorta de verdad. */
+  async function oneOrderPerStatus() {
+    const pendienteEnvio = await createOrder({
+      customerName: "Pendiente de enviar",
+      status: "paid",
+      paymentStatus: "paid",
+    });
+    const enviado = await createOrder({
+      customerName: "Enviado",
+      status: "shipped",
+      paymentStatus: "paid",
+    });
+    const entregado = await createOrder({
+      customerName: "Entregado",
+      status: "delivered",
+      paymentStatus: "paid",
+    });
+    return { pendienteEnvio, enviado, entregado };
+  }
+
+  it("`estado=pendientes_envio` acota a los pedidos pagados que aún no avanzan", async () => {
+    await oneOrderPerStatus();
+
+    const res = await request(app)
+      .get("/api/admin/orders?estado=pendientes_envio")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.body.total).toBe(1);
+    expect(res.body.orders[0].customerName).toBe("Pendiente de enviar");
+  });
+
+  it("`estado=pendientes_envio` ordena del que lleva más tiempo esperando al más reciente", async () => {
+    // Al contrario del orden por defecto (más reciente primero): en esta pestaña se prioriza
+    // despachar lo más viejo, así que el pedido con más tiempo esperando debe ir primero.
+    const nuevo = await createOrder({
+      customerName: "Nuevo",
+      status: "paid",
+      paymentStatus: "paid",
+    });
+    await setCreatedAt(nuevo.id, new Date("2026-06-01T10:00:00.000Z"));
+    const viejo = await createOrder({
+      customerName: "Viejo",
+      status: "paid",
+      paymentStatus: "paid",
+    });
+    await setCreatedAt(viejo.id, new Date("2026-01-01T10:00:00.000Z"));
+
+    const res = await request(app)
+      .get("/api/admin/orders?estado=pendientes_envio")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.body.orders.map((o: { customerName: string }) => o.customerName)).toEqual([
+      "Viejo",
+      "Nuevo",
+    ]);
+  });
+
+  it("`estado=enviados` acota a los pedidos enviados que aún no se marcan entregados", async () => {
+    await oneOrderPerStatus();
+
+    const res = await request(app)
+      .get("/api/admin/orders?estado=enviados")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.body.total).toBe(1);
+    expect(res.body.orders[0].customerName).toBe("Enviado");
+  });
+
+  it("`estado=entregados` acota a los pedidos entregados", async () => {
+    await oneOrderPerStatus();
+
+    const res = await request(app)
+      .get("/api/admin/orders?estado=entregados")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.body.total).toBe(1);
+    expect(res.body.orders[0].customerName).toBe("Entregado");
+  });
+
+  it("sin `estado`, o con `estado=todos`, o con un valor no reconocido, no filtra por estado", async () => {
+    await oneOrderPerStatus();
+
+    for (const query of ["", "?estado=todos", "?estado=lo-que-sea"]) {
+      const res = await request(app)
+        .get(`/api/admin/orders${query}`)
+        .set("Authorization", `Bearer ${token}`);
+
+      expect(res.body.total).toBe(3);
+    }
+  });
+
+  it("combina `estado` con `date`", async () => {
+    const { enviado } = await oneOrderPerStatus();
+    await setCreatedAt(enviado.id, new Date("2026-03-15T12:00:00.000Z"));
+
+    const res = await request(app)
+      .get("/api/admin/orders?estado=enviados&date=2026-03-15")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.body.total).toBe(1);
+    expect(res.body.orders[0].customerName).toBe("Enviado");
+  });
+});
+
 describe("POST /api/admin/orders/:id/cancel", () => {
   it("responde 401 sin token", async () => {
     const order = await createOrder();

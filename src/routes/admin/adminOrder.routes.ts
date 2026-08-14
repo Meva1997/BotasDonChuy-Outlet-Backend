@@ -28,6 +28,18 @@ router.use(requireAuth);
  *         name: perPage
  *         schema: { type: integer, minimum: 1, default: 20 }
  *         description: Pedidos por página.
+ *       - in: query
+ *         name: date
+ *         schema: { type: string, format: date, example: "2026-08-14" }
+ *         description: Acota a los pedidos creados ese día (UTC).
+ *       - in: query
+ *         name: estado
+ *         schema: { type: string, enum: [pendientes_envio, enviados, entregados, todos] }
+ *         description: >
+ *           Filtra por `Order.status` para las pestañas del panel: `pendientes_envio` (pagados
+ *           que aún no avanzan a shipped/delivered), `enviados` (`status: shipped`, ya enviados
+ *           pero aún no marcados como entregados), `entregados` (`status: delivered`), o sin
+ *           enviarlo / `todos` para no filtrar por estado. Un valor no reconocido se ignora.
  *     responses:
  *       200:
  *         description: Página de pedidos, más recientes primero.

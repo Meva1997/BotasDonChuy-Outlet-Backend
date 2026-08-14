@@ -228,16 +228,28 @@ export const skydropxWebhook: RequestHandler = asyncHandler(
   },
 );
 
+/** Valores aceptados por `?estado=` en `adminGetOrders`; cualquier otro valor se ignora (mismo criterio del catálogo público: un filtro inválido no rompe la consulta, se comporta como si no viniera). */
+const ADMIN_ORDER_STATUS_FILTERS = {
+  // Pagados que todavía no avanzan a shipped/delivered — la pestaña "pendientes de enviar".
+  pendientes_envio: "paid",
+  // Ya enviados (con guía o marcados a mano) pero aún no marcados como entregados.
+  enviados: "shipped",
+  entregados: "delivered",
+} as const;
+
 /**
  * GET /api/admin/orders — listado paginado de pedidos (admin).
  * Incluye items congelados con unitCost (a diferencia de las rutas públicas).
  * `date` (YYYY-MM-DD, opcional) acota a los pedidos creados ese día UTC.
+ * `estado` (opcional: `pendientes_envio` | `enviados` | `entregados`) acota por `Order.status`,
+ * para las pestañas del panel; sin este parámetro (o con `todos`) no filtra por estado.
  */
 export const adminGetOrders: RequestHandler = asyncHandler(
   async (req: Request, res: Response) => {
     const page = Number(req.query.page) || 1;
     const perPage = Number(req.query.perPage) || 20;
     const date = req.query.date;
+    const estado = req.query.estado;
 
     const where = {} as Record<string, unknown>;
     if (typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -245,7 +257,19 @@ export const adminGetOrders: RequestHandler = asyncHandler(
       const end = new Date(`${date}T23:59:59.999Z`);
       where.createdAt = { [Op.between]: [start, end] };
     }
+    if (
+      typeof estado === "string" &&
+      estado in ADMIN_ORDER_STATUS_FILTERS
+    ) {
+      where.status =
+        ADMIN_ORDER_STATUS_FILTERS[estado as keyof typeof ADMIN_ORDER_STATUS_FILTERS];
+    }
     const whereOptions = where as WhereOptions<OrderAttributes>;
+
+    // Pestaña "pendientes de enviar": los pedidos con más tiempo esperando envío van
+    // primero (ASC), para priorizar el despacho de lo más viejo. El resto de vistas
+    // mantiene el orden habitual, más reciente primero (DESC).
+    const sortDirection = estado === "pendientes_envio" ? "ASC" : "DESC";
 
     // Conteo aparte (sin include) para evitar el conteo inflado de findAndCountAll
     // con asociaciones hasMany; count() sobre Order cuenta pedidos, no filas unidas.
@@ -259,7 +283,7 @@ export const adminGetOrders: RequestHandler = asyncHandler(
     const orders = await Order.findAll({
       where: whereOptions,
       include: [{ model: OrderItem, as: "items" }],
-      order: [["createdAt", "DESC"]],
+      order: [["createdAt", sortDirection]],
       limit: perPage,
       offset,
     });

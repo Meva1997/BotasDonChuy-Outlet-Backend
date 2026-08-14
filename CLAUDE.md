@@ -1774,3 +1774,13 @@ all suites and removes the race. Don't re-parallelize without also fixing that s
   checklist. Purely internal changes the frontend never sees (cron jobs, webhooks, logging, graceful
   shutdown, migrations with no response impact) don't need an entry. **This is documentation only — never
   write frontend code unless the user asks.**
+- **Whenever `src/` code changes** (new behavior, a bug fix, an edited condition/branch): check whether the
+  existing tests under `tests/` still cover it, and update or add a test in the same change — don't leave a
+  behavior change untested until someone notices in prod. A **new** test must cover more than the happy
+  path: alongside the `201`/`200` success case, assert the adjacent failure/edge cases that same code path
+  can hit (validation `400`, not-found `404`, conflict `409`/`503` where the code has that branch,
+  authorization `401`/`403` where relevant, and boundary values — empty/zero/negative/duplicate input) —
+  not just one assertion but the shape of the response for each (status code **and** the relevant body
+  fields/`message`), and follow the three testing levels and fixtures already described in **Testing**
+  (`tests/setup/factories.ts`, the SDK mocks, real Postgres, no controller-level mocking) rather than
+  inventing a new pattern.
