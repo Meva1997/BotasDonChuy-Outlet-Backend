@@ -224,6 +224,38 @@ describe("dashboard.service — getDashboardData (Parte 10)", () => {
     expect(ingresos30.trend).toBeUndefined(); // ventana previa de 30 días vacía → sin trend
   });
 
+  it("COSTO DE MERCANCÍA VENDIDA suma unitCost × quantity de lo vendido en la ventana", async () => {
+    jest.useFakeTimers().setSystemTime(new Date("2026-07-20T12:00:00Z"));
+    const order = buildOrder({
+      id: 1,
+      createdAt: new Date("2026-07-18T12:00:00Z"),
+      total: 1000,
+      items: [
+        buildOrderItem({ unitCost: 400, quantity: 2 }),
+        buildOrderItem({ productId: 2, unitCost: 150, quantity: 1 }),
+      ],
+    });
+    mockQueries([order], [], []);
+
+    const data = await getDashboardData();
+
+    const costo = data.kpisByPeriod["30"].find((k) => k.label === "COSTO DE MERCANCÍA VENDIDA")!;
+    expect(costo.value).toBe(formatMoney(400 * 2 + 150 * 1));
+    expect(costo.subtitle).toBe(
+      "costo unitario de las piezas vendidas · ya restado en la ganancia bruta",
+    );
+  });
+
+  it("sin ventas en la ventana, COSTO DE MERCANCÍA VENDIDA es $0", async () => {
+    jest.useFakeTimers().setSystemTime(new Date("2026-07-20T12:00:00Z"));
+    mockQueries([], [], []);
+
+    const data = await getDashboardData();
+
+    const costo = data.kpisByPeriod["30"].find((k) => k.label === "COSTO DE MERCANCÍA VENDIDA")!;
+    expect(costo.value).toBe(formatMoney(0));
+  });
+
   // ── Gastos (Fase N.3) ───────────────────────────────────────────────────────
   // Hasta esta fase el KPI restaba una constante de $2,000 hardcodeada en el servicio.
   // Ahora sale de la tabla `expenses`, y estos casos fijan que la semántica de prorrateo

@@ -95,7 +95,10 @@ function computeTrend(
 }
 
 function orderCost(order: Order): number {
-  return (order.items ?? []).reduce((acc, item) => acc + item.unitCost * item.quantity, 0);
+  return (order.items ?? []).reduce(
+    (acc, item) => acc + item.unitCost * item.quantity,
+    0,
+  );
 }
 
 // Agregado por día calendario (UTC), acumulado en una sola pasada sobre el
@@ -126,7 +129,14 @@ function buildDailyAggregates(orders: Order[]): Map<string, DayAggregate> {
     const key = isoDay(order.createdAt);
     let agg = byDay.get(key);
     if (!agg) {
-      agg = { revenue: 0, cogs: 0, pieces: 0, orders: 0, couponDiscount: 0, shipping: 0 };
+      agg = {
+        revenue: 0,
+        cogs: 0,
+        pieces: 0,
+        orders: 0,
+        couponDiscount: 0,
+        shipping: 0,
+      };
       byDay.set(key, agg);
     }
     // `order.total` ya viene NETO de cupón, y así se queda: lo que suma "INGRESOS" es el
@@ -145,7 +155,11 @@ function buildDailyAggregates(orders: Order[]): Map<string, DayAggregate> {
   return byDay;
 }
 
-function buildRevenuePeriod(dailyAgg: Map<string, DayAggregate>, days: number, todayStart: Date): RevenuePoint[] {
+function buildRevenuePeriod(
+  dailyAgg: Map<string, DayAggregate>,
+  days: number,
+  todayStart: Date,
+): RevenuePoint[] {
   const points: RevenuePoint[] = [];
   for (let i = days - 1; i >= 0; i -= 1) {
     const day = addDays(todayStart, -i);
@@ -201,7 +215,8 @@ function buildKpisForWindow(
     const day = addDays(currentWindowStart, i);
     const agg = dailyAgg.get(isoDay(day));
     gastosUnicos += oneTimeByDay.get(isoDay(day)) ?? 0;
-    gastosUnicosPrev += oneTimeByDay.get(isoDay(addDays(previousWindowStart, i))) ?? 0;
+    gastosUnicosPrev +=
+      oneTimeByDay.get(isoDay(addDays(previousWindowStart, i))) ?? 0;
     const revenue = agg?.revenue ?? 0;
     ingresos += revenue;
     cogs += agg?.cogs ?? 0;
@@ -229,7 +244,9 @@ function buildKpisForWindow(
   // dos veces de `gananciaNeta`.
   const gananciaBruta = ingresos - cogs - costoEnvio;
   const gananciaBrutaPrev = ingresosPrev - cogsPrev - costoEnvioPrev;
-  const margenBruto = ingresos ? Math.round((gananciaBruta / ingresos) * 100) : 0;
+  const margenBruto = ingresos
+    ? Math.round((gananciaBruta / ingresos) * 100)
+    : 0;
 
   // Los recurrentes se prorratean (la carga mensual es la misma en las dos ventanas: lo que se
   // paga hoy es lo que hay que retirar hoy), pero los de única vez **son distintos en cada una** —
@@ -248,7 +265,21 @@ function buildKpisForWindow(
   const gananciaNetaPrev = gananciaBrutaPrev - gastosPrev;
 
   const kpis: KpiData[] = [
-    { label: "INGRESOS", value: formatMoney(ingresos), trend: computeTrend(ingresos, ingresosPrev) },
+    {
+      label: "INGRESOS",
+      value: formatMoney(ingresos),
+      trend: computeTrend(ingresos, ingresosPrev),
+    },
+    // Costo de producto de lo vendido (COGS), ya restado en GANANCIA BRUTA (ver `gananciaBruta` abajo).
+    // Va aquí, en Ventas, y no solo en Rentabilidad, para que el dueño vea de un vistazo por qué
+    // INGRESOS no es lo que se queda la tienda — la brecha entre este KPI y GANANCIA BRUTA es envío +
+    // gastos, no un misterio.
+    {
+      label: "COSTO DE MERCANCÍA VENDIDA",
+      value: formatMoney(cogs),
+      subtitle:
+        "costo unitario de las piezas vendidas · ya restado en la ganancia bruta",
+    },
     { label: "PIEZAS VENDIDAS", value: piezasVendidas.toLocaleString("es-MX") },
     { label: "TICKET PROMEDIO", value: formatMoney(ticketPromedio) },
     {
@@ -259,14 +290,6 @@ function buildKpisForWindow(
   ];
 
   const profitKpis: KpiData[] = [
-    {
-      label: "GANANCIA BRUTA",
-      value: formatMoney(gananciaBruta),
-      trend: computeTrend(gananciaBruta, gananciaBrutaPrev),
-    },
-    // El subtítulo dice qué se descontó (el numerador), no sobre qué se divide: desde que el envío
-    // es costo de venta, "sobre precio de venta outlet" ya no describía lo que cambió.
-    { label: "MARGEN BRUTO", value: `${margenBruto}%`, subtitle: "después de producto y envío" },
     // El envío es costo de venta, no gasto: se paga una guía por pedido, igual que el `unitCost` de
     // cada pieza. Aparece como KPI propio porque es el segundo costo más grande del negocio después
     // del producto y, al ir sumado dentro de `order.total`, no se ve por ningún lado en INGRESOS.
@@ -275,8 +298,16 @@ function buildKpisForWindow(
     {
       label: "COSTO DE ENVÍO",
       value: formatMoney(costoEnvio),
-      subtitle: "guías pagadas a la paquetería · ya restado en la ganancia bruta",
+      subtitle:
+        "guías pagadas a la paquetería · ya restado en la ganancia bruta",
       trend: computeTrend(costoEnvio, costoEnvioPrev, { lowerIsBetter: true }),
+    },
+    // El subtítulo dice qué se descontó (el numerador), no sobre qué se divide: desde que el envío
+    // es costo de venta, "sobre precio de venta outlet" ya no describía lo que cambió.
+    {
+      label: "MARGEN BRUTO",
+      value: `${margenBruto}%`,
+      subtitle: "después de producto y envío",
     },
     // Sin este KPI, una campaña de cupones se lee como una CAÍDA de ingresos contra el periodo
     // anterior (el `total` de cada pedido baja) aunque se hayan vendido más piezas, y el dueño no
@@ -300,6 +331,11 @@ function buildKpisForWindow(
         : `${formatMoney(gastos.monthlyRunRate)} al mes · ventana de ${windowDays} días`,
     },
     {
+      label: "GANANCIA BRUTA",
+      value: formatMoney(gananciaBruta),
+      trend: computeTrend(gananciaBruta, gananciaBrutaPrev),
+    },
+    {
       label: "GANANCIA OPERATIVA",
       value: formatMoney(gananciaNeta),
       subtitle: "después de producto, envío y gastos",
@@ -314,14 +350,20 @@ function buildSaleRow(order: Order): SaleRow {
   const items = order.items ?? [];
   const pieces = items.reduce((acc, item) => acc + item.quantity, 0);
   const itemsLabel = items
-    .map((item) => `${item.nameSnapshot}${item.quantity > 1 ? ` ×${item.quantity}` : ""}`)
+    .map(
+      (item) =>
+        `${item.nameSnapshot}${item.quantity > 1 ? ` ×${item.quantity}` : ""}`,
+    )
     .join(", ");
-  const date = `${formatShortDate(order.createdAt)} · ${order.createdAt.toLocaleTimeString("es-MX", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: "UTC",
-  })}`;
+  const date = `${formatShortDate(order.createdAt)} · ${order.createdAt.toLocaleTimeString(
+    "es-MX",
+    {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+      timeZone: "UTC",
+    },
+  )}`;
 
   return {
     id: String(order.id),
@@ -414,5 +456,11 @@ export async function getDashboardData(): Promise<DashboardData> {
     valorInventario: p.stock * p.unitCost,
   }));
 
-  return { kpisByPeriod, profitKpisByPeriod, revenueByPeriod, recentSales, inventory };
+  return {
+    kpisByPeriod,
+    profitKpisByPeriod,
+    revenueByPeriod,
+    recentSales,
+    inventory,
+  };
 }
