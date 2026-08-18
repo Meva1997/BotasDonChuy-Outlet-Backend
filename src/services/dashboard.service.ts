@@ -302,6 +302,7 @@ function buildKpisForWindow(
     {
       label: "GANANCIA OPERATIVA",
       value: formatMoney(gananciaNeta),
+      subtitle: "después de producto, envío y gastos",
       trend: computeTrend(gananciaNeta, gananciaNetaPrev),
     },
   ];
