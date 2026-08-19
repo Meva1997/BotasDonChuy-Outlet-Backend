@@ -16,7 +16,7 @@ import request from "supertest";
  * Se mockea `email.service` (nunca mandar un correo real por Resend), igual que
  * `adminOrderStatus.test.ts`.
  */
-const sendEmailMock = jest.fn().mockResolvedValue(undefined);
+const sendEmailMock = jest.fn().mockResolvedValue(true);
 jest.mock("../../src/services/email.service", () => ({ sendEmail: sendEmailMock }));
 
 import app from "../../src/app";

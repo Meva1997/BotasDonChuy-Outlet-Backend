@@ -22,7 +22,7 @@ jest.mock("../../src/config/stripe", () => ({
   PENDING_ORDER_SWEEP_INTERVAL_MINUTES: 10,
 }));
 
-const sendEmailMock = jest.fn().mockResolvedValue(undefined);
+const sendEmailMock = jest.fn().mockResolvedValue(true);
 jest.mock("../../src/services/email.service", () => ({ sendEmail: sendEmailMock }));
 
 import app from "../../src/app";

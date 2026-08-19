@@ -7,7 +7,7 @@
  * Se mockean `email.service` (nunca mandar un correo real) y `skydropx.service` (nunca gastar saldo
  * creando una guía), igual que en `webhooks.test.ts`.
  */
-const sendEmailMock = jest.fn().mockResolvedValue(undefined);
+const sendEmailMock = jest.fn().mockResolvedValue(true);
 jest.mock("../../src/services/email.service", () => ({ sendEmail: sendEmailMock }));
 
 jest.mock("../../src/services/skydropx.service", () => ({

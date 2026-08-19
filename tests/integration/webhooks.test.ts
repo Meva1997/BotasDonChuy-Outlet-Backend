@@ -10,7 +10,7 @@
  * estos dos cuestan dinero/mandan correos reales. `alert.service.ts` reusa `sendEmail`
  * internamente, así que mockear `email.service` también cubre las alertas sin un mock aparte.
  */
-const sendEmailMock = jest.fn().mockResolvedValue(undefined);
+const sendEmailMock = jest.fn().mockResolvedValue(true);
 jest.mock("../../src/services/email.service", () => ({ sendEmail: sendEmailMock }));
 
 const getQuotationRateMock = jest.fn();
@@ -89,6 +89,44 @@ describe("markOrderPaidFromWebhook — idempotencia", () => {
     // Un margen de sobra para que un segundo envío (si el guard fallara) alcance a llegar.
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(sendEmailMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("alerta al dueño cuando el correo de confirmación se traga un error (p. ej. dominio no verificado)", async () => {
+    // Este es el caso real que motivó la alerta: `sendEmail` no lanza cuando Resend responde un
+    // `error` (403 de dominio sin verificar), así que sin este `false` de retorno el fallo era
+    // invisible — el pedido quedaba `paid` y el comprador nunca se enteraba de nada.
+    //
+    // `ALERT_EMAIL_TO` también habilita el aviso de venta al dueño como fallback de
+    // `OWNER_NOTIFICATION_EMAIL` (Fase N.4) — ese correo sale igual y no es lo que se prueba
+    // aquí, así que se busca la llamada de alerta por su asunto `[ALERTA]` en vez de asumir un
+    // conteo total o una posición fija.
+    process.env.ALERT_EMAIL_TO = "alertas@test.com";
+    try {
+      sendEmailMock.mockResolvedValueOnce(false);
+      const order = await createOrder({
+        status: "pending",
+        paymentStatus: "processing",
+        paymentIntentId: "pi_test_confirm_fails",
+      });
+
+      await markOrderPaidFromWebhook("pi_test_confirm_fails");
+
+      await waitFor(() =>
+        sendEmailMock.mock.calls.some((call) =>
+          (call[0].subject as string).startsWith("[ALERTA]"),
+        ),
+      );
+      const alertCalls = sendEmailMock.mock.calls.filter((call) =>
+        (call[0].subject as string).startsWith("[ALERTA]"),
+      );
+      expect(alertCalls).toHaveLength(1);
+      const alertCall = alertCalls[0][0];
+      expect(alertCall.to).toBe("alertas@test.com");
+      expect(alertCall.subject).toContain(`#${order.id}`);
+      expect(alertCall.html).toContain(`"orderId": ${order.id}`);
+    } finally {
+      delete process.env.ALERT_EMAIL_TO;
+    }
   });
 
   it("una orden ya cancelada no se resucita a paid con un evento tardío", async () => {

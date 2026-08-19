@@ -1698,10 +1698,24 @@ warning severity and **only when `notifyOnFailure` is on** for the non-monetary 
 `pendingOrderSweeper`'s per-order reconciliation catch crossing `REPEATED_FAILURE_ALERT_THRESHOLD` (3)
 consecutive failures (tracked in an in-memory `Map<orderId, consecutiveFailures>` that resets on success or
 when the order leaves the stale window, deliberately **not** persisted — acceptable for a soft operational
-alert, not a correctness guarantee), and a payment captured against a cancelled order. `email.service.ts`'s
-own two failure branches stay log-only **by design** — routing them through `sendAlertEmail` would create a
-loop where a Resend outage tries to alert about itself over the same broken channel. `src/seed.ts`'s
-`console.log`s are unchanged (a one-off CLI script).
+alert, not a correctness guarantee), a payment captured against a cancelled order, and (Fase O.7)
+`sendOrderEmail` (`payment.service.ts`, the shared helper behind the confirmation/"va en camino"/
+token-rotated emails) failing to actually deliver. `email.service.ts`'s own two failure branches stay
+log-only **by design** — routing them through `sendAlertEmail` would create a loop where a Resend outage
+tries to alert about itself over the same broken channel. `src/seed.ts`'s `console.log`s are unchanged (a
+one-off CLI script).
+
+**`sendEmail` returns `true`/`false` (Fase O.7)**, not `void`: the SDK's `{ data, error }` failure mode
+doesn't throw, so a plain `try/catch` around it is blind to a rejected send — a real incident (an
+`EMAIL_FROM` still pointing at `onboarding@resend.dev` after the domain was verified) had Resend silently
+403 every confirmation email to anyone but the account owner, with no signal anywhere that it had
+happened. `sendOrderEmail` now reads that boolean (alongside its existing `reload()`/exception catch) and,
+on either kind of failure, fires `sendAlertEmail` with the order id, recipient and `idempotencyKey` — the
+one caller of `sendEmail` that acts on the return value; the other four (`auth.controller.ts`,
+`ownerNotification.service.ts`, `dailySalesDigest.ts`, `alert.service.ts` itself) still fire-and-forget it
+the same as before. Since `sendAlertEmail` itself reuses `sendEmail`, a true Resend outage makes the alert
+fail the same silent way — accepted, same as every other alert in this section; what this catches is
+exactly the config-error case that isn't a Resend outage.
 
 **`alert.service.ts` is for failures only** — the *business* notifications (a new sale, the daily digest)
 live in `src/services/ownerNotification.service.ts` with their own recipient, so the owner can filter, mute

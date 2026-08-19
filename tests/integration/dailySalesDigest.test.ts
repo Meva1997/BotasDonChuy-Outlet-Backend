@@ -6,7 +6,7 @@
  *
  * `email.service` mockeado (nunca mandar un correo real).
  */
-const sendEmailMock = jest.fn().mockResolvedValue(undefined);
+const sendEmailMock = jest.fn().mockResolvedValue(true);
 jest.mock("../../src/services/email.service", () => ({ sendEmail: sendEmailMock }));
 
 import { setupTestDatabase, truncateAll, closeTestDatabase } from "../setup/db";

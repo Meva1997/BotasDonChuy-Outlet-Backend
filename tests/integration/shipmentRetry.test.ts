@@ -11,7 +11,7 @@ import request from "supertest";
  * NO se mockea: lo que se prueba aquí son guards que viven en `UPDATE ... WHERE` condicionales —
  * el centinela y su liberación por antigüedad — y un mock de Sequelize no los reproduciría.
  */
-const sendEmailMock = jest.fn().mockResolvedValue(undefined);
+const sendEmailMock = jest.fn().mockResolvedValue(true);
 jest.mock("../../src/services/email.service", () => ({ sendEmail: sendEmailMock }));
 
 const getQuotationRateMock = jest.fn();

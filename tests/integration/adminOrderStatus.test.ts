@@ -11,7 +11,7 @@ import request from "supertest";
  * número de guía, y para eso los dos caminos tienen que ser los de verdad — el guard que
  * los serializa es un UPDATE condicional contra la BD, no algo que un mock reproduzca.
  */
-const sendEmailMock = jest.fn().mockResolvedValue(undefined);
+const sendEmailMock = jest.fn().mockResolvedValue(true);
 jest.mock("../../src/services/email.service", () => ({ sendEmail: sendEmailMock }));
 
 import app from "../../src/app";

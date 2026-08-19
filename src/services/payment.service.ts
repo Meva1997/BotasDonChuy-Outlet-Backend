@@ -873,13 +873,14 @@ async function sendOrderEmail(
     codeRotated?: boolean;
   },
 ): Promise<void> {
+  let sent = false;
   try {
     await order.reload({
       include: [
         { model: OrderItem, as: "items", attributes: { exclude: ["unitCost"] } },
       ],
     });
-    await sendEmail({
+    sent = await sendEmail({
       to: order.customerEmail,
       subject: opts.subject,
       html: orderConfirmationTemplate({
@@ -920,10 +921,21 @@ async function sendOrderEmail(
       idempotencyKey: opts.idempotencyKey,
     });
   } catch (err) {
-    // Sin sendAlertEmail aquí: es un problema tolerado por diseño (ver CLAUDE.md) y, si Resend
-    // está caído, alertar por el mismo canal caería en el mismo bucle que se evita en alert.service.ts.
     logger.error({ orderId: order.id, err }, "[email] no se pudo enviar el correo del pedido");
     Sentry.captureException(err, { extra: { orderId: order.id } });
+  }
+
+  if (!sent) {
+    // `sendAlertEmail` reusa `sendEmail`, así que si Resend está caído la alerta también fallará
+    // (en silencio, mismo diseño que el resto de `alert.service.ts`) — pero el caso que esto
+    // existe para atrapar es justo el que NO cae ahí: un problema de configuración (dominio o
+    // `EMAIL_FROM` sin verificar) donde Resend responde `error` sin lanzar y el correo del
+    // comprador se pierde sin que nadie se entere. Cubre los tres correos que comparten este
+    // helper (confirmación, "va en camino", rotación de código).
+    void sendAlertEmail({
+      subject: `No se pudo enviar "${opts.subject}" (pedido #${order.id})`,
+      context: { orderId: order.id, to: order.customerEmail, idempotencyKey: opts.idempotencyKey },
+    });
   }
 }
 

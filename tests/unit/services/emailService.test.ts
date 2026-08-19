@@ -2,12 +2,16 @@
  * `sendEmail` (`src/services/email.service.ts`) — Nivel 1: sin BD, sin HTTP real, con el cliente
  * de Resend mockeado (mandar un correo de verdad cuesta y sale del dominio de pruebas).
  *
- * Lo que se prueba aquí es **una sola garantía**, y es la razón de existir de esta envoltura:
+ * Lo que se prueba aquí son **dos garantías**, y son la razón de existir de esta envoltura:
  * `sendEmail` **loguea pero NUNCA lanza**. Todos sus llamadores son fire-and-forget colgados de
  * flujos que no se pueden tumbar por un correo — el checkout, el webhook de Stripe (que
  * respondería 500 y provocaría reintentos en bucle), forgot-password. La SDK de Resend tiene
  * **dos** formas de fallar y las dos tienen que quedar contenidas: devuelve `{ data, error }` sin
- * lanzar en un error de API, y lanza de verdad ante un fallo de red.
+ * lanzar en un error de API, y lanza de verdad ante un fallo de red. Y, desde que un correo
+ * "tragado" en silencio (dominio no verificado) dejó a un comprador sin su confirmación sin que
+ * nadie se enterara, `sendEmail` también devuelve `true`/`false` — el único canal que un llamador
+ * tiene para distinguir "se mandó" de "se tragó un error" (`sendOrderEmail` en
+ * `payment.service.ts` lo usa para alertar).
  */
 const sendMock = jest.fn();
 jest.mock("../../../src/config/resend", () => ({
@@ -45,7 +49,7 @@ describe("sendEmail — camino feliz", () => {
   it("manda el correo con el remitente de configuración y loguea el id de Resend", async () => {
     sendMock.mockResolvedValue({ data: { id: "re_abc123" }, error: null });
 
-    await expect(sendEmail(baseInput)).resolves.toBeUndefined();
+    await expect(sendEmail(baseInput)).resolves.toBe(true);
 
     expect(sendMock).toHaveBeenCalledTimes(1);
     // El `from` NUNCA viene del llamador: sale de EMAIL_FROM, que `config/resend` exige al arrancar.
@@ -91,7 +95,7 @@ describe("sendEmail — camino feliz", () => {
   it("tolera una respuesta sin `data` (no revienta al leer data.id)", async () => {
     sendMock.mockResolvedValue({ data: null, error: null });
 
-    await expect(sendEmail(baseInput)).resolves.toBeUndefined();
+    await expect(sendEmail(baseInput)).resolves.toBe(true);
 
     expect(infoSpy).toHaveBeenCalledWith(
       expect.objectContaining({ resendId: undefined }),
@@ -101,16 +105,17 @@ describe("sendEmail — camino feliz", () => {
 });
 
 describe("sendEmail — nunca lanza", () => {
-  it("contiene el `error` que la SDK devuelve SIN lanzar (403 de dominio no verificado)", async () => {
+  it("contiene el `error` que la SDK devuelve SIN lanzar (403 de dominio no verificado) y devuelve false", async () => {
     // El caso real del repo: sin dominio verificado, Resend responde 403 a cualquier
     // destinatario que no sea el dueño de la cuenta. La SDK no lanza — lo devuelve en `error`,
-    // así que un `try/catch` por sí solo no bastaría.
+    // así que un `try/catch` por sí solo no bastaría. El `false` de retorno es lo que permite a
+    // un llamador (p. ej. `sendOrderEmail`) notar este fallo, que de otro modo es invisible.
     sendMock.mockResolvedValue({
       data: null,
       error: { statusCode: 403, name: "validation_error", message: "Domain not verified" },
     });
 
-    await expect(sendEmail(baseInput)).resolves.toBeUndefined();
+    await expect(sendEmail(baseInput)).resolves.toBe(false);
 
     expect(errorSpy).toHaveBeenCalledWith(
       expect.objectContaining({ err: expect.objectContaining({ statusCode: 403 }) }),
@@ -120,10 +125,10 @@ describe("sendEmail — nunca lanza", () => {
     expect(infoSpy).not.toHaveBeenCalled();
   });
 
-  it("contiene una excepción de red (Resend caído) sin propagarla", async () => {
+  it("contiene una excepción de red (Resend caído) sin propagarla y devuelve false", async () => {
     sendMock.mockRejectedValue(new Error("fetch failed"));
 
-    await expect(sendEmail(baseInput)).resolves.toBeUndefined();
+    await expect(sendEmail(baseInput)).resolves.toBe(false);
 
     expect(errorSpy).toHaveBeenCalledWith(
       expect.objectContaining({ err: expect.any(Error) }),
@@ -131,19 +136,20 @@ describe("sendEmail — nunca lanza", () => {
     );
   });
 
-  it("contiene también un throw síncrono de la SDK", async () => {
+  it("contiene también un throw síncrono de la SDK y devuelve false", async () => {
     sendMock.mockImplementation(() => {
       throw new Error("cliente mal inicializado");
     });
 
-    await expect(sendEmail(baseInput)).resolves.toBeUndefined();
+    await expect(sendEmail(baseInput)).resolves.toBe(false);
     expect(errorSpy).toHaveBeenCalled();
   });
 
   it("no alerta por correo desde aquí: sería un bucle sobre el canal roto", async () => {
     // `alert.service` reusa `sendEmail`, así que si esta función intentara alertar de su propio
     // fallo, una caída de Resend se realimentaría. La comprobación es que el único efecto sea
-    // el log — ni un segundo intento de envío.
+    // el log — ni un segundo intento de envío. (Es responsabilidad del LLAMADOR, no de esta
+    // función, decidir si el `false` de retorno amerita una alerta — ver payment.service.ts.)
     sendMock.mockResolvedValue({ data: null, error: { message: "boom" } });
 
     await sendEmail(baseInput);
