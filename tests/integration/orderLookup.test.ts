@@ -24,7 +24,12 @@ jest.mock("../../src/services/payment.service", () => ({
 
 import app from "../../src/app";
 import { setupTestDatabase, truncateAll, closeTestDatabase } from "../setup/db";
-import { createOrder, createOrderItem, createProduct } from "../setup/factories";
+import {
+  ACCEPTED_TERMS,
+  createOrder,
+  createOrderItem,
+  createProduct,
+} from "../setup/factories";
 import { Order } from "../../src/models/Order";
 import { resetCheckoutIdempotency } from "../../src/services/orders.service";
 
@@ -154,6 +159,25 @@ describe("GET /api/orders/lookup/:token — nada que no deba salir", () => {
     expect(raw).not.toContain("skydropx.test");
     expect(raw).not.toContain(order.publicToken!);
   });
+
+  it("tampoco expone la constancia de aceptación de términos (Fase 27)", async () => {
+    // Este link se comparte por WhatsApp: la constancia es un dato del comercio para acreditar
+    // la operación ante un tercero, no algo que deba viajar con cada reenvío del seguimiento.
+    // La IP, además, es dato personal — y aquí no hay ninguna credencial más allá del token.
+    const order = await deliveredOrderWithToken({
+      termsAcceptedAt: new Date("2026-08-19T12:00:00.000Z"),
+      termsVersion: "2026-08-18",
+      termsAcceptedIp: "189.203.44.12",
+    });
+
+    const res = await lookup(order.publicToken!);
+
+    expect(res.status).toBe(200);
+    expect(res.body.order).not.toHaveProperty("termsAcceptedAt");
+    expect(res.body.order).not.toHaveProperty("termsVersion");
+    expect(res.body.order).not.toHaveProperty("termsAcceptedIp");
+    expect(JSON.stringify(res.body)).not.toContain("189.203.44.12");
+  });
 });
 
 describe("GET /api/orders/lookup/:token — token que no resuelve", () => {
@@ -213,6 +237,7 @@ describe("POST /api/orders — genera el token de consulta", () => {
         state: "Guanajuato",
         postalCode: "38000",
       },
+      ...ACCEPTED_TERMS,
     });
 
     const first = await request(app).post("/api/orders").send(body("uno@test.com"));

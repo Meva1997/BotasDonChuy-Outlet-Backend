@@ -19,6 +19,21 @@ import { normalizeEmailIdentity } from "../../src/utils/emailIdentity";
 
 let emailCounter = 0;
 
+/**
+ * Constancia de aceptación de términos (Fase 27). Desde esa fase `createOrderSchema` exige
+ * `acceptedTerms: true` y un `termsVersion` con formato ISO, así que **todo** body de
+ * `POST /api/orders` los necesita o el pedido se rechaza con 400.
+ *
+ * Se centraliza aquí, y no como literal suelto en cada caso, porque son ~60 sitios repartidos en
+ * cinco suites: un cambio de contrato en estos dos campos debe costar una edición, no sesenta.
+ * Los casos que prueban el rechazo (sin aceptación, o con `false`) arman su body a mano a
+ * propósito — no deben poder colarse por aquí.
+ */
+export const ACCEPTED_TERMS = {
+  acceptedTerms: true,
+  termsVersion: "2026-08-18",
+} as const;
+
 interface ProductOverrides {
   name?: string;
   /** SKU. Nullable en el modelo, así que por defecto no se manda. */
@@ -114,6 +129,15 @@ interface OrderOverrides {
   skydropxQuotationId?: string | null;
   skydropxShipmentId?: string | null;
   shippingRequiresDropoff?: boolean | null;
+  /**
+   * Constancia de aceptación de términos (Fase 27). El default es `null` en los tres campos —a
+   * diferencia del resto de esta factory, que rellena valores plausibles— porque `null` es
+   * exactamente lo que tienen los pedidos anteriores a la fase, y ese es el caso que hay que
+   * poder montar sin esfuerzo: el que debe pintarse como "no hay constancia" y nunca como "sí".
+   */
+  termsAcceptedAt?: Date | null;
+  termsVersion?: string | null;
+  termsAcceptedIp?: string | null;
 }
 
 /** Crea una Order con totales y datos de cliente por defecto (status `pending`). */
@@ -147,6 +171,9 @@ export async function createOrder(overrides: OrderOverrides = {}): Promise<Order
     skydropxRateId: overrides.skydropxRateId ?? null,
     skydropxShipmentId: overrides.skydropxShipmentId ?? null,
     shippingRequiresDropoff: overrides.shippingRequiresDropoff ?? null,
+    termsAcceptedAt: overrides.termsAcceptedAt ?? null,
+    termsVersion: overrides.termsVersion ?? null,
+    termsAcceptedIp: overrides.termsAcceptedIp ?? null,
     // Solo se manda cuando el caso lo pide: si no, se deja que Sequelize ponga `now()`.
     ...(overrides.createdAt ? { createdAt: overrides.createdAt } : {}),
   } as any);

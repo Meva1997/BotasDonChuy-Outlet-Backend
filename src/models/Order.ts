@@ -86,6 +86,25 @@ export interface OrderAttributes {
   // todo consumidor que hace aritmética se ahorre el `?? 0` y una fila anterior al deploy lea 0.
   // Invariante nuevo de toda la app: `total = subtotal − savings − couponDiscount + shipping`.
   couponDiscount: number;
+  // Constancia de aceptación de términos (Fase 27). Antes de esta fase el "acepto los términos"
+  // del checkout vivía solo en el estado de React del navegador y no llegaba nunca a la API, así
+  // que Términos §8 ("sin esa aceptación el proceso no avanza") era cierto solo para quien usara
+  // la interfaz, y la promesa de Términos §15 / Privacidad §13 —que aplica "la versión vigente al
+  // momento de la transacción"— no tenía dónde comprobarse.
+  //
+  // `termsAcceptedAt` es la marca del SERVIDOR al crear el pedido, no un reloj del cliente; es el
+  // instante de la transacción, no el del clic en la casilla (pueden diferir unos minutos, ver la
+  // migración). `termsVersion` es la fecha ISO de los documentos que el frontend renderizó — la
+  // manda él porque es el único que sabe qué texto vio el comprador. `termsAcceptedIp` es `req.ip`
+  // tomada del request y NUNCA del body, igual que `coupon_redemptions.ip`, y es forense: ninguna
+  // decisión la consulta.
+  //
+  // Los tres son `null` en los pedidos anteriores a la fase. `null` significa **"no hay
+  // constancia"**, jamás "aceptó" — quien los pinte debe mostrar un guion, no un sí. De aquí en
+  // adelante siempre vienen poblados, porque `createOrderSchema` 400ea un checkout sin aceptación.
+  termsAcceptedAt: Date | null;
+  termsVersion: string | null;
+  termsAcceptedIp: string | null;
 }
 
 interface OrderCreationAttributes extends Optional<
@@ -111,6 +130,9 @@ interface OrderCreationAttributes extends Optional<
   | "couponId"
   | "couponCode"
   | "couponDiscount"
+  | "termsAcceptedAt"
+  | "termsVersion"
+  | "termsAcceptedIp"
 > {}
 
 export class Order
@@ -151,6 +173,9 @@ export class Order
   declare couponId: number | null;
   declare couponCode: string | null;
   declare couponDiscount: number;
+  declare termsAcceptedAt: Date | null;
+  declare termsVersion: string | null;
+  declare termsAcceptedIp: string | null;
   declare readonly createdAt: Date;
   declare readonly updatedAt: Date;
   declare items?: OrderItem[];
@@ -339,6 +364,23 @@ Order.init(
         const value = this.getDataValue("couponDiscount");
         return value === null ? null : parseFloat(value as unknown as string);
       },
+    },
+    termsAcceptedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      defaultValue: null,
+    },
+    termsVersion: {
+      type: DataTypes.STRING(16),
+      allowNull: true,
+      defaultValue: null,
+    },
+    termsAcceptedIp: {
+      // 45 caracteres: cabe una IPv6 completa con notación IPv4 embebida. Mismo dimensionado
+      // y misma razón que `coupon_redemptions.ip`.
+      type: DataTypes.STRING(45),
+      allowNull: true,
+      defaultValue: null,
     },
   },
   {

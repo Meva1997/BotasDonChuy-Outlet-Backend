@@ -345,3 +345,19 @@ export const adminRetryShipment: RequestHandler = asyncHandler(
     res.json({ order });
   },
 );
+
+/**
+ * POST /api/admin/orders/:id/rotate-token — rotación del código de rastreo público (admin,
+ * Fase O.6). Invalida el `publicToken` actual y genera uno nuevo, sin importar el estado del
+ * pedido; el comprador recibe el código nuevo por correo. Sin body: no hay nada que capturar
+ * (no se guarda quién pidió la rotación). Ver `rotatePublicToken` en orders.service.ts.
+ */
+export const adminRotateOrderToken: RequestHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const id = parseId(req.params.id, "pedido");
+
+    const order = await ordersService.rotatePublicToken(id);
+
+    res.json({ order });
+  },
+);

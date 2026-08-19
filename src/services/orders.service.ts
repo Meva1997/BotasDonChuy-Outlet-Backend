@@ -22,6 +22,7 @@ import {
   ORDER_STATUS_RANK,
   statusesBelow,
   sendShipmentEmail,
+  sendTokenRotatedEmail,
   createPaymentIntentForOrder,
 } from "./payment.service";
 import { IdempotencyStore, fingerprintOf } from "../utils/idempotency";
@@ -289,6 +290,15 @@ export async function createOrder(
         couponId: resolvedCoupon?.coupon.id ?? undefined,
         couponCode: resolvedCoupon?.coupon.code ?? undefined,
         couponDiscount,
+        // Constancia de aceptación de términos (Fase 27). La fecha la pone el SERVIDOR y la IP
+        // sale de `req.ip` — ninguna de las dos viene del body, porque un reloj o una IP que
+        // manda el cliente valen menos como prueba que la marca de quien recibió la petición.
+        // `termsVersion` sí es del cliente: es el único que sabe qué texto renderizó.
+        // Que `input.acceptedTerms` haya llegado como `true` ya lo garantiza `createOrderSchema`
+        // (`z.literal(true)`), así que aquí no hay nada que volver a decidir.
+        termsAcceptedAt: new Date(),
+        termsVersion: input.termsVersion,
+        termsAcceptedIp: context.clientIp ?? undefined,
       },
       { transaction: t },
     );
@@ -328,8 +338,16 @@ export async function createOrder(
   //    al dueño para saber si debe llevar el paquete a la sucursal) y `couponId`
   //    (id interno; el comprador ya tiene el código, que sí va en la respuesta
   //    junto a `couponDiscount` porque es el descuento que se le aplicó).
+  //
+  //    OJO: esta lista es de EXCLUSIÓN, así que toda columna nueva de `Order` se serializa
+  //    sola aquí mientras nadie la agregue. Por eso `termsAcceptedIp` (Fase 27) está en la
+  //    lista: devolverle al comprador su propia IP no le aporta nada y la haría viajar de
+  //    vuelta por la red sin motivo. `termsAcceptedAt`/`termsVersion` sí pueden ir: son la
+  //    constancia de lo que él mismo acaba de aceptar.
   const full = await Order.findByPk(order.id, {
-    attributes: { exclude: ["shippingRequiresDropoff", "couponId"] },
+    attributes: {
+      exclude: ["shippingRequiresDropoff", "couponId", "termsAcceptedIp"],
+    },
     include: [
       { model: OrderItem, as: "items", attributes: { exclude: ["unitCost"] } },
     ],
@@ -401,6 +419,13 @@ const recentCheckouts = new IdempotencyStore<{
  *
  * La IP **no** entra: no es parte de la identidad del pedido, y meterla haría que un reintento
  * desde otra red (WiFi → datos) se leyera como un pedido nuevo.
+ *
+ * `acceptedTerms`/`termsVersion` (Fase 27) **tampoco**. `acceptedTerms` no puede variar: el
+ * esquema lo exige `true`, así que un intento sin aceptación nunca llega hasta aquí. Y dos
+ * intentos que solo difieran en `termsVersion` —los documentos se editaron a media sesión, caso
+ * rarísimo— deben devolver el pedido original: ya existe, ya se aceptó una versión, y crear uno
+ * segundo por eso duplicaría el cobro. Como esta huella es una lista blanca explícita y no un
+ * hash del body crudo, agregar campos al payload no altera ninguna huella ya emitida.
  */
 function checkoutFingerprint(input: CreateOrderInput): string {
   const quantities = new Map<string, number>();
@@ -993,5 +1018,42 @@ export async function updateOrderStatusByAdmin(
     "[orders] estado de envío actualizado manualmente por admin",
   );
 
+  return full!;
+}
+
+/**
+ * Rota el `publicToken` de un pedido (Fase O.6): genera uno nuevo y deja que el viejo
+ * simplemente deje de resolver en `getOrderByPublicToken` (comparación directa, sin
+ * blacklist). Es la forma de cumplir la promesa del Aviso de Privacidad de invalidar un
+ * link/código de rastreo expuesto sin recurrir a un `UPDATE` manual en producción — y sin
+ * dejar al comprador legítimo sin acceso, que es justo lo que un simple `publicToken: null`
+ * habría hecho.
+ *
+ * Funciona sin importar `order.status` (a diferencia de `cancelOrderByAdmin`/
+ * `updateOrderStatusByAdmin`): invalidar un link filtrado tiene que poder hacerse aunque el
+ * pedido ya esté enviado, entregado o incluso cancelado. Sin transacción ni lock: es un
+ * `UPDATE` de una sola columna sin ningún invariante multi-fila que proteger, así que una
+ * doble rotación concurrente es inofensiva (gana la última escritura, mismo criterio de
+ * "último gana" que ya usan los campos sueltos de `updateOrderStatusByAdmin`).
+ */
+export async function rotatePublicToken(orderId: number): Promise<Order> {
+  const order = await Order.findByPk(orderId);
+  if (!order) {
+    throw new AppError("No se encontró el pedido cuyo código quieres actualizar.", 404);
+  }
+
+  const newToken = randomUUID();
+  await Order.update({ publicToken: newToken }, { where: { id: order.id } });
+
+  // Se fija en memoria (sin `.save()`/`.reload()`) porque `sendTokenRotatedEmail` recarga la
+  // orden por su cuenta antes de renderizar el correo, así que el valor persistido arriba ya
+  // es lo que va a leer — esto solo evita depender de ese orden de ejecución para construir la
+  // `idempotencyKey` de abajo.
+  order.publicToken = newToken;
+  void sendTokenRotatedEmail(order);
+
+  const full = await Order.findByPk(orderId, {
+    include: [{ model: OrderItem, as: "items" }],
+  });
   return full!;
 }

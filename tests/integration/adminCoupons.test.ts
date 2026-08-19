@@ -17,6 +17,7 @@ jest.mock("express-rate-limit", () => ({
 import app from "../../src/app";
 import { setupTestDatabase, truncateAll, closeTestDatabase } from "../setup/db";
 import {
+  ACCEPTED_TERMS,
   createAdminUser,
   createCoupon,
   createProduct,
@@ -161,6 +162,7 @@ describe("GET /api/admin/coupons", () => {
       .send({
         items: [{ productId: product.id, size: 25, quantity: 1 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
         couponCode: "VERANO25",
       });
 
@@ -199,6 +201,7 @@ describe("PUT /api/admin/coupons/:id", () => {
       .send({
         items: [{ productId: product.id, size: 25, quantity: 1 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
         couponCode: "VERANO25",
       });
     expect(checkout.status).toBe(409);
@@ -221,6 +224,7 @@ describe("PUT /api/admin/coupons/:id", () => {
       .send({
         items: [{ productId: product.id, size: 25, quantity: 1 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
         couponCode: "PARAR",
       });
     expect(checkout.status).toBe(409);
@@ -314,6 +318,7 @@ describe("DELETE /api/admin/coupons/:id", () => {
       .send({
         items: [{ productId: product.id, size: 25, quantity: 1 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
         couponCode: "VERANO25",
       });
     expect(created.status).toBe(201);

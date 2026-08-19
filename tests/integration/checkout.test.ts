@@ -34,8 +34,9 @@ jest.mock("express-rate-limit", () => ({
 
 import app from "../../src/app";
 import { setupTestDatabase, truncateAll, closeTestDatabase } from "../setup/db";
-import { createProduct } from "../setup/factories";
+import { ACCEPTED_TERMS, createProduct } from "../setup/factories";
 import { ProductSize } from "../../src/models/ProductSize";
+import { Order } from "../../src/models/Order";
 import { createPaymentIntentForOrder } from "../../src/services/payment.service";
 import { resetCheckoutIdempotency } from "../../src/services/orders.service";
 
@@ -75,10 +76,11 @@ describe("POST /api/orders — descuento atómico de stock", () => {
     // idénticos son un doble clic y se deduplican, así que la carrera por la última pieza
     // solo existe entre clientes diferentes.
     const items = [{ productId: product.id, size: 25, quantity: 1 }];
-    const bodyA = { items, customer: validCustomer };
+    const bodyA = { items, customer: validCustomer, ...ACCEPTED_TERMS };
     const bodyB = {
       items,
       customer: { ...validCustomer, email: "otro@test.com", phone: "4619999999" },
+      ...ACCEPTED_TERMS,
     };
 
     const [resA, resB] = await Promise.all([
@@ -108,6 +110,7 @@ describe("POST /api/orders — productos sin tallas (hasSizes:false)", () => {
       .send({
         items: [{ productId: product.id, size: 0, quantity: 2 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
       });
 
     expect(res.status).toBe(201);
@@ -124,6 +127,7 @@ describe("POST /api/orders — productos sin tallas (hasSizes:false)", () => {
       .send({
         items: [{ productId: product.id, size: 0, quantity: 2 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
       });
 
     expect(res.status).toBe(409);
@@ -138,6 +142,7 @@ describe("POST /api/orders — productos sin tallas (hasSizes:false)", () => {
       .send({
         items: [{ productId: product.id, size: 25, quantity: 1 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
       });
 
     expect(res.status).toBe(400);
@@ -152,6 +157,7 @@ describe("POST /api/orders — productos sin tallas (hasSizes:false)", () => {
       .send({
         items: [{ productId: product.id, size: 0, quantity: 1 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
       });
 
     expect(res.status).toBe(400);
@@ -183,6 +189,7 @@ describe("POST /api/orders — totales autoritativos", () => {
           },
         ],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
         // Igual a nivel de la orden completa.
         total: 1,
         subtotal: 1,
@@ -207,6 +214,7 @@ describe("POST /api/orders — refine quotationId/rateId", () => {
       .send({
         items: [{ productId: product.id, size: 25, quantity: 1 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
         quotationId: "quotation_123",
       });
 
@@ -221,6 +229,7 @@ describe("POST /api/orders — refine quotationId/rateId", () => {
       .send({
         items: [{ productId: product.id, size: 25, quantity: 1 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
         rateId: "rate_123",
       });
 
@@ -255,6 +264,7 @@ describe("POST /api/orders — bultos congelados en el pedido (Fase N.6)", () =>
       .send({
         items: quoted.items(product.id),
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
         ...quoted.ids,
         // Un `packageCount` inventado por el cliente no debe llegar a la orden, igual que
         // tampoco llega un monto de envío.
@@ -272,10 +282,110 @@ describe("POST /api/orders — bultos congelados en el pedido (Fase N.6)", () =>
 
     const res = await request(app)
       .post("/api/orders")
-      .send({ items: quoted.items(product.id), customer: validCustomer });
+      .send({ items: quoted.items(product.id), customer: validCustomer, ...ACCEPTED_TERMS });
 
     expect(res.status).toBe(201);
     expect(res.body.order.packageCount).toBeNull();
     expect(getQuotationRateMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/orders — constancia de aceptación de términos (Fase 27)", () => {
+  // Estos cuatro casos arman el body a mano en vez de usar ACCEPTED_TERMS: lo que prueban es
+  // justamente qué pasa cuando esos campos NO están bien, así que dejarlos pasar por el helper
+  // los volvería tautológicos.
+  it("sin acceptedTerms → 400 y no crea el pedido", async () => {
+    const product = await createProduct({ sizes: { 25: 5 } });
+
+    const res = await request(app)
+      .post("/api/orders")
+      .send({
+        items: [{ productId: product.id, size: 25, quantity: 1 }],
+        customer: validCustomer,
+        termsVersion: "2026-08-18",
+      });
+
+    expect(res.status).toBe(400);
+    // El stock no se tocó: el rechazo es previo a la transacción.
+    const size = await ProductSize.findOne({
+      where: { productId: product.id, size: 25 },
+    });
+    expect(size!.stock).toBe(5);
+  });
+
+  it("acceptedTerms:false → 400 (no aceptar y omitir el campo son el mismo hecho)", async () => {
+    const product = await createProduct({ sizes: { 25: 5 } });
+
+    const res = await request(app)
+      .post("/api/orders")
+      .send({
+        items: [{ productId: product.id, size: 25, quantity: 1 }],
+        customer: validCustomer,
+        acceptedTerms: false,
+        termsVersion: "2026-08-18",
+      });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("termsVersion con formato distinto al ISO → 400", async () => {
+    const product = await createProduct({ sizes: { 25: 5 } });
+
+    const res = await request(app)
+      .post("/api/orders")
+      .send({
+        items: [{ productId: product.id, size: 25, quantity: 1 }],
+        customer: validCustomer,
+        acceptedTerms: true,
+        termsVersion: "18 de agosto de 2026",
+      });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("guarda fecha, versión e IP; la fecha y la IP las pone el servidor", async () => {
+    const product = await createProduct({ sizes: { 25: 5 } });
+    const antes = Date.now();
+
+    const res = await request(app)
+      .post("/api/orders")
+      .send({
+        items: [{ productId: product.id, size: 25, quantity: 1 }],
+        customer: validCustomer,
+        acceptedTerms: true,
+        termsVersion: "2026-08-18",
+        // Intento explícito de dictar la constancia desde el cliente: el schema descarta las
+        // claves que no declara, así que estos dos valores no deben llegar nunca a la fila.
+        termsAcceptedAt: "1999-01-01T00:00:00.000Z",
+        termsAcceptedIp: "8.8.8.8",
+      });
+
+    expect(res.status).toBe(201);
+
+    const row = await Order.findByPk(res.body.order.id);
+    expect(row!.termsVersion).toBe("2026-08-18");
+    expect(row!.termsAcceptedAt).toBeInstanceOf(Date);
+    expect(row!.termsAcceptedAt!.getTime()).toBeGreaterThanOrEqual(antes);
+    expect(row!.termsAcceptedIp).not.toBe("8.8.8.8");
+    expect(row!.termsAcceptedIp).toBeTruthy();
+  });
+
+  it("la respuesta del checkout no devuelve la IP de la constancia", async () => {
+    const product = await createProduct({ sizes: { 25: 5 } });
+
+    const res = await request(app)
+      .post("/api/orders")
+      .send({
+        items: [{ productId: product.id, size: 25, quantity: 1 }],
+        customer: validCustomer,
+        ...ACCEPTED_TERMS,
+      });
+
+    expect(res.status).toBe(201);
+    // La lista de `attributes.exclude` del reload es de exclusión: si alguien agrega una columna
+    // sensible y olvida sumarla ahí, se serializa sola. Este caso es el que lo detecta.
+    expect(res.body.order).not.toHaveProperty("termsAcceptedIp");
+    // Lo que sí es suyo, sí vuelve: es la constancia de lo que acaba de aceptar.
+    expect(res.body.order.termsVersion).toBe("2026-08-18");
   });
 });

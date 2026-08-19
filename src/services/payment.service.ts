@@ -870,6 +870,7 @@ async function sendOrderEmail(
     subject: string;
     idempotencyKey: string;
     tracking?: { number: string; url?: string; carrier?: string };
+    codeRotated?: boolean;
   },
 ): Promise<void> {
   try {
@@ -909,6 +910,7 @@ async function sendOrderEmail(
         },
         shippingCarrier: order.shippingCarrier,
         tracking: opts.tracking,
+        codeRotated: opts.codeRotated,
         trackingPageUrl: publicOrderUrl(order.publicToken),
         // El token también va suelto: el botón sirve para el clic, pero la página de consulta pide
         // el código y dentro de un `href` no hay forma de copiarlo.
@@ -955,6 +957,35 @@ export function sendShipmentEmail(
     subject: "Tu pedido va en camino — Botas Don Chuy Outlet",
     idempotencyKey: `order-shipped/${order.id}`,
     tracking,
+  });
+}
+
+/**
+ * Correo de rotación de código (Fase O.6): el dueño invalidó el link/código de rastreo expuesto
+ * de un pedido y este correo le manda al comprador el nuevo. A diferencia de
+ * `sendOrderConfirmationEmail`/`sendShipmentEmail` — pensados para salir una sola vez en la vida
+ * del pedido, de ahí su `idempotencyKey` fija (`order-confirmation/${id}`, `order-shipped/${id}`)
+ * — rotar el código es una acción repetible por diseño: cada rotación necesita su propia ventana
+ * de deduplicación en Resend, así que la key incluye el token NUEVO (garantizado distinto en cada
+ * llamada por `randomUUID()`), no solo el id del pedido. Una key fija habría hecho que Resend
+ * descartara en silencio el correo de la segunda rotación en adelante.
+ *
+ * `tracking` se deriva de los campos ya guardados en la orden (no de un parámetro nuevo): si el
+ * pedido ya está `shipped`/`delivered`, el correo debe seguir mostrando "va en camino" y no
+ * "estamos preparando tu envío" solo porque esta llamada no trae datos de rastreo explícitos.
+ */
+export function sendTokenRotatedEmail(order: Order): Promise<void> {
+  return sendOrderEmail(order, {
+    subject: "Actualizamos tu código de rastreo — Botas Don Chuy Outlet",
+    idempotencyKey: `order-token-rotated/${order.id}/${order.publicToken}`,
+    codeRotated: true,
+    tracking: order.trackingNumber
+      ? {
+          number: order.trackingNumber,
+          url: order.trackingUrl ?? undefined,
+          carrier: order.shippingCarrier ?? undefined,
+        }
+      : undefined,
   });
 }
 

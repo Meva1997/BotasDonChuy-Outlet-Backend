@@ -466,7 +466,7 @@ const options: Options = {
         },
         CreateOrderInput: {
           type: "object",
-          required: ["items", "customer"],
+          required: ["items", "customer", "acceptedTerms", "termsVersion"],
           properties: {
             items: {
               type: "array",
@@ -490,6 +490,24 @@ const options: Options = {
               },
             },
             customer: { $ref: "#/components/schemas/ShippingInput" },
+            acceptedTerms: {
+              type: "boolean",
+              enum: [true],
+              description:
+                "Constancia de que el comprador marcó la casilla de aceptación. OBLIGATORIO: " +
+                "sin él, o con `false`, el pedido se rechaza con 400 (los dos casos describen " +
+                "el mismo hecho: no aceptó). El servidor estampa la fecha y la IP por su cuenta.",
+              example: true,
+            },
+            termsVersion: {
+              type: "string",
+              pattern: "^\\d{4}-\\d{2}-\\d{2}$",
+              description:
+                "Fecha ISO de la versión de los documentos legales que se le renderizó al " +
+                "comprador. La manda el cliente porque es el único que sabe qué texto pintó; " +
+                "se guarda con el pedido para poder acreditar qué versión aceptó.",
+              example: "2026-08-18",
+            },
             shippingCarrier: { type: "string", nullable: true, example: "Estafeta" },
             quotationId: {
               type: "string",
@@ -691,6 +709,27 @@ const options: Options = {
               description:
                 "Token opaco de consulta pública (Fase O.4): es la credencial de GET /api/orders/lookup/{token}, la ruta sin auth donde el comprador ve el estado y el rastreo de su pedido. Viaja como link en el correo de confirmación. Se devuelve al comprador en la respuesta del checkout (el pedido es suyo); null solo en pedidos anteriores a la columna.",
               example: "3f1a9c7e-5d24-4b8e-9f01-2a6c8d4b7e13",
+            },
+            termsAcceptedAt: {
+              type: "string",
+              format: "date-time",
+              nullable: true,
+              description:
+                "Constancia de aceptación de términos (Fase 27): momento en que se creó el pedido, estampado por el SERVIDOR (nunca un reloj del cliente). null = pedido anterior a la fase, es decir NO HAY CONSTANCIA — nunca debe leerse como 'aceptó'.",
+            },
+            termsVersion: {
+              type: "string",
+              nullable: true,
+              description:
+                "Fecha ISO de la versión de los documentos legales que aceptó el comprador. Es lo que hace comprobable la promesa de Términos §15 / Privacidad §13 de que aplica la versión vigente al momento de la transacción. null en pedidos anteriores a la fase.",
+              example: "2026-08-18",
+            },
+            termsAcceptedIp: {
+              type: "string",
+              nullable: true,
+              description:
+                "IP desde la que se aceptó, tomada de req.ip y NUNCA del body. Dato forense: ninguna decisión la consulta. SOLO para el panel admin — se excluye de la respuesta de POST /api/orders y no aparece en la consulta pública. Sin TRUST_PROXY configurado guarda la IP del proxy, no la del comprador. null en pedidos anteriores a la fase.",
+              example: "189.203.44.12",
             },
             items: {
               type: "array",

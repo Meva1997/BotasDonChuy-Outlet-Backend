@@ -23,7 +23,7 @@ jest.mock("express-rate-limit", () => ({
 
 import app from "../../src/app";
 import { setupTestDatabase, truncateAll, closeTestDatabase } from "../setup/db";
-import { createProduct, createCoupon } from "../setup/factories";
+import { ACCEPTED_TERMS, createProduct, createCoupon } from "../setup/factories";
 import { ProductSize } from "../../src/models/ProductSize";
 import { Coupon } from "../../src/models/Coupon";
 import { CouponRedemption } from "../../src/models/CouponRedemption";
@@ -208,6 +208,7 @@ describe("POST /api/coupons/validate — valida sin canjear", () => {
     const body = {
       items: [{ productId: product.id, size: 25, quantity: 1 }],
       customer: validCustomer,
+      ...ACCEPTED_TERMS,
       couponCode: "UNICO",
     };
     expect((await request(app).post("/api/orders").send(body)).status).toBe(201);
@@ -247,6 +248,7 @@ describe("POST /api/orders — canje del cupón", () => {
       .send({
         items: [{ productId: product.id, size: 25, quantity: 1 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
         couponCode: "VERANO25",
       });
 
@@ -281,6 +283,7 @@ describe("POST /api/orders — canje del cupón", () => {
       .send({
         items: [{ productId: product.id, size: 25, quantity: 1 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
         couponCode: "VERANO25",
         // Basura inyectada a propósito: el servidor es la autoridad.
         couponDiscount: 99999,
@@ -302,6 +305,7 @@ describe("POST /api/orders — canje del cupón", () => {
       .send({
         items: [{ productId: product.id, size: 25, quantity: 1 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
         couponCode: "REGALO",
       });
 
@@ -319,6 +323,7 @@ describe("POST /api/orders — canje del cupón", () => {
       .send({
         items: [{ productId: product.id, size: 25, quantity: 1 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
         couponCode: "NOEXISTE",
       });
 
@@ -338,6 +343,7 @@ describe("POST /api/orders — canje del cupón", () => {
       .send({
         items: [{ productId: product.id, size: 25, quantity: 1 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
         couponCode: "CANCELADO",
       });
 
@@ -353,6 +359,7 @@ describe("POST /api/orders — canje del cupón", () => {
       .send({
         items: [{ productId: product.id, size: 25, quantity: 1 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
       });
 
     expect(res.status).toBe(201);
@@ -375,6 +382,7 @@ describe("POST /api/orders — carreras por el último uso", () => {
         .send({
           items: [{ productId: product.id, size: 25, quantity: 1 }],
           customer: validCustomer,
+          ...ACCEPTED_TERMS,
           couponCode: "UNICO",
         }),
       request(app)
@@ -382,6 +390,7 @@ describe("POST /api/orders — carreras por el último uso", () => {
         .send({
           items: [{ productId: product.id, size: 25, quantity: 2 }],
           customer: validCustomer,
+          ...ACCEPTED_TERMS,
           couponCode: "UNICO",
         }),
     ]);
@@ -403,6 +412,7 @@ describe("POST /api/orders — carreras por el último uso", () => {
         .send({
           items: [{ productId: product.id, size: 25, quantity: 1 }],
           customer: validCustomer,
+          ...ACCEPTED_TERMS,
           couponCode: "SOLOUNO",
         }),
       request(app)
@@ -410,6 +420,7 @@ describe("POST /api/orders — carreras por el último uso", () => {
         .send({
           items: [{ productId: product.id, size: 25, quantity: 1 }],
           customer: { ...validCustomer, email: "otro@test.com", phone: "4619999999" },
+          ...ACCEPTED_TERMS,
           couponCode: "SOLOUNO",
         }),
     ]);
@@ -430,7 +441,7 @@ describe("POST /api/orders — carreras por el último uso", () => {
 
     const first = await request(app)
       .post("/api/orders")
-      .send({ items, customer: validCustomer, couponCode: "UNICO" });
+      .send({ items, customer: validCustomer, couponCode: "UNICO", ...ACCEPTED_TERMS });
     expect(first.status).toBe(201);
 
     const second = await request(app)
@@ -438,6 +449,7 @@ describe("POST /api/orders — carreras por el último uso", () => {
       .send({
         items: [{ productId: product.id, size: 25, quantity: 3 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
         couponCode: "UNICO",
       });
 
@@ -456,10 +468,10 @@ describe("POST /api/orders — idempotencia con cupón", () => {
 
     const sinCupon = await request(app)
       .post("/api/orders")
-      .send({ items, customer: validCustomer });
+      .send({ items, customer: validCustomer, ...ACCEPTED_TERMS });
     const conCupon = await request(app)
       .post("/api/orders")
-      .send({ items, customer: validCustomer, couponCode: "VERANO25" });
+      .send({ items, customer: validCustomer, couponCode: "VERANO25", ...ACCEPTED_TERMS });
 
     expect(sinCupon.status).toBe(201);
     expect(conCupon.status).toBe(201);
@@ -475,6 +487,7 @@ describe("POST /api/orders — idempotencia con cupón", () => {
     const body = {
       items: [{ productId: product.id, size: 25, quantity: 1 }],
       customer: validCustomer,
+      ...ACCEPTED_TERMS,
       couponCode: "VERANO25",
     };
 
@@ -502,6 +515,7 @@ describe("GET /api/orders/lookup/:token — con cupón", () => {
       .send({
         items: [{ productId: product.id, size: 25, quantity: 1 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
         couponCode: "VERANO25",
       });
     const token = created.body.order.publicToken;
@@ -537,6 +551,7 @@ describe("mínimo cobrable con tarifa plana", () => {
       .send({
         items: [{ productId: product.id, size: 25, quantity: 1 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
         couponCode: "TODO",
       });
 

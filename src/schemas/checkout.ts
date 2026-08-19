@@ -115,6 +115,27 @@ export const createOrderSchema = z
       .min(1, "El pedido debe tener al menos un artículo")
       .max(50, "Demasiados artículos en el pedido"),
     customer: shippingSchema,
+    // Constancia de aceptación de términos (Fase 27). OBLIGATORIA: sin ella el pedido no se
+    // crea. Hasta esta fase la casilla del checkout solo deshabilitaba un botón del navegador,
+    // así que la frase de Términos §8 —"sin esa aceptación el proceso no avanza"— era cierta
+    // únicamente para quien pasara por la interfaz; cualquier POST directo creaba el pedido
+    // igual y sin dejar rastro de consentimiento.
+    //
+    // `z.literal(true)` y no `z.boolean()`: un `false` explícito debe rechazarse igual que la
+    // ausencia del campo, porque describen el mismo hecho (no aceptó). Con `z.boolean()` un
+    // `false` pasaría la validación y se guardaría una constancia que dice lo contrario de lo
+    // que afirma.
+    acceptedTerms: z.literal(true, {
+      message: "Debes aceptar los términos y condiciones para completar tu compra.",
+    }),
+    // Versión de los documentos que se le renderizó al comprador (`LEGAL_VERSION` del frontend).
+    // La manda el cliente porque es el único que sabe qué texto pintó; el servidor solo acota el
+    // formato a la fecha ISO que realmente se usa, en vez de guardar una cadena arbitraria.
+    // Términos §15 y Privacidad §13 prometen que aplica "la versión vigente al momento de la
+    // transacción": esto es lo que hace comprobable esa promesa.
+    termsVersion: z
+      .string("La versión de los términos debe ser texto")
+      .regex(/^\d{4}-\d{2}-\d{2}$/, "Versión de términos inválida."),
     shippingCarrier: z.string().trim().optional(),
     // Cupón de descuento (Fase N.2). Un solo código por compra: es un `string`, no un arreglo.
     // El cliente manda el CÓDIGO y jamás un monto — misma regla que rige precios y envío.

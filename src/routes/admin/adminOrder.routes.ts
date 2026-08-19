@@ -4,6 +4,7 @@ import {
   adminCancelOrder,
   adminUpdateOrderStatus,
   adminRetryShipment,
+  adminRotateOrderToken,
 } from "../../controllers/order.controller";
 import { requireAuth } from "../../middlewares/requireAuth";
 
@@ -263,5 +264,54 @@ router.patch("/:id/status", adminUpdateOrderStatus);
  *               $ref: '#/components/schemas/Error'
  */
 router.post("/:id/shipment/retry", adminRetryShipment);
+
+/**
+ * @openapi
+ * /api/admin/orders/{id}/rotate-token:
+ *   post:
+ *     summary: Genera un nuevo código de rastreo público e invalida el anterior
+ *     description: >
+ *       Cumple la promesa del Aviso de Privacidad ("si crees que tu código quedó expuesto,
+ *       escríbenos y lo invalidamos"): antes de esta ruta la única forma de honrarla era un
+ *       `UPDATE` manual contra la base de datos. Poner el `publicToken` en `NULL` se descartó
+ *       como solución porque también le quita el acceso al comprador legítimo, no solo al
+ *       link filtrado — por eso esto **rota** el código en vez de borrarlo: genera un UUID
+ *       nuevo y persiste; el código viejo deja de resolver de inmediato en
+ *       `GET /api/orders/lookup/{token}` (comparación directa contra la columna, sin
+ *       necesidad de una lista de tokens revocados) y el comprador recibe el código nuevo por
+ *       correo, con un asunto distinto al de confirmación/envío para que no se lea como un
+ *       reenvío duplicado.
+ *       **Funciona sin importar el estado del pedido** (`pending`, `paid`, `shipped`,
+ *       `delivered` o `cancelled`) — a diferencia de `POST /{id}/cancel` y
+ *       `PATCH /{id}/status`, esta ruta no tiene restricciones de estado: invalidar un link
+ *       expuesto tiene que poder hacerse siempre. Sin body: no se registra quién pidió la
+ *       rotación.
+ *     tags: [Admin - Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer, minimum: 1 }
+ *         description: id del pedido cuyo código de rastreo se quiere rotar.
+ *     responses:
+ *       200:
+ *         description: Código de rastreo rotado; el pedido vuelve con su `publicToken` nuevo y sus items.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 order:
+ *                   $ref: '#/components/schemas/Order'
+ *       400:
+ *         $ref: '#/components/responses/ValidationError'
+ *       401:
+ *         $ref: '#/components/responses/Unauthorized'
+ *       404:
+ *         $ref: '#/components/responses/NotFound'
+ */
+router.post("/:id/rotate-token", adminRotateOrderToken);
 
 export default router;

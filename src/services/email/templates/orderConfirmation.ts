@@ -41,6 +41,12 @@ interface OrderConfirmationInput {
    */
   tracking?: { number: string; url?: string; carrier?: string };
   /**
+   * Correo de rotación de código (Fase O.6): el dueño invalidó el link/código expuesto de este
+   * pedido. Cambia únicamente el intro (`introHeading`/`introBody`) — el resto del correo
+   * (items, totales, dirección, bloque de rastreo) se reutiliza tal cual.
+   */
+  codeRotated?: boolean;
+  /**
    * Link a la página pública de seguimiento (Fase O.4), con el token opaco del pedido. Es la
    * razón de ser de esa fase: sin él, el cliente que borra este correo no tiene forma de
    * consultar su pedido y cada "¿ya salió?" acaba siendo trabajo manual del dueño por WhatsApp.
@@ -198,20 +204,26 @@ export function orderConfirmationTemplate(input: OrderConfirmationInput): string
   const carrierLine = shippingCarrier
     ? `<p style="margin:8px 0 0;font-size:14px;color:#52525b;">Paquetería: ${escapeHtml(shippingCarrier)}</p>`
     : "";
-  // La intro cambia según el disparo: con `tracking` es el correo "pedido enviado" (Fase 8.6), sin
-  // él es la confirmación de pago (Fase 9.3). Sin esto, el correo de envío abriría con "Tu pago fue
-  // confirmado", copy de confirmación que no corresponde a un aviso de que el pedido ya salió.
-  const introHeading = input.tracking
-    ? `¡Tu pedido va en camino, ${escapeHtml(customerName)}!`
-    : `¡Gracias por tu compra, ${escapeHtml(customerName)}!`;
+  // La intro cambia según el disparo: `codeRotated` es el correo de rotación de código (Fase
+  // O.6, revisa primero — es el único que no habla de pago ni de envío), luego `tracking` es el
+  // correo "pedido enviado" (Fase 8.6), y sin ninguno de los dos es la confirmación de pago
+  // (Fase 9.3). Sin esto, el correo de envío abriría con "Tu pago fue confirmado", copy de
+  // confirmación que no corresponde a un aviso de que el pedido ya salió.
+  const introHeading = input.codeRotated
+    ? `Actualizamos tu código de rastreo, ${escapeHtml(customerName)}`
+    : input.tracking
+      ? `¡Tu pedido va en camino, ${escapeHtml(customerName)}!`
+      : `¡Gracias por tu compra, ${escapeHtml(customerName)}!`;
   // Sin número de pedido a propósito: `Order.id` es un consecutivo global de la tienda, no del
   // comprador, así que "tu pedido #20" le sugiere veinte compras que no hizo. Tampoco le sirve de
   // referencia — la credencial de su pedido es el código de seguimiento de más abajo, y la consulta
   // pública es por token justamente porque un id secuencial sería enumerable. La fecha sí se queda:
   // es lo que le permite distinguir dos compras en su bandeja.
-  const introBody = input.tracking
-    ? `Tu pedido del ${formatOrderDate(createdAt)} ya salió de nuestra bodega. Abajo están los datos de rastreo y el resumen de tu compra.`
-    : `Tu pago fue confirmado. Aquí está el resumen de tu pedido del ${formatOrderDate(createdAt)}.`;
+  const introBody = input.codeRotated
+    ? `Por seguridad generamos un nuevo código de seguimiento para tu pedido del ${formatOrderDate(createdAt)}. El código anterior ya no funciona — usa el que aparece abajo para consultar tu pedido.`
+    : input.tracking
+      ? `Tu pedido del ${formatOrderDate(createdAt)} ya salió de nuestra bodega. Abajo están los datos de rastreo y el resumen de tu compra.`
+      : `Tu pago fue confirmado. Aquí está el resumen de tu pedido del ${formatOrderDate(createdAt)}.`;
   const savingsRow =
     savings > 0 ? totalsRow("Ahorraste", `− ${formatMoney(savings)}`, { accent: true }) : "";
   // El código pasa por `escapeHtml` aunque su charset ya prohíba `<` y `&`: la regla del repo es

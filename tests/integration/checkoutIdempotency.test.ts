@@ -27,7 +27,7 @@ jest.mock("express-rate-limit", () => ({
 
 import app from "../../src/app";
 import { setupTestDatabase, truncateAll, closeTestDatabase } from "../setup/db";
-import { createProduct } from "../setup/factories";
+import { ACCEPTED_TERMS, createProduct } from "../setup/factories";
 import { Order } from "../../src/models/Order";
 import { ProductSize } from "../../src/models/ProductSize";
 import { createPaymentIntentForOrder } from "../../src/services/payment.service";
@@ -70,6 +70,7 @@ describe("POST /api/orders — idempotencia por huella del carrito", () => {
     const body = {
       items: [{ productId: product.id, size: 25, quantity: 2 }],
       customer: validCustomer,
+      ...ACCEPTED_TERMS,
     };
 
     const [resA, resB] = await Promise.all([
@@ -96,6 +97,7 @@ describe("POST /api/orders — idempotencia por huella del carrito", () => {
     const body = {
       items: [{ productId: product.id, size: 25, quantity: 1 }],
       customer: validCustomer,
+      ...ACCEPTED_TERMS,
     };
 
     const first = await request(app).post("/api/orders").send(body);
@@ -120,10 +122,10 @@ describe("POST /api/orders — idempotencia por huella del carrito", () => {
 
     const first = await request(app)
       .post("/api/orders")
-      .send({ items: [lineA, lineB], customer: validCustomer });
+      .send({ items: [lineA, lineB], customer: validCustomer, ...ACCEPTED_TERMS });
     const second = await request(app)
       .post("/api/orders")
-      .send({ items: [lineB, lineA], customer: validCustomer });
+      .send({ items: [lineB, lineA], customer: validCustomer, ...ACCEPTED_TERMS });
 
     expect(second.body.order.id).toBe(first.body.order.id);
     expect(await Order.count()).toBe(1);
@@ -137,12 +139,14 @@ describe("POST /api/orders — idempotencia por huella del carrito", () => {
       .send({
         items: [{ productId: product.id, size: 25, quantity: 1 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
       });
     const second = await request(app)
       .post("/api/orders")
       .send({
         items: [{ productId: product.id, size: 25, quantity: 2 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
       });
 
     expect(second.body.order.id).not.toBe(first.body.order.id);
@@ -156,12 +160,13 @@ describe("POST /api/orders — idempotencia por huella del carrito", () => {
 
     const first = await request(app)
       .post("/api/orders")
-      .send({ items, customer: validCustomer });
+      .send({ items, customer: validCustomer, ...ACCEPTED_TERMS });
     const second = await request(app)
       .post("/api/orders")
       .send({
         items,
         customer: { ...validCustomer, email: "otra@test.com", phone: "4611111111" },
+        ...ACCEPTED_TERMS,
       });
 
     expect(second.body.order.id).not.toBe(first.body.order.id);
@@ -176,6 +181,7 @@ describe("POST /api/orders — idempotencia por huella del carrito", () => {
     const body = {
       items: [{ productId: product.id, size: 25, quantity: 1 }],
       customer: validCustomer,
+      ...ACCEPTED_TERMS,
     };
 
     // Sin stock → 409 antes de escribir nada.
@@ -202,6 +208,7 @@ describe("POST /api/orders — idempotencia por huella del carrito", () => {
     const body = {
       items: [{ productId: product.id, size: 25, quantity: 2 }],
       customer: validCustomer,
+      ...ACCEPTED_TERMS,
     };
 
     const first = await request(app).post("/api/orders").send(body);
@@ -224,6 +231,7 @@ describe("POST /api/orders — header Idempotency-Key", () => {
     const body = {
       items: [{ productId: product.id, size: 25, quantity: 1 }],
       customer: validCustomer,
+      ...ACCEPTED_TERMS,
     };
 
     const first = await request(app)
@@ -247,6 +255,7 @@ describe("POST /api/orders — header Idempotency-Key", () => {
     const body = {
       items: [{ productId: product.id, size: 25, quantity: 1 }],
       customer: validCustomer,
+      ...ACCEPTED_TERMS,
     };
 
     const first = await request(app)
@@ -271,6 +280,7 @@ describe("POST /api/orders — header Idempotency-Key", () => {
       .send({
         items: [{ productId: product.id, size: 25, quantity: 1 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
       });
 
     const conflict = await request(app)
@@ -279,6 +289,7 @@ describe("POST /api/orders — header Idempotency-Key", () => {
       .send({
         items: [{ productId: product.id, size: 25, quantity: 2 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
       });
 
     expect(conflict.status).toBe(409);
@@ -295,6 +306,7 @@ describe("POST /api/orders — header Idempotency-Key", () => {
       .send({
         items: [{ productId: product.id, size: 25, quantity: 1 }],
         customer: validCustomer,
+        ...ACCEPTED_TERMS,
       });
 
     expect(res.status).toBe(400);
@@ -306,6 +318,7 @@ describe("POST /api/orders — header Idempotency-Key", () => {
     const body = {
       items: [{ productId: product.id, size: 25, quantity: 1 }],
       customer: validCustomer,
+      ...ACCEPTED_TERMS,
     };
 
     const first = await request(app).post("/api/orders").set("Idempotency-Key", "   ").send(body);

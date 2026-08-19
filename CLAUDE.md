@@ -637,10 +637,20 @@ a verified domain (manual DNS step, no code).
 `src/routes/public/order.routes.ts`, `src/controllers/order.controller.ts`,
 `src/services/orders.service.ts`. `POST /api/orders` is **public**.
 
-Body `{ items: [{ productId, size, quantity }], customer, shippingCarrier?, quotationId?, rateId?,
-couponCode? }`, validated with `createOrderSchema` (zod, `src/schemas/checkout.ts`), capping `quantity` at
+Body `{ items: [{ productId, size, quantity }], customer, acceptedTerms, termsVersion,
+shippingCarrier?, quotationId?, rateId?, couponCode? }`, validated with `createOrderSchema` (zod,
+`src/schemas/checkout.ts`), capping `quantity` at
 99/item and `items` at 50/order (the real per-size limit is enforced by the atomic decrement → `409`).
 
+- `acceptedTerms`/`termsVersion` (Fase 27) are the **only required fields besides `items`/`customer`**.
+  `acceptedTerms` is `z.literal(true)`, not `z.boolean()`: an explicit `false` must be rejected exactly
+  like an absent field, because they state the same fact (no consent) — with `z.boolean()` a `false`
+  would validate and get persisted as a record asserting the opposite of what it means. `termsVersion`
+  is the ISO date of the legal documents the buyer was shown (`/^\d{4}-\d{2}-\d{2}$/`); only the client
+  knows which text it rendered, hence it travels in the body.
+  **This deliberately breaks compatibility**: any client posting without consent now gets a `400`. It's
+  what makes Términos §8 ("sin esa aceptación el proceso no avanza") true at the system level rather
+  than only for whoever uses the UI.
 - `couponCode` is a single code — never an amount — resolved and **redeemed atomically inside the same
   transaction** that decrements stock; an invalid/expired/exhausted/already-used coupon rolls the whole
   transaction back (no order, no stock decrement) and is **never silently ignored**, the deliberate
@@ -672,6 +682,34 @@ available → `409`; a network failure re-consulting → `503`. Without `quotati
 `unitCost` is frozen in the row but **excluded from the public response** (reloaded with
 `attributes: { exclude: ['unitCost'] }` on `items`). Orders are created `status: "pending"` /
 `paymentStatus: "unpaid"`; the response is `{ order, clientSecret }`.
+
+**Constancia de aceptación (Fase 27).** `Order.create` also writes three columns: `termsVersion`
+(from the body), `termsAcceptedAt` (`new Date()` — **server clock**, not the client's) and
+`termsAcceptedIp` (`req.ip`, reusing the existing `CheckoutContext.clientIp` seam built for coupon
+redemptions — the same "IP comes from the request and NEVER from the body" rule). The timestamp is
+the transaction's, not the checkbox click's (they can differ by minutes); that's the moment Términos
+§15 actually refers to. All three are **nullable with no backfill**: `null` means *"no hay
+constancia"* — an order predating the phase — and must never be rendered as "accepted".
+
+Three scope decisions worth not reverting blindly:
+
+1. **`termsAcceptedIp` is in the reload's `attributes.exclude` list.** That list is an *exclusion*
+   list, so every new `Order` column serializes itself into the public `201` until someone adds it.
+   Returning the buyer their own IP adds nothing. `termsAcceptedAt`/`termsVersion` do ride along —
+   they're the record of what the buyer just accepted. Covered by a test.
+2. **It never reaches `GET /api/orders/lookup/:token`.** That projection is an allow-list, so it
+   didn't leak on its own; it's left out because the link gets shared over WhatsApp and the record is
+   the merchant's evidence, not the buyer's tracking data.
+3. **It does not enter `checkoutFingerprint`.** `acceptedTerms` can't vary (the schema forces `true`),
+   and two attempts differing only in `termsVersion` — the documents were edited mid-session — must
+   replay the original order rather than double-charge. Since the fingerprint is an explicit allow-list
+   and not a hash of the raw body, adding payload fields changed no previously-issued fingerprint.
+
+**⚠️ `TRUST_PROXY` is a deployment requirement, not a detail.** `app.ts` only calls
+`app.set("trust proxy", …)` when that env var is set (deliberately opt-in — `true` on a directly
+exposed server lets anyone spoof `X-Forwarded-For`). Without it in production, `req.ip` is the
+proxy's and every order records the same address: worse than storing nothing, because it looks
+like evidence.
 
 The route is gated by `orderRateLimiter` (Fase H.3, `src/middlewares/rateLimit.ts`, 10 req/min per IP):
 every successful request creates a real Stripe PaymentIntent and an `Order` row, so a sustained flood
@@ -714,6 +752,29 @@ that page is a buyer waiting on their order. The column ships with
 `20260728130000-orders-public-token.ts`, which backfills existing rows with `gen_random_uuid()` (core since
 Postgres 13) **before** creating the unique index, and is declared in `Order.init()`'s `indexes` because
 `tests/setup/db.ts` builds the schema with `sync({ force: true })`.
+
+**Token rotation (Fase O.6 — `POST /api/admin/orders/:id/rotate-token` `[auth]` →
+`orders.service.rotatePublicToken`)**: the Aviso de Privacidad promises "si crees que tu código quedó
+expuesto, escríbenos y lo invalidamos"; before this route the only way to honor it was a manual SQL
+`UPDATE` against production. Setting `publicToken` to `NULL` was rejected as the fix — it also kills the
+legitimate buyer's own tracking access, not just the leaked link — so this **rotates** it instead:
+generates a fresh `randomUUID()` and persists it, and the old token simply stops matching in
+`getOrderByPublicToken`'s `WHERE publicToken = token` (no blacklist needed). It works **regardless of
+`order.status`** — unlike `cancelOrderByAdmin`/`updateOrderStatusByAdmin`, there's no state guard here,
+since invalidating an exposed link has to work no matter what state the order is in. No transaction/lock:
+it's a single-column write with no multi-row invariant, so a concurrent double-rotation is harmless
+(last write wins, same as `updateOrderStatusByAdmin`'s loose field updates). No body, no `reason` field,
+no audit of who requested it — the route is deliberately minimal.
+
+The buyer is emailed the new code via `sendTokenRotatedEmail` (`payment.service.ts`), which reuses
+`orderConfirmationTemplate` with a new `codeRotated` flag that swaps only the intro copy (everything
+else — items, totals, address, the tracking-page block — renders unchanged, same as the confirmation/
+shipped split). Its subject ("Actualizamos tu código de rastreo…") is deliberately distinct from
+confirmation/shipped so it doesn't read as a duplicate. Its `idempotencyKey`
+(`` `order-token-rotated/${order.id}/${order.publicToken}` ``) deliberately differs from the fixed,
+once-ever keys `order-confirmation/${id}`/`order-shipped/${id}`: rotation is repeatable by design, so a
+fixed key would make Resend silently dedupe every rotation after the first. Including the (fresh) token
+itself gives each rotation a unique key for free, no counter/timestamp needed.
 
 #### Checkout idempotency (Fase O.2)
 
