@@ -59,7 +59,7 @@ PENDING_ORDER_SWEEP_INTERVAL_MINUTES=10 # opcional: cada cuánto corre el barrid
 
 # Resend (emails transaccionales) — ambas OBLIGATORIAS: el server no arranca sin ellas
 RESEND_API_KEY=re_...                    # del dashboard de Resend
-EMAIL_FROM=Botas Don Chuy <onboarding@resend.dev>  # sin dominio verificado, usar onboarding@resend.dev
+EMAIL_FROM=Botas Don Chuy Outlet <no-reply@botasdonchuy.com>  # dominio verificado en Resend (ver abajo)
 FRONTEND_URL=http://localhost:3000       # opcional: base para links dentro de los correos
 
 # Skydropx (cotización en vivo + guía automática) — client id/secret, webhook secret y los 8 SHIP_FROM_* son OBLIGATORIOS
@@ -120,6 +120,40 @@ DAILY_DIGEST_CHECK_INTERVAL_MINUTES=15   # cada cuánto se revisa si ya toca man
 > **Stripe (solo test/sandbox por ahora).** El PaymentIntent y el webhook son reales, con
 > llaves de test. Para obtener el `STRIPE_WEBHOOK_SECRET` en local y probar los eventos, ver
 > [Probar Stripe en local](#probar-stripe-en-local).
+
+## Dominio (botasdonchuy.com)
+
+Comprado en Namecheap (2026-08-19). Estado actual del DNS (Advanced DNS del dominio):
+
+- `outlet.botasdonchuy.com` → `A` a `76.76.21.21` (Vercel), es donde vive el frontend
+  (`FRONTEND_URL`/`CORS_ORIGIN` del backend deben apuntar aquí en producción).
+- **Envío de correo verificado en Resend** sobre la raíz `botasdonchuy.com` (no sobre `outlet`,
+  que es solo el subdominio de la app): DKIM (`TXT resend._domainkey`), SPF+MX
+  (`MX`/`TXT send` → `feedback-smtp.us-east-1.amazonses.com` / `v=spf1 include:amazonses.com ~all`)
+  y DMARC opcional (`TXT _dmarc` → `v=DMARC1; p=none;`). `EMAIL_FROM` usa
+  `no-reply@botasdonchuy.com` — esa dirección no tiene buzón real, es solo remitente de envío.
+- El `Mail Settings` del dominio en Namecheap quedó en **"Custom MX"** (no "Email Forwarding")
+  porque Namecheap oculta la opción "MX Record" del Host Records cuando el modo es "Email
+  Forwarding" — hubo que cambiarlo para poder agregar el MX de `send` que pide Resend.
+
+### Pendiente: buzón real con Google Workspace
+
+Por ahora nadie puede *recibir* correo en `@botasdonchuy.com` (solo enviar). El plan es dar de
+alta **Google Workspace** (plan Business Starter, ~$7 USD/mes) para tener un buzón real
+(`pedidos@botasdonchuy.com` o similar) que se vea directo en Gmail, para centralizar ahí pedidos,
+dudas y reclamos sin construir nada nuevo dentro del panel admin. Pasos cuando se haga:
+
+1. Contratar en [workspace.google.com](https://workspace.google.com) indicando que el dominio
+   (`botasdonchuy.com`) ya se tiene.
+2. Verificar el dominio ante Google (`TXT` en `@`, tipo `google-site-verification=...`).
+3. Agregar el MX de Google en la sección **Mail Settings** de Namecheap (junto al `send` que ya
+   usa Resend — hosts distintos, no chocan): host `@`, mail server `smtp.google.com`, priority `1`
+   (usar el valor exacto que muestre el asistente de Workspace si difiere).
+4. Agregar SPF de Google como `TXT` en `@`: `v=spf1 include:_spf.google.com ~all` (la raíz no
+   tiene SPF propio ahora mismo, así que no hay conflicto con el de Resend, que vive en `send`).
+5. Crear el buzón en el admin console de Workspace.
+6. El `_dmarc` ya existente no necesita cambios — aplica igual a los envíos automáticos de Resend
+   y a los correos mandados a mano desde Workspace.
 
 ## Scripts
 
