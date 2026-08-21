@@ -117,6 +117,14 @@ export const lookupOrder: RequestHandler = asyncHandler(
  *  - `payment_intent.payment_failed` → orden `failed` (sigue `pending`; el barrido
  *                                      repondrá el stock si se abandona).
  *  - `payment_intent.canceled`       → restock inmediato + orden `cancelled`.
+ *  - `charge.dispute.created` / `.updated` / `.closed` → registra la disputa en el pedido (Fase
+ *                                      28). NO cambia `status` ni `paymentStatus`: el cargo sí se
+ *                                      cobró, y la disputa es un eje aparte.
+ *
+ * ⚠️ Qué eventos llegan aquí se configura en el **Dashboard de Stripe**, por endpoint y **por
+ * separado en test y en live** — no se declara en este repo. `stripe listen` reenvía todo en local,
+ * así que un evento ausente de esa lista solo se nota en producción, y callando. Si las disputas
+ * dejan de aparecer en el panel, revisar esa suscripción antes que este archivo.
  */
 export const stripeWebhook: RequestHandler = asyncHandler(
   async (req: Request, res: Response) => {
@@ -157,6 +165,16 @@ export const stripeWebhook: RequestHandler = asyncHandler(
         const pi = event.data.object as Stripe.PaymentIntent;
         const orderId = Number(pi.metadata?.orderId);
         if (orderId) await ordersService.releaseOrderStock(orderId);
+        break;
+      }
+      // Los tres eventos de disputa entran al mismo manejador: el `created` es el que importa
+      // operativamente, pero `updated`/`closed` son los que mueven el estado a ganada/perdida, y
+      // sin ellos el pedido se quedaría marcado "en disputa" para siempre.
+      case "charge.dispute.created":
+      case "charge.dispute.updated":
+      case "charge.dispute.closed": {
+        const dispute = event.data.object as Stripe.Dispute;
+        await paymentService.applyDisputeFromWebhook(dispute);
         break;
       }
       default:

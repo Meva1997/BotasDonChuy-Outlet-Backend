@@ -1,4 +1,5 @@
 import { Op, type WhereOptions } from "sequelize";
+import type Stripe from "stripe";
 import { Order } from "../models/Order";
 import { OrderItem } from "../models/OrderItem";
 import { Product } from "../models/Product";
@@ -56,7 +57,38 @@ export async function createPaymentIntentForOrder(
   const intent = await stripe.paymentIntents.create({
     amount: Math.round(order.total * 100), // total en pesos → centavos
     currency: STRIPE_CURRENCY,
+    // Solo el id del pedido. NUNCA agregar `receipt_email` ni crear un
+    // `Customer` con el correo del comprador: el Aviso de Privacidad §4 promete
+    // por escrito que a Stripe "nunca les compartimos tu correo electrónico".
     metadata: { orderId: String(order.id) },
+    // Métodos de pago DINÁMICOS: qué se ofrece se decide en el Dashboard de
+    // Stripe, no aquí. `payment_method_types` no se pasa nunca (apagaría esto).
+    //
+    // Configuración vigente en el Dashboard — SOLO TARJETA. Se documenta aquí
+    // porque es invisible desde el repo, y en test y en live se configura por
+    // separado (no se copia una a la otra):
+    //
+    //   • Link: DESACTIVADO. Pide el correo dentro del propio Element y se lo
+    //     manda a Stripe, contra lo que promete Privacidad §4. Síntoma de que
+    //     alguien lo reactivó: aparece un campo de correo sobre el formulario
+    //     de tarjeta. Reactivarlo obliga a reescribir §4 y subir LEGAL_VERSION.
+    //
+    //   • OXXO / SPEI: DESACTIVADOS. Son asíncronos (el voucher vive días)
+    //     contra PENDING_ORDER_TTL_MINUTES = 30: `pendingOrderSweeper` liberaría
+    //     el stock con el voucher todavía vigente, y los Términos §8 prometen
+    //     que el pedido se confirma "cuando el pago se acredita". Síntoma:
+    //     pedidos clavados en `pending` y piezas de vuelta en el catálogo
+    //     mientras el comprador aún podía pagarlas. Habilitarlos exige un TTL
+    //     por método y una UI de "pendiente de pago": es una fase, no un
+    //     cambio de configuración.
+    //
+    // La OTRA configuración invisible del Dashboard son los eventos suscritos
+    // del webhook, también por separado en test y en live: además de los tres
+    // de `payment_intent`, el endpoint necesita `charge.dispute.created`,
+    // `charge.dispute.updated` y `charge.dispute.closed` (Fase 28). Sin ellos
+    // un contracargo no deja rastro en el panel y el pedido se sigue
+    // imprimiendo en la hoja de empaque. `stripe listen` reenvía todo en local,
+    // así que el hueco solo aparece en producción.
     automatic_payment_methods: { enabled: true },
   });
   return { clientSecret: intent.client_secret, paymentIntentId: intent.id };
@@ -1228,4 +1260,73 @@ export async function markOrderPaymentFailed(
   }
   if (order.paymentStatus === "paid") return; // ya pagada: ignorar un failed tardío
   await order.update({ paymentStatus: "failed" });
+}
+
+/**
+ * Registra en el pedido una disputa (contracargo) a partir de un evento de webhook ya verificado —
+ * `charge.dispute.created`, `.updated` y `.closed` entran los tres por aquí (Fase 28).
+ *
+ * Antes de esta fase esos eventos caían en el `default: break` del switch y no dejaban rastro: el
+ * pedido seguía `paid`, seguía en la pestaña "Pendientes de enviar" y **salía impreso en la hoja de
+ * empaque**, así que la mercancía se podía mandar con el dinero ya retirado del saldo.
+ *
+ * **No toca `status`, `paymentStatus` ni el stock**, y las tres omisiones son deliberadas:
+ *  - `paymentStatus` sigue diciendo `paid` porque el cargo *fue* cobrado; la disputa es un eje
+ *    aparte (ver el comentario de las columnas en models/Order.ts).
+ *  - una disputa PERDIDA tampoco cancela el pedido ni repone stock: la mercancía pudo haber salido
+ *    ya, y devolver al catálogo piezas que no están físicamente en la tienda es peor que no hacer
+ *    nada. Esa decisión es del dueño, con el botón de cancelar/reembolsar que ya existe.
+ *
+ * Idempotente y tolerante a "orden no encontrada" (loguea y retorna sin lanzar), como los otros dos
+ * manejadores: un evento verificado siempre debe responder 200 o Stripe reintenta en bucle.
+ */
+export async function applyDisputeFromWebhook(
+  dispute: Stripe.Dispute,
+): Promise<void> {
+  // `payment_intent` viaja como id o como objeto expandido según cómo se haya pedido el evento;
+  // puede ser `null` en cargos que no nacieron de un PaymentIntent (no es nuestro caso, pero un
+  // webhook no es lugar para asumirlo).
+  const paymentIntentId =
+    typeof dispute.payment_intent === "string"
+      ? dispute.payment_intent
+      : (dispute.payment_intent?.id ?? null);
+
+  if (!paymentIntentId) {
+    logger.warn(
+      { disputeId: dispute.id, event: "charge.dispute" },
+      "[stripe] disputa sin payment_intent asociado",
+    );
+    return;
+  }
+
+  const order = await Order.findOne({ where: { paymentIntentId } });
+  if (!order) {
+    logger.warn(
+      { paymentIntentId, disputeId: dispute.id, event: "charge.dispute" },
+      "[stripe] disputa sin orden asociada",
+    );
+    return;
+  }
+
+  await order.update({
+    disputeStatus: dispute.status,
+    disputeReason: dispute.reason,
+    // Stripe manda el importe en la unidad mínima (centavos); el resto del dinero del pedido vive
+    // en pesos. Puede ser PARCIAL, por eso se guarda y no se deriva de `total`.
+    disputeAmount: dispute.amount / 100,
+    // Solo la primera vez: `disputedAt` es cuándo empezó el problema, no cuándo llegó el último
+    // evento. Un `closed` semanas después no debe reescribir esa fecha.
+    ...(order.disputedAt === null ? { disputedAt: new Date() } : {}),
+  });
+
+  logger.warn(
+    {
+      orderId: order.id,
+      disputeId: dispute.id,
+      status: dispute.status,
+      reason: dispute.reason,
+      event: "charge.dispute",
+    },
+    "[stripe] disputa registrada en el pedido",
+  );
 }

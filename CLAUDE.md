@@ -869,7 +869,8 @@ could exceed its response timeout and retry the event in a loop.
 missing/invalid signature returns **400** (Stripe won't count it as delivered); any verified event returns
 `{ received: true }` (200) even when unhandled, to avoid retry loops. Handled:
 `payment_intent.succeeded` → `markOrderPaidFromWebhook`; `payment_intent.payment_failed` →
-`markOrderPaymentFailed`; `payment_intent.canceled` → `releaseOrderStock`.
+`markOrderPaymentFailed`; `payment_intent.canceled` → `releaseOrderStock`; `charge.dispute.created` /
+`.updated` / `.closed` → `applyDisputeFromWebhook` (Fase 28, below).
 
 **`orders.service.releaseOrderStock(orderId)`** is the exact inverse of the checkout's atomic decrement: in
 a transaction it locks the `Order` row **alone** (`FOR UPDATE` — *not* with the `items` include, since
@@ -889,6 +890,46 @@ committed and decremented stock — and those are precisely the orders nothing e
 webhook can arrive for a PaymentIntent that doesn't exist, so their stock stayed reserved forever.
 Restocking them is safe because the client never received a `clientSecret`. `sweepOnce` is exported for
 tests.
+
+### Disputas / contracargos (Fase 28)
+
+`Order.disputeStatus` / `disputeReason` / `disputedAt` / `disputeAmount`
+(`20260821120000-orders-dispute-fields.ts`), `payment.service.applyDisputeFromWebhook`, handled in
+`stripeWebhook` (`order.controller.ts`).
+
+Hasta esta fase `charge.dispute.created`/`.updated`/`.closed` caían en el `default: break` del switch y
+**no dejaban rastro**: el pedido seguía `paid`, seguía en "Pendientes de enviar" y salía impreso en la
+hoja de empaque — la mercancía se podía mandar con el dinero ya retirado del saldo (Stripe se lleva el
+importe más su comisión de disputa, que no se devuelve ni ganando el caso).
+
+**Columnas propias, no un valor nuevo del enum `paymentStatus`.** El cargo *fue* cobrado y, si la
+disputa se gana, el dinero vuelve — meter `"disputed"` en el enum obligaría a decidir a qué estado
+"regresar" al cerrarse (¿`paid`? ¿`refunded`? un contracargo perdido no es un reembolso) y borraría el
+hecho de que se pagó. Mismo criterio que ya separa `status` de `paymentStatus`. `disputeStatus` y
+`disputeReason` guardan el string **crudo** de Stripe (`needs_response` · `under_review` · `won` ·
+`lost` · `warning_*`/`fraudulent`/`product_not_received`/…), igual que `shipmentStatus` guarda el crudo
+de Skydropx — un enum de Postgres convertiría cada estado nuevo de Stripe en una migración; quien los
+clasifica es el frontend. `disputedAt` es la **primera** vez que se supo y no se pisa en eventos
+posteriores (`updated`/`closed` mueven el estado, no la fecha en que empezó el problema).
+`disputeAmount` puede ser **parcial** (no basta con leer `total`) y se guarda en pesos — Stripe lo manda
+en centavos — con el mismo getter `parseFloat` que el resto del dinero del pedido. Las cuatro son
+`null` cuando el pedido nunca tuvo disputa, el caso normal, y ninguna llega al comprador:
+`getOrderByPublicToken` es una lista blanca explícita de `attributes` que no las incluye.
+
+`applyDisputeFromWebhook` **no toca `status`, `paymentStatus` ni el stock**: una disputa perdida tampoco
+cancela el pedido ni repone stock, porque la mercancía pudo haber salido ya y devolver al catálogo
+piezas que no están físicamente en la tienda es peor que no hacer nada — esa decisión sigue siendo del
+dueño, con el botón de cancelar/reembolsar que ya existe (Fase H.5). Es **idempotente y tolerante a
+"orden no encontrada"** (busca por `paymentIntentId`, log + return sin lanzar), mismo criterio que
+`markOrderPaidFromWebhook`/`markOrderPaymentFailed`, para que un evento verificado siempre responda
+`200` y Stripe no reintente en bucle.
+
+⚠️ **Qué eventos llegan al webhook se configura en el Dashboard de Stripe, no en este repo**, y por
+separado en test y en live: además de los tres de `payment_intent`, el endpoint necesita suscribir
+`charge.dispute.created`, `charge.dispute.updated` y `charge.dispute.closed`. `stripe listen` reenvía
+todo en local, así que un hueco en esa suscripción solo se nota en producción — y callando, porque el
+handler simplemente nunca recibe el evento. Si las disputas dejan de aparecer, revisar esa suscripción
+antes que el código.
 
 ### Envío en vivo / Skydropx (Fase 8.1–8.7)
 

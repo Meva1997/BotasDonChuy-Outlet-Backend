@@ -30,6 +30,7 @@ import {
   markOrderPaidFromWebhook,
   createShipmentForOrder,
   applyShipmentUpdateFromWebhook,
+  applyDisputeFromWebhook,
 } from "../../src/services/payment.service";
 
 beforeAll(async () => {
@@ -266,5 +267,92 @@ describe("applyShipmentUpdateFromWebhook — avance solo hacia adelante", () => 
     await waitFor(() => sendEmailMock.mock.calls.length >= 1);
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(sendEmailMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Disputas / contracargos (Fase 28). Lo que se fija aquí no es "se guardaron cuatro columnas":
+ * es que la disputa **no toca el pago ni el pedido**. `paymentStatus` sigue diciendo `paid`
+ * porque el cargo sí se cobró, y el stock no se repone porque la mercancía pudo haber salido ya
+ * — las dos son decisiones explícitas, no omisiones.
+ */
+describe("applyDisputeFromWebhook", () => {
+  // Molde mínimo de `Stripe.Dispute`: el servicio solo lee cinco campos, y armar el objeto
+  // completo del SDK agregaría ruido que ningún assert mira.
+  function disputeFixture(
+    overrides: {
+      id?: string;
+      payment_intent?: string | null;
+      status?: string;
+      reason?: string;
+      amount?: number;
+    } = {},
+  ) {
+    return {
+      id: overrides.id ?? "dp_test_1",
+      payment_intent:
+        overrides.payment_intent === undefined ? "pi_test_1" : overrides.payment_intent,
+      status: overrides.status ?? "needs_response",
+      reason: overrides.reason ?? "fraudulent",
+      // Stripe manda centavos; el pedido guarda pesos.
+      amount: overrides.amount ?? 95000,
+    } as unknown as Parameters<typeof applyDisputeFromWebhook>[0];
+  }
+
+  it("registra la disputa sin tocar el estado del pedido ni el del pago", async () => {
+    const order = await createOrder({
+      status: "paid",
+      paymentStatus: "paid",
+      paymentIntentId: "pi_test_1",
+    });
+
+    await applyDisputeFromWebhook(disputeFixture());
+
+    const reloaded = await Order.findByPk(order.id);
+    expect(reloaded!.disputeStatus).toBe("needs_response");
+    expect(reloaded!.disputeReason).toBe("fraudulent");
+    expect(reloaded!.disputeAmount).toBe(950);
+    expect(reloaded!.disputedAt).not.toBeNull();
+    // Lo que NO cambió es el punto de la fase.
+    expect(reloaded!.status).toBe("paid");
+    expect(reloaded!.paymentStatus).toBe("paid");
+  });
+
+  it("un evento posterior mueve el estado pero conserva la fecha en que empezó", async () => {
+    const order = await createOrder({
+      status: "paid",
+      paymentStatus: "paid",
+      paymentIntentId: "pi_test_2",
+    });
+
+    await applyDisputeFromWebhook(
+      disputeFixture({ payment_intent: "pi_test_2", status: "needs_response" }),
+    );
+    const first = await Order.findByPk(order.id);
+    const firstSeen = first!.disputedAt;
+
+    await applyDisputeFromWebhook(
+      disputeFixture({ payment_intent: "pi_test_2", status: "lost" }),
+    );
+
+    const reloaded = await Order.findByPk(order.id);
+    expect(reloaded!.disputeStatus).toBe("lost");
+    // `disputedAt` es cuándo empezó el problema, no cuándo llegó el último evento.
+    expect(reloaded!.disputedAt!.getTime()).toBe(firstSeen!.getTime());
+    expect(reloaded!.paymentStatus).toBe("paid");
+  });
+
+  // Un webhook verificado siempre tiene que poder responder 200: si esto lanzara, Stripe
+  // reintentaría en bucle un evento que ni siquiera es de un pedido nuestro.
+  it("no lanza cuando el PaymentIntent no corresponde a ningún pedido", async () => {
+    await expect(
+      applyDisputeFromWebhook(disputeFixture({ payment_intent: "pi_de_otra_cuenta" })),
+    ).resolves.toBeUndefined();
+  });
+
+  it("no lanza cuando la disputa no trae PaymentIntent", async () => {
+    await expect(
+      applyDisputeFromWebhook(disputeFixture({ payment_intent: null })),
+    ).resolves.toBeUndefined();
   });
 });

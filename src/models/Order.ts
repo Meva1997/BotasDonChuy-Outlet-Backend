@@ -105,6 +105,28 @@ export interface OrderAttributes {
   termsAcceptedAt: Date | null;
   termsVersion: string | null;
   termsAcceptedIp: string | null;
+  // Disputa / contracargo (Fase 28). Son columnas APARTE y no un valor más del enum
+  // `paymentStatus` a propósito: una disputa no reemplaza al pago —el cargo *fue* cobrado, y si la
+  // disputa se gana el dinero vuelve—, así que pisar `paymentStatus` obligaría a decidir a qué
+  // estado regresar al cerrarse (¿`paid`? ¿`refunded`? un contracargo perdido no es un reembolso)
+  // y borraría el hecho de que se pagó. Mismo criterio que ya mantiene `status` y `paymentStatus`
+  // como ejes independientes.
+  //
+  // `disputeStatus` y `disputeReason` guardan el string CRUDO de Stripe (`needs_response`,
+  // `under_review`, `won`, `lost`, `warning_*` / `fraudulent`, `product_not_received`, …), igual
+  // que `shipmentStatus` guarda el crudo de Skydropx: Stripe puede agregar estados y un enum los
+  // convertiría en una migración cada vez. Quien los pinta los clasifica
+  // (`components/admin/orders/disputeStatus.ts`) tratando como "abierta" cualquier cosa que no
+  // reconozca. `disputedAt` es la PRIMERA vez que se supo y no se pisa después. `disputeAmount`
+  // puede ser un importe PARCIAL, por eso no basta con leer `total`; se guarda en pesos (Stripe lo
+  // manda en centavos) para hablar la misma unidad que el resto del dinero del pedido.
+  //
+  // Los cuatro son `null` cuando el pedido nunca tuvo disputa — que es el caso normal. NINGUNO
+  // llega al comprador: `getOrderByPublicToken` es una lista blanca explícita de `attributes`.
+  disputeStatus: string | null;
+  disputeReason: string | null;
+  disputedAt: Date | null;
+  disputeAmount: number | null;
 }
 
 interface OrderCreationAttributes extends Optional<
@@ -133,6 +155,10 @@ interface OrderCreationAttributes extends Optional<
   | "termsAcceptedAt"
   | "termsVersion"
   | "termsAcceptedIp"
+  | "disputeStatus"
+  | "disputeReason"
+  | "disputedAt"
+  | "disputeAmount"
 > {}
 
 export class Order
@@ -176,6 +202,10 @@ export class Order
   declare termsAcceptedAt: Date | null;
   declare termsVersion: string | null;
   declare termsAcceptedIp: string | null;
+  declare disputeStatus: string | null;
+  declare disputeReason: string | null;
+  declare disputedAt: Date | null;
+  declare disputeAmount: number | null;
   declare readonly createdAt: Date;
   declare readonly updatedAt: Date;
   declare items?: OrderItem[];
@@ -381,6 +411,31 @@ Order.init(
       type: DataTypes.STRING(45),
       allowNull: true,
       defaultValue: null,
+    },
+    disputeStatus: {
+      type: DataTypes.STRING(32),
+      allowNull: true,
+      defaultValue: null,
+    },
+    disputeReason: {
+      type: DataTypes.STRING(48),
+      allowNull: true,
+      defaultValue: null,
+    },
+    disputedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      defaultValue: null,
+    },
+    disputeAmount: {
+      // Mismo getter que el resto del dinero del pedido: `DECIMAL` vuelve de `pg` como string.
+      type: DataTypes.DECIMAL(10, 2),
+      allowNull: true,
+      defaultValue: null,
+      get() {
+        const value = this.getDataValue("disputeAmount");
+        return value === null ? null : parseFloat(value as unknown as string);
+      },
     },
   },
   {
