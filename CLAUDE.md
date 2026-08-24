@@ -20,6 +20,12 @@ No linter is configured yet.
 Express 5 + TypeScript REST API backed by PostgreSQL through Sequelize 6. Backend for the
 "Botas Don Chuy Outlet" store (products of type `bota`, `sombrero`, or `ropa`).
 
+**Las secciones más extensas viven en `docs/features/`** (una por área: `catalog-search.md`,
+`coupons.md`, `expenses.md`, `sale-notice.md`, `checkout.md`, `order-lookup.md`,
+`stripe-payments.md`, `multi-box-packing.md`, `shipment-retry.md`, `reports.md`,
+`bulk-import.md`). Aquí queda un resumen de cada una con su referencia; **al cambiar el
+comportamiento de alguna, actualiza su archivo en `docs/features/`, no solo el resumen.**
+
 ### Startup flow (`src/app.ts`)
 
 `dotenv` → create app → `trust proxy` when `TRUST_PROXY` is set (it decides whether `req.ip`, and
@@ -142,389 +148,42 @@ contradict the returned page.
 
 #### Catalog search, sort and price range (Fase N.1)
 
-- `q` searches `name` and `code` with `Op.iLike` (`code` is nullable — a `NULL` simply doesn't match
-  inside the `OR`), and the value **must** go through **`escapeLike` (`src/utils/escapeLike.ts`)**:
-  Sequelize parameterizes the value but does **not** escape LIKE's `%`/`_`, so `?q=100%` would match
-  the entire catalog. This repo already paid that bug once — in `productImport.service.ts` a row named
-  `"Bota%Premium"` matched `"Bota Roja Premium"` and **renamed it**. `escapeLike` also escapes `\`
-  itself (LIKE's default escape char in Postgres, so no explicit `ESCAPE` clause is needed) — without
-  it, `?q=\` would leave a dangling escape and Postgres's `22025` would surface as a **500**.
-- `orden` accepts `precio_asc`/`precio_desc`/`novedad` (`id DESC`), default `id ASC`. The two price
-  orders carry an **`id` tiebreaker in the same direction as the price**: prices tie constantly and
-  Postgres guarantees no stable order without it — page 2 would repeat and drop rows — plus it lets the
-  `("salePrice","id")` index serve `precio_desc` as a plain backward scan.
-- `precioMin`/`precioMax` use **`Number.isFinite` and `>= 0`, not `Number.isInteger`** (`salePrice` is
-  `DECIMAL(10,2)`, so `precioMax=1499.99` is legitimate).
-- **Every invalid param is silently ignored, never a `400`** — the precedent `talla` set here; a
-  `precioMin` above `precioMax` is **not** swapped (zero results is the honest answer).
+`q` (búsqueda `iLike` sobre `name`/`code`, **siempre** vía `escapeLike`), `orden`
+(`precio_asc`/`precio_desc`/`novedad`) y `precioMin`/`precioMax` filtran y ordenan en SQL,
+respaldados por dos índices parciales declarados también en `Product.init()`. Todo parámetro
+inválido se **ignora en silencio**, nunca es `400`, y los predicados de `availableSizes` son una
+copia a mano del `where` compartido: **un filtro nuevo se agrega en los dos lados**.
 
-Two **partial** indexes back this (`20260729120000-products-catalog-indexes.ts`, mirrored in
-`Product.init()`'s `indexes` as the rule requires): `products_type_visible` on `type`, and
-`products_sale_price_visible` on **`("salePrice","id")`** — composite because a single-column index
-can't satisfy `ORDER BY "salePrice", id` without an incremental sort, which is the whole reason it
-exists. Both are partial on `visible = true AND "deletedAt" IS NULL`, the predicate every public query
-carries verbatim (the one listing that doesn't, `adminGetProducts`, has no `WHERE` at all). A
-`pg_trgm` GIN index on `name` was **deliberately deferred**: the blocker isn't the index but
-`CREATE EXTENSION`, which `sync({ force: true })` never runs — the test DB and CI's Postgres container
-would build a schema where the GIN index fails. Revisit when the seq-scan `ILIKE` shows up in latency.
-
-`availableSizes` (all sizes with stock > 0 matching `categoria`, `q` and the price range, but
-**independent of the `talla` already chosen**) is a separate raw `sequelize.query` aggregate over
-`product_sizes` joined to `products`, since it must scan the whole filtered set rather than one page.
-Each half of that rule guards a different dead-end: excluding `talla` means picking a size never
-empties the size selector; including `q`/price means it never offers a size that returns zero products
-under the active search. Its predicates are a **hand-maintained copy** of the shared `where` (it's raw
-SQL) — **a new filter must be added on both sides**. Every value goes through `replacements`, never
-interpolation: unlike `talla` (an already-validated integer), `q` is arbitrary client input.
-
-**Admin product CRUD** lives in `src/routes/admin/adminProduct.routes.ts` (`/api/admin/products`,
-`router.use(requireAuth)`) and reuses `product.controller.ts`. Unlike public reads it exposes
-non-visible rows and `unitCost`. Create/update validate with `productSchema`/`productUpdateSchema`
-(zod) and write tallas/stock to `ProductSize` inside a `sequelize.transaction`; `sizes` accepts a
-`"25,25,26"` string or a number array (each repeat = one stock unit). `DELETE` soft-deletes
-(`deletedAt` + `visible:false`) when the product is referenced by an `OrderItem`, otherwise
-hard-deletes (its `ProductSize` rows cascade).
-
-**Productos sin tallas (`Product.hasSizes`, default `true`)** cubren mercancía que no se vende por
-talla — un corbatín, una hebilla — donde la existencia es una sola cantidad capturada a mano. En vez
-de una segunda forma de stock, reusa `ProductSize` con un valor centinela de talla,
-`NO_SIZE_SENTINEL = 0` (`src/utils/noSizeSentinel.ts`): un producto `hasSizes:false` tiene **una
-sola** fila `ProductSize` con `size: 0`, así que `Product.stock`/`Product.sizes` (los `VIRTUAL`s) y
-todo el descuento/reingreso atómico de stock (`createOrder`, `releaseOrderStock`,
-`cancelOrderByAdmin`) siguen funcionando sin ninguna rama nueva — ya operan genéricamente sobre
-`(productId, size)`. `0` es seguro como centinela porque toda talla real se valida `>= 1` en todo el
-repo (`sizesSpec.ts`, `productSchema`, el filtro público `?talla=`).
-
-`productSchema`/`productUpdateSchema` agregan `hasSizes` y `stockQuantity` (la cantidad manual,
-obligatoria solo cuando `hasSizes:false`; `sizes` sigue siendo obligatorio cuando `hasSizes` es
-`true`, el default). Mandar el campo del modo contrario es `400` (mismo patrón de reglas cruzadas que
-`couponRuleIssues` en `src/schemas/coupon.ts`). En el `PUT` la obligatoriedad **al cambiar de modo**
-se valida en `adminUpdateProduct` contra el `hasSizes` ya guardado (mismo patrón que el cruce de
-precios que ya vivía ahí) — un `PUT` parcial que no toca el modo no debe forzar a resituar
-`sizes`/`stockQuantity`. `getProducts`'s `availableSizes` filtra `p."hasSizes" = true`, o la fila
-centinela se colaría como "talla 0" en el selector público. El checkout acepta `size: 0` en
-`orderItemSchema` solo para estos productos — `createOrder` valida que la talla mandada coincida con
-el modo del producto (400 en cualquier combinación cruzada) antes del descuento atómico. La
-importación masiva por Excel **no** soporta este modo todavía: toda fila importada crea/actualiza un
-producto `hasSizes:true`.
+Detalle completo en `docs/features/catalog-search.md`.
 
 ### Cupones y códigos de descuento (Fase N.2)
 
-`src/models/Coupon.ts`, `CouponRedemption.ts`, `src/services/coupon.service.ts`,
-`src/schemas/coupon.ts`, `src/utils/emailIdentity.ts`; `POST /api/coupons/validate` `[público]` + CRUD
-en `/api/admin/coupons` `[auth]`.
+`POST /api/coupons/validate` `[público]` + CRUD en `/api/admin/coupons` `[auth]`. El cliente manda
+un **código** y jamás un monto; el descuento se calcula solo en `computeCouponDiscount`
+(`src/services/cart.ts`) sobre la mercancía neta y sin tocar el envío, y el canje es atómico dentro
+de la transacción del checkout. El invariante de toda la app es
+`total = subtotal − savings − couponDiscount + shipping`.
 
-La única palanca de descuento que no toca el catálogo. El cliente manda un **código** y **jamás un
-monto** — misma regla que ya rige precios y envío. `Coupon` lleva `code` (alfanumérico en mayúsculas,
-índice único), `type: percent|fixed`, `value`, `maxDiscount?` (tope en pesos, **solo** para `percent`),
-`minSubtotal?`, `maxRedemptions?` (`null` = ilimitado), `redeemedCount`, `oncePerCustomer` (default
-`true`), `startsAt?`/`expiresAt?`, `active` (ponerlo en `false` **es** "cancelar el cupón") y
-`description?`. Puede haber varios activos, pero **uno solo por compra** (`couponCode` es un `string`).
-
-**El descuento se calcula en `computeCouponDiscount` (`src/services/cart.ts`)**, única implementación,
-compartida por `createOrder` y por `/validate` — si fueran dos, el preview podría prometer un descuento
-distinto al que se cobra. `computeTotals` **no se tocó** (su test unitario afirma con `toEqual` sobre
-exactamente cuatro claves, y lo que hacía falta compartir no eran "totales" sino "cuántos pesos quita
-este cupón"). Tres invariantes, cada uno tapando una forma distinta de perder dinero:
-
-1. La base es la **mercancía neta `subtotal − savings`** — aquí `subtotal` está a precio *original*,
-   así que calcular sobre él regalaría porcentaje sobre un precio que nadie paga, y un `minSubtotal` de
-   $1000 se cumpliría con un carrito que vale $600.
-2. **El envío no entra**, y no es un parámetro de la función justamente para que no pueda colarse (un
-   cupón de producto no debe regalar la paquetería, que se paga a un tercero).
-3. **Clamp a `[0, neto]`**: un `fixed` de $5,000 sobre un carrito de $1,600 descuenta $1,600 y nunca
-   deja un total negativo.
-
-Todo se calcula en **centavos enteros** con un solo redondeo antes de tocar la BD: la columna es
-`DECIMAL(10,2)` y sin eso Postgres redondearía por su cuenta (medio hacia afuera del cero) mientras
-`/validate` —que no pasa por la BD— mostraría el de JS (medio hacia arriba), difiriendo un centavo en
-los porcentajes que caen justo a la mitad. **El invariante nuevo de toda la app es
-`total = subtotal − savings − couponDiscount + shipping`.**
-
-**La identidad de "una persona" es el correo del pedido, NO la IP** (`normalizeEmailIdentity`:
-minúsculas, `+tag` recortado en todos los dominios, puntos quitados solo en
-`gmail.com`/`googlemail.com`). La IP era la opción intuitiva y es la peor: detrás de CGNAT (cualquier
-plan móvil, Izzi, Totalplay) media colonia sale por una sola dirección, y además `req.ip` depende de
-`TRUST_PROXY` — desplegado detrás de un proxy sin esa env, **todos** los compradores se ven con la IP
-del proxy y el primer canje mataría el cupón para la tienda entera. Se guarda en
-`coupon_redemptions.ip` **solo como dato forense** (viaja como `CheckoutContext.clientIp` desde
-`req.ip`, nunca desde el body) y ninguna decisión la consulta. La normalización **sobre-fusiona a
-propósito** (alguien cuyo buzón realmente distinto sea `juan+trabajo@` queda bloqueado, y por eso el
-mensaje de error nombra el correo). La barrera **dura** contra el abuso no es la identidad sino
-`maxRedemptions`: acota la pérdida máxima a `usos × descuento` sin importar quién canjee.
-
-**El canje es atómico y va dentro de la transacción del checkout**, con dos candados y ningún `SELECT`
-+ `if` (dos compradores simultáneos leerían los dos "sí se puede"):
-
-1. El tope global es un `Coupon.update({ redeemedCount: literal('"redeemedCount" + 1') }, { where: {
-   id, active: true, maxRedemptions IS NULL OR redeemedCount < maxRedemptions, + ventana de vigencia
-   } })` — `affected === 0` es el 409, misma forma que el descuento de stock. **Ojo con las
-   comillas**: la columna es camelCase y Postgres pliega a minúsculas los identificadores sin comillas,
-   así que `literal('redeemedCount + 1')` buscaría `redeemedcount` → 500.
-2. El "un uso por cliente" lo decide el **índice único parcial** `coupon_redemptions (couponId,
-   emailNormalized) WHERE releasedAt IS NULL AND enforced`, vía un `INSERT ... ON CONFLICT ... DO
-   NOTHING` crudo y **no** un `try/catch` del `UniqueConstraintError`: un error `23505` deja la
-   transacción de Postgres **abortada** y, como Sequelize no envuelve `Model.create` en un savepoint,
-   cualquier consulta posterior falla con *"current transaction is aborted"* — o sea que el `catch`
-   natural (releer la fila que bloquea para armar un mensaje decente) daría un **500 en vez del 409**.
-   Con `ON CONFLICT` no se levanta excepción y el conteo de filas es la señal.
-
-Ese 409 lleva **dos mensajes** según el estado del pedido que bloquea — si es `pending`, "ya tienes un
-pedido sin pagar que usa este cupón", porque cuando Stripe falla *después* del commit la Fase O.2
-conserva la clave y el cupón queda apartado hasta que `pendingOrderSweeper` lo alcance (30 min).
-
-**`coupon_redemptions.enforced`** existe porque el índice parcial **no puede consultar el flag del
-cupón**: si el dueño apaga `oncePerCustomer` en un cupón vivo, las filas ya escritas seguirían
-bloqueando esos correos para siempre. Se escribe fila para **todo** canje (es la bitácora —quién,
-cuándo, cuánto, desde qué IP— y `releaseCouponForOrder` se apoya en su existencia), y solo las escritas
-con el flag encendido participan en la restricción.
-
-**La liberación del uso** (`releaseCouponForOrder`) es lo que el roadmap no pedía y sin lo cual la
-promoción muere sola: el uso es una reserva igual que el stock, así que se devuelve **en el mismo punto
-y dentro de la misma transacción** — en `releaseOrderStock` (que cubre a sus dos llamadores: el webhook
-`payment_intent.canceled` y `pendingOrderSweeper`) y en la rama `paid` de `cancelOrderByAdmin`, después
-del guard `status !== "paid"` para que dos cancelaciones concurrentes no decrementen dos veces. Sin
-esto, un cupón de 50 usos se agota con carritos abandonados. Es auto-idempotente por el `UPDATE`
-condicional (`releasedAt IS NULL`) y el decremento lleva `redeemedCount > 0`. **Un reembolso fallido no
-libera** (el dinero no volvió), misma regla que el restock.
-
-**`assertChargeableTotal`** valida el mínimo cobrable **antes** de persistir: si Stripe rechazara el
-total, eso pasaría *después* del commit y —por `releaseKeyOnFailure` de la Fase O.2— con la clave
-conservada, dejando un pedido `pending` que aparta stock y quema el cupón 30 min sin poder reintentar.
-`MIN_CHARGE_MXN` vive en `coupon.service.ts` y **no en `src/config/stripe.ts`**: dos suites
-(`cancelOrder.test.ts`, `pendingOrderSweeper.test.ts`) reemplazan ese módulo con un objeto literal de
-exports fijos, así que un import nuevo resolvería a `undefined`, `total < undefined` sería `false`, y el
-guard quedaría **muerto en todas las suites que mockean Stripe** mientras los tests pasan en verde.
-
-**`checkoutFingerprint` incluye `couponCode`**: sin él el mismo carrito con y sin cupón daría la misma
-huella, y al comprador que acaba de aplicar un descuento se le devolvería el pedido anterior **sin
-descontarlo**. El código ya viene normalizado por `couponCodeSchema` (recortado y en mayúsculas). La IP
-**no** entra: no es parte de la identidad del pedido, y un reintento desde otra red se leería como
-pedido nuevo.
-
-**`POST /api/coupons/validate`** `[público, couponRateLimiter 20/min]` valida **sin canjear** —ni mueve
-`redeemedCount` ni escribe fila, así que abrir el checkout diez veces no gasta la promoción— y reusa
-`assertProductAvailable` para que un producto oculto dé el mismo 409 que dará el checkout. El `email` es
-**opcional** porque el campo del cupón vive en el paso 0 del checkout, antes de capturar los datos de
-envío: sin correo no se verifica el uso por persona y la respuesta lo declara con
-`perCustomerChecked: false`; `remainingRedemptions` es informativo y **no vinculante** (el tope global y
-el uso por persona se re-deciden atómicamente al pagar, así que el front tiene que pintar el 409). Sus
-mensajes **sí distinguen la causa** (no existe / venció / se agotó / no alcanza el mínimo), la inversión
-deliberada de la regla anti-enumeración del resto del repo: un cupón existe para que un humano lo
-teclee y un mensaje opaco lo volvería inusable. Consecuencia a decir en voz alta: **los códigos no son
-secretos**, así que un cupón dirigido a una sola persona tiene que ser largo y aleatorio, nunca `VIP`.
-
-**Reglas del CRUD admin.** `code` **no es editable** (ya pudo repartirse, y el `couponCode` congelado en
-los pedidos dejaría de empatar; si está mal, desactivar y crear otro). `redeemedCount` **no entra en
-ningún schema** (estado derivado que solo mueven el canje y la liberación). **Bajar `maxRedemptions` por
-debajo de `redeemedCount` se permite y no se valida**: es justo el edit que hace un dueño para frenar
-una promoción en caliente. `updateCoupon` re-valida las reglas cruzadas contra **el estado combinado**
-(lo guardado + lo que cambia), porque los refines del schema solo ven el body y un `PUT` que manda solo
-`maxDiscount` sobre un cupón `fixed` los pasaría. `DELETE` sigue el criterio de `adminDeleteProduct`:
-**desactiva** si algún pedido lo usó, borra de verdad si no — y se cuentan **pedidos y no canjes**,
-porque un canje liberado sigue siendo historia y una fila de canje puede desaparecer por cascada
-mientras el pedido no. El listado devuelve `activeRedemptions` (conteo vivo) junto a `redeemedCount`
-para que una divergencia (p. ej. un pedido borrado a mano, que se lleva su fila de canje por cascada) se
-**vea** en vez de esconderse; ese es el riesgo residual asumido del `onDelete: "CASCADE"`.
-
-**Fechas y zona horaria** (`couponDateSchema`): un `"2026-08-01"` interpretado como ISO es medianoche
-**UTC**, o sea el 31 de julio a las 18:00 en México — el dueño perdería la última tarde de su promoción.
-Una fecha sin hora se interpreta en `America/Mexico_City` (inicio de día para `startsAt`,
-`23:59:59.999` para `expiresAt`); un instante ISO completo se respeta tal cual. Offset fijo `-06:00`
-porque México no tiene DST desde 2022 y la tienda está en Celaya, GTO.
-
-**Dónde aparece el cupón fuera del checkout:** la fila `Cupón <CÓDIGO> − $X` de
-`orderConfirmationTemplate` va **después de "Ahorraste" y antes de "Envío"** (ese orden es la prueba
-visual de que no tocó la paquetería) y la reciben los dos correos. `PublicOrderView` expone
-`couponCode`/`couponDiscount` (sin ellos el total de la página de seguimiento no cuadraría) pero no
-`couponId`. En `dashboard.service.ts`, `SaleRow` suma los dos campos —obligatorio, o la fila del panel
-es irreconciliable— y hay un KPI nuevo **`DESCUENTOS POR CUPÓN`**: `agg.revenue += order.total` **se
-queda** (ahora suma el efectivo realmente cobrado), pero sin ese KPI una campaña se leería como una
-*caída* de ingresos aunque el volumen creciera. **`savings` no se toca** — sumar el cupón ahí falsearía
-el margen. `reports.service.ts` **no cambia**: calcula `revenue = unitsSold × salePrice` actual, así que
-los dos reportes son estructuralmente ciegos al cupón; su `totalRevenue` ya era ≥ caja real y el cupón
-ensancha esa brecha, y **no** se "arregla" pasándolo a `order.total` porque rompería el desglose por
-producto/categoría.
+Detalle completo en `docs/features/coupons.md`.
 
 ### Gastos y suscripciones (Fase N.3)
 
-`src/models/Expense.ts`, `ExpenseAmount.ts`, `src/services/expenses.service.ts`,
-`src/schemas/expense.ts`; CRUD + `/summary` + `/history` en `/api/admin/expenses` `[auth]`.
+CRUD + `/summary` + `/history` en `/api/admin/expenses` `[auth]`; sustituye la constante
+`GASTOS_FIJOS = 2000` que restaba el dashboard. **El monto no es una columna de `expenses`: vive
+versionado en `expense_amounts` por `effectiveFrom`**, así que subir el precio de una suscripción no
+reescribe los meses ya cerrados. ⚠️ Las guías de envío **no** se capturan como gasto (se derivan de
+`Order.shipping`); las cajas y el empaque sí.
 
-Sustituye la constante `GASTOS_FIJOS = 2000` que `dashboard.service.ts` restaba para calcular **GANANCIA
-NETA** — el KPI que el dueño usa para decidir si el negocio gana dinero era un número inventado.
-
-**El monto NO es una columna de `expenses`: vive versionado en `expense_amounts`** (`amount`,
-`effectiveFrom DATEONLY`, `note`), y esa separación es toda la fase. El monto vigente es *la versión con
-el `effectiveFrom` más grande que ya empezó* y el de julio es *la vigente en julio*, así que subir Render
-de $290 a $340 **no reescribe** lo que costaba en meses cerrados. Guardar además un `expenses.amount`
-"actual" habría dejado dos fuentes de verdad que se desincronizan con el primer edit mal hecho (mismo
-riesgo que `redeemedCount` vs `activeRedemptions`); las tablas son de decenas de filas, así que
-`currentAmount` se **calcula** en memoria. El **índice único parcial** `(expenseId, effectiveFrom)`
-—declarado en `Model.init` además de en la migración, por `sync({ force: true })`— no es contabilidad:
-convierte "re-editar el monto que capturé hoy" en una **corrección en su lugar** en vez de una versión
-duplicada que dejaría el historial ambiguo. Esa misma lista alimenta el arreglo **`changes`** de cada mes
-en `/history`, la respuesta consultable a "¿algo cambió?" — sin él un aumento solo se nota como un total
-más alto sin causa visible.
-
-**Todo en MXN**, sin `currency` ni tipo de cambio: Render y Vercel cobran en USD, pero lo que se captura
-es lo que cobró la tarjeta, así que un movimiento del dólar **es** un cambio de monto y queda fechado en
-el historial. Un `fxRate` por gasto se descartó porque se desactualiza en silencio.
-
-**Dos números distintos, los dos necesarios, y confundirlos es el error caro:**
-1. El **gasto real de un mes** (`buildHistory`) se calcula **generando las fechas de cargo** desde
-   `startsAt` acotadas por `endsAt`/`active`, atribuyendo cada ocurrencia a su mes con el monto vigente
-   **en esa fecha** — así una anualidad cae completa en su mes de renovación y no untada en el año.
-2. La **carga mensual normalizada** (`monthlyRunRate`) convierte cada recurrente a su equivalente por mes
-   vía `MONTHLY_FACTOR` (`yearly ÷ 12`, `quarterly ÷ 3`, **`weekly × 52/12` y no `× 4`** — usar 4
-   subestima el año en casi un mes completo), responde "cuánto retirar cada mes" y es lo que el dashboard
-   prorratea por `windowDays/30`. Los `once` valen 0 en el run-rate: cuentan completos en su mes y nunca
-   más.
-
-**Trampas ya resueltas.** Las fechas son **`DATEONLY`** porque un cargo es un día de calendario, no un
-instante — esquiva de raíz el problema de zona horaria que `couponDateSchema` tuvo que resolver; **ojo,
-Sequelize las devuelve como string `"YYYY-MM-DD"`, no como `Date`** (de ahí `utcDayFromIso` en
-`src/utils/date.ts`, y que las comparaciones sean de strings, que para ese formato ya son cronológicas).
-Las ocurrencias se generan **por índice** desde `startsAt` (`addMonthsClamped(anchor, n × paso)`) y
-**nunca iterando sobre la fecha ya calculada**: iterar con `setUTCMonth(+1)` desde el 31 de enero
-desborda al 3 de marzo, y si se itera sobre el resultado clampeado (28 feb → 28 mar) el día 31 se pierde
-para siempre; por índice sale 31 ene → 28 feb → **31 mar**. `monthlyRunRate` consulta `active`
-**directamente** y no vía `effectiveEnd`: apagar un gasto le fija `endsAt` en hoy y, como `endsAt` es
-inclusivo (un cargo fechado ese día sí cuenta, y así debe ser para las ocurrencias), sin ese guard la
-suscripción recién cancelada seguiría sumando a "cuánto retirar" el día entero de su cancelación. Y
-**apagar escribe `endsAt`** en vez de dejar que "hasta cuándo cobró" se infiera de `updatedAt`, que
-cualquier otra escritura bumpea — la lección de `shipmentClaimedAt` (Fase O.3); reactivar limpia un
-`endsAt` viejo salvo que el body mande uno.
-
-**`monthRange` se movió de `reports.service.ts` a `src/utils/date.ts`** y ahora la comparten el reporte
-mensual de ventas y el historial de gastos: los dos necesitan el mismo rango sin huecos y el mismo clamp
-de `from > to`.
-
-**Reglas del CRUD.** `PUT` con `amount` **agrega una versión** (con `amountEffectiveFrom` o hoy), salvo
-que ya exista una con esa misma vigencia (se corrige en su lugar) o que el monto no haya cambiado (editar
-el concepto no debe ensuciar el historial de precios). La primera versión de un alta rige desde
-**`startsAt`, no desde hoy**: registrar en agosto una suscripción que empezó en marzo tiene que dejar
-cubiertos los cargos de marzo a julio. `DELETE` sigue el criterio de `deleteCoupon`/`adminDeleteProduct`:
-**desactiva** (con `endsAt` en hoy) si el gasto ya generó algún cargo —ese dinero se gastó y borrarlo
-dejaría el historial mintiendo sobre meses cerrados— y solo borra de verdad lo que nunca cobró nada. El
-filtro `from`/`to` del listado es por **fecha de cargo y no por alta**. Los parámetros inválidos aquí son
-**`400`, no se ignoran** (la inversión deliberada de la regla del catálogo público: quien consulta es el
-dueño, y un filtro que no aplicó le haría leer mal sus propios números). Las categorías son un **ENUM
-fijo** (`infraestructura`, `software`, `renta`, `servicios`, `paqueteria`, `publicidad`, `nomina`,
-`impuestos`, `otro`) y no texto libre, porque con texto libre `"Infra"`/`"infraestructura"`/`"INFRA"`
-serían tres grupos distintos en la misma gráfica; agregar una es un `ALTER TYPE ... ADD VALUE`, y los
-catálogos se repiten literales en la migración (no se importan de `models/Expense.ts`, que arrastraría
-`config/database.ts` a un proceso que no debe abrir una segunda conexión) — **al agregar un valor, tocar
-los dos lados**.
-
-**En el dashboard**, `buildKpisForWindow` recibe el run-rate y un `Map<isoDay, amount>` de gastos de única
-vez (`oneTimeExpensesByDay`) y los suma en **el mismo recorrido día-por-día que ya hacía** sobre la
-ventana actual y la previa. El KPI pasó de `GASTOS FIJOS` a **`GASTOS`** (con gastos de única vez adentro,
-"fijos" sería falso) y su `subtitle` separa las dos mitades, porque un pico tiene dos causas muy distintas
-—subió una suscripción vs. hubo una compra puntual— y el dueño debe distinguirlas sin abrir el historial.
-La ventana previa ahora suma **sus propios** gastos de única vez: antes restaba exactamente los mismos que
-la actual porque la constante no tenía cómo variar, y eso volvía el `trend` de GANANCIA NETA una
-comparación a medias. **La forma de `DashboardData` no cambia**, así que el panel no se rompe con el
-deploy. `src/seed.ts` crea una fila recurrente de `$2,000/mes` equivalente a la constante vieja para que la
-GANANCIA NETA no dé un salto ese día; es una fila normal y editable.
-
-**La línea derivada de envío** (`DerivedShippingCost`, Fase N.5) es el segundo costo más grande del
-negocio y **no es un gasto capturado**: sale de `Order.shipping` y aparece en `/summary` (mes en curso a
-la fecha) y en cada mes de `/history` como un campo `shippingCost` aparte. Tres decisiones que hay que
-leer juntas:
-
-1. **Nunca se persiste como `Expense`.** Una fila por pedido serían ~900 al mes a 30 ventas diarias:
-   inundaría el `activeCount` y el `byCategory` de `/summary`, el `byExpense` de `/history` y la lista
-   editable del panel, para representar algo que ya está en `orders`. Las dos tablas de gastos son de
-   decenas de filas justamente porque las captura un humano.
-2. **Va FUERA de `total`/`byCategory`/`byExpense`/`monthlyRunRate`.** El dashboard ya la resta en
-   GANANCIA BRUTA (el envío es costo de venta, ver **Dashboard**), y como `OPERATIVA = BRUTA − GASTOS`,
-   sumarla también a los totales de gastos la restaría **dos veces**. Se expone aparte para que el dueño
-   la *vea* sin que los dos paneles se contradigan; las banderas `derived: true` e
-   `includedInGrossProfit: true` son el contrato legible por máquina de eso.
-3. **⚠️ Cajas y empaque sí se capturan como `Expense` de categoría `paqueteria`; las guías NO.** Es el
-   único modo de reintroducir el doble conteo, y por eso está advertido en tres lugares: el comentario
-   del enum en `models/Expense.ts`, la bandera en la API, y el copy obligatorio del frontend.
-
-`buildSummary`/`buildHistory` **siguen siendo puras**: reciben el envío como **parámetro final con
-default `new Map()`** en vez de consultarlo adentro (sus tests unitarios corren sin BD y el default deja
-intacto a todo llamador anterior). La consulta vive en los wrappers, `loadShippingByMonth(from,
-toExclusive)`, con `paymentStatus: "paid"` —el mismo predicado del dashboard— y bucketing por
-`isoMonth` UTC para que los dos paneles nunca partan el mes distinto. **Sin `raw: true`**: el
-`parseFloat` de `shipping` vive en el getter del modelo, que `raw` no ejecuta, así que devolvería el
-string `"150.00"` y la suma **concatenaría**. `getExpenseSummary` toma **un solo `now`** para los límites
-del mes y para `buildSummary`, o una llamada a las 23:59:59.9 podría cruzar la medianoche entre ambos.
-Los campos `from`/`to`/`partial` de la línea existen para que un acumulado a media quincena no se lea
-contra un `monthlyRunRate` de mes completo y parezca que el envío sale baratísimo.
+Detalle completo en `docs/features/expenses.md`.
 
 ### Aviso de venta al dueño (Fase N.4)
 
-`src/services/ownerNotification.service.ts`, `dailySalesDigest.ts`,
-`src/services/email/templates/newOrderNotification.ts` + `dailySalesDigest.ts`, `src/utils/storeDay.ts`.
+Dos correos a `OWNER_NOTIFICATION_EMAIL` (fallback `ALERT_EMAIL_TO`; sin ninguna de las dos la fase
+queda apagada): el **aviso por venta** —fire-and-forget dentro del guard `affected === 1` de
+`markOrderPaidFromWebhook`, con asunto autocontenido— y el **resumen diario** del día local anterior
+(cron `startDailySalesDigest`). Ninguno lleva `unitCost` ni margen.
 
-Hasta esta fase `alert.service.ts` solo mandaba correo cuando algo **fallaba**, y no había nada para el
-evento más importante del negocio — una venta. Son **dos correos que responden preguntas distintas**: el
-**aviso por venta** es un *disparador de acción* ("empaca esto") y el **resumen diario** es
-*reconciliación* ("cómo cerró el día"). Con solo el resumen, un pedido de las 3pm no se conocería hasta el
-corte del día siguiente — hasta un día de retraso en despachar. Van a `OWNER_NOTIFICATION_EMAIL` con
-**fallback a `ALERT_EMAIL_TO`** (resuelto en cada llamada, no al cargar el módulo, igual que
-`sendAlertEmail`); **sin ninguna de las dos la fase queda apagada**, y ese es su interruptor. Sin dominio
-verificado en Resend esta fase **sí funciona**, a diferencia de los correos al cliente: el destinatario *es*
-el dueño de la cuenta.
-
-**El aviso por venta** se dispara fire-and-forget desde `markOrderPaidFromWebhook` **dentro del guard
-`affected === 1`**: ese `UPDATE` condicional ya serializa a nivel de BD el webhook de Stripe y
-`pendingOrderSweeper`, así que sale exactamente una vez sin dedup propia (`idempotencyKey:
-new-order/${id}` es el segundo cinturón). **No espera a `createShipmentForOrder`**: los dos datos
-operativos que lleva (`skydropxRateId` y `shippingRequiresDropoff`) se persisten en el checkout, así que
-encadenarlo solo retrasaría el aviso — o lo perdería si Skydropx falla. **Recarga el pedido en una
-instancia nueva (`Order.findByPk`), nunca con `order.reload()`**: el correo de confirmación se dispara en
-paralelo sobre esa misma instancia y también la recarga con otros `attributes`, y dos `reload()`
-concurrentes se pisan a media renderización. El **asunto es autocontenido a propósito** (`Venta #142 —
-$1,850.00 — 3 piezas`, con sufijo ` — GUÍA MANUAL` cuando `!skydropxRateId`): para que a 20–30 ventas
-diarias siga sin ser ruido tiene que poder leerse **sin abrirlo**. El cuerpo lleva tallas, cantidades,
-dirección con referencias y **el contacto completo del cliente** (a diferencia de `PublicOrderView`: son
-los datos con los que el dueño resuelve un problema de entrega), más los dos **bloques de acción** que son
-su razón de ser: `!skydropxRateId` ("se cobró con tarifa plana, genera la guía a mano") y
-`shippingRequiresDropoff` ("hay que llevarlo a la sucursal"). **Nunca `unitCost` ni margen**, aunque el
-correo sea del dueño: un correo no está autenticado, se reenvía y vive en una bandeja.
-
-**El resumen diario** (`startDailySalesDigest`/`stopDailySalesDigest` en `app.ts` junto a los otros crons,
-saltado bajo `NODE_ENV=test`, timer `unref()`ado) sale a las **`DAILY_DIGEST_HOUR` (8) hora de Celaya y
-cubre el día anterior COMPLETO**: un corte a las 21:00 sería más inmediato pero truncado, y las ventas de
-la noche no caerían en ningún resumen. Cada `DAILY_DIGEST_CHECK_INTERVAL_MINUTES` (15) `runDigestTick`
-mira la hora local y, pasada la hora, manda el resumen de ayer si no lo ha mandado. **La ventana es un día
-LOCAL, no UTC**, y de ahí `src/utils/storeDay.ts` — aparte de `src/utils/date.ts`, cuyo encabezado
-garantiza que todo lo suyo está fijado a UTC para estabilidad de agregación: un "ayer" en UTC cubriría de
-las 18:00 de antier a las 18:00 de ayer y **se comería la tarde-noche**, horario pico de compra. Offset
-fijo `-06:00`; `MEXICO_CITY_OFFSET` se comparte con `src/schemas/coupon.ts`. Ojo con `storeHour`: usa
-**`hourCycle: "h23"` y no `hour12: false`**, porque con este último varias versiones de ICU formatean la
-medianoche como `"24"` y el resumen saldría a medianoche.
-
-**Dos capas de idempotencia, y la segunda no es memoria**: `lastSentDay` vive en el módulo (misma decisión
-y limitación asumida que los mapas de los otros crons) y **no sobrevive a un redeploy**, así que la segunda
-es el **`idempotencyKey: daily-sales/<día>` de Resend**, cuya ventana de 24 h coincide con la cadencia
-diaria y cubre el redeploy *y* varias instancias sin columna nueva. Se marca `lastSentDay` **antes** de
-mandar (la función nunca lanza; reintentar en cada tick solo repetiría las consultas). **Se manda también
-los días sin ventas** — un correo que no llega es ambiguo (¿día flojo o cron muerto?) y sirve de latido.
-Tras una caída de varios días manda **solo el más reciente**, no un backfill. La ventana se mide sobre
-**`createdAt`** porque **no existe columna `paidAt`** y agregarla exigiría un backfill imposible de
-reconstruir, además de que el dashboard también agrupa por `createdAt`; consecuencia asumida: un pedido
-creado 11:55pm y pagado 00:05 cuenta en el día anterior. El resumen filtra **`paymentStatus: "paid"`** (ver
-**Dashboard**: filtrar por `status` le quitaría justo los pedidos despachados ese mismo día, lo peor que le
-puede pasar a un correo de reconciliación). Trae totales del día y tabla por pedido con su hora local, y
-una sección **"requieren acción"** con los pedidos sin guía (`skydropxShipmentId` en `null` o el centinela)
-o con dropoff. **No compara contra el día anterior** (se probó y se quitó: un correo con el propio día en
-cero junto a un día previo con ventas se leía como "perdiste dinero" en vez de "hoy no hubo ventas" — el
-resumen reporta exclusivamente el día que cubre). `runDigestTick(now?)` acepta el instante para situarse a
-una hora concreta en los tests sin timers falsos, y `resetDailySalesDigestState()` se exporta **solo para
-tests**.
-
-`escapeHtml` se extrajo de `orderConfirmation.ts` a **`src/services/email/templates/escapeHtml.ts`**: con
-tres plantillas, tres copias de una función de escape es lo que se desincroniza. **Sin migración, sin
-columnas y sin rutas nuevas** ⇒ sin `@openapi` y **sin fase en el roadmap del frontend**. WhatsApp/Twilio
-**descartado** en esta fase (proveedor, cuenta de negocio verificada y costo por mensaje para un problema
-que el correo resuelve a este volumen).
+Detalle completo en `docs/features/sale-notice.md`.
 
 ### Seed
 
@@ -634,262 +293,32 @@ a verified domain (manual DNS step, no code).
 
 ### Checkout
 
-`src/routes/public/order.routes.ts`, `src/controllers/order.controller.ts`,
-`src/services/orders.service.ts`. `POST /api/orders` is **public**.
+`POST /api/orders` `[público, orderRateLimiter]` (`src/services/orders.service.ts`) crea el pedido
+dentro de **una sola transacción**: descuento atómico de stock por `(productId, size)`, totales y
+envío **recalculados en el servidor** (el cliente nunca manda montos), precios **congelados** en
+cada `OrderItem`, canje del cupón y constancia de aceptación de términos (Fase 27). Incluye la
+**idempotencia de checkout** (Fase O.2) que devuelve la respuesta original ante un doble clic.
 
-Body `{ items: [{ productId, size, quantity }], customer, acceptedTerms, termsVersion,
-shippingCarrier?, quotationId?, rateId?, couponCode? }`, validated with `createOrderSchema` (zod,
-`src/schemas/checkout.ts`), capping `quantity` at
-99/item and `items` at 50/order (the real per-size limit is enforced by the atomic decrement → `409`).
-
-- `acceptedTerms`/`termsVersion` (Fase 27) are the **only required fields besides `items`/`customer`**.
-  `acceptedTerms` is `z.literal(true)`, not `z.boolean()`: an explicit `false` must be rejected exactly
-  like an absent field, because they state the same fact (no consent) — with `z.boolean()` a `false`
-  would validate and get persisted as a record asserting the opposite of what it means. `termsVersion`
-  is the ISO date of the legal documents the buyer was shown (`/^\d{4}-\d{2}-\d{2}$/`); only the client
-  knows which text it rendered, hence it travels in the body.
-  **This deliberately breaks compatibility**: any client posting without consent now gets a `400`. It's
-  what makes Términos §8 ("sin esa aceptación el proceso no avanza") true at the system level rather
-  than only for whoever uses the UI.
-- `couponCode` is a single code — never an amount — resolved and **redeemed atomically inside the same
-  transaction** that decrements stock; an invalid/expired/exhausted/already-used coupon rolls the whole
-  transaction back (no order, no stock decrement) and is **never silently ignored**, the deliberate
-  opposite of the catalog's "ignore any invalid param" rule.
-- `quotationId`/`rateId` (Fase 8.4) are optional but **both-or-neither** (a `.refine()` rejects one
-  without the other): present when the checkout quoted live via `POST /api/shipping/rates`, omitted when
-  it fell back to the flat rate (Skydropx down at quote time).
-
-`createOrder` does everything inside a single `sequelize.transaction`: it **aggregates** duplicate
-`(productId, size)` lines, processes them in deterministic `(productId, size)` order (deadlock
-avoidance), and per line runs an **atomic** `ProductSize.update({ stock: literal('stock - N') }, { where:
-{ …, stock: { [Op.gte]: N } } })` — if `affectedCount === 0` it throws `AppError(409)`, so concurrent
-buyers of the last unit get exactly one `201` and one `409`. Totals are **recomputed server-side** with
-the `cart` service (the client never sends amounts) and prices are **frozen** into each `OrderItem`
-(`unitOriginalPrice`/`unitSalePrice`/`unitCost`/`nameSnapshot`).
-
-**Shipping is authoritative too**: with `quotationId`/`rateId`, `createOrder` **re-consults the Skydropx
-quotation** (`getQuotationRate`, a single `GET`) and uses that rate's `total` as `shipping` (recomputing
-`total = subtotal − savings − couponDiscount + shipping`) — never a client-sent amount, same rule as the
-price recompute. It persists `skydropxQuotationId`/`skydropxRateId`, fills `shippingCarrier` from the
-rate's carrier, and stores `shippingRequiresDropoff` — an operational flag for the owner (no home pickup,
-must drop at the carrier's branch), **excluded from the public response** the same way `unitCost` is, and
-`null` on the flat-rate fallback. The re-consult runs **before** the transaction opens (deliberately
-deviating from the roadmap's "inside the transaction" wording): it's a network `GET` that touches no DB
-row, so keeping it out avoids holding `ProductSize` locks across an up-to-5s call. A rate no longer
-available → `409`; a network failure re-consulting → `503`. Without `quotationId`/`rateId` it uses
-`computeShipping` (flat rate).
-
-`unitCost` is frozen in the row but **excluded from the public response** (reloaded with
-`attributes: { exclude: ['unitCost'] }` on `items`). Orders are created `status: "pending"` /
-`paymentStatus: "unpaid"`; the response is `{ order, clientSecret }`.
-
-**Constancia de aceptación (Fase 27).** `Order.create` also writes three columns: `termsVersion`
-(from the body), `termsAcceptedAt` (`new Date()` — **server clock**, not the client's) and
-`termsAcceptedIp` (`req.ip`, reusing the existing `CheckoutContext.clientIp` seam built for coupon
-redemptions — the same "IP comes from the request and NEVER from the body" rule). The timestamp is
-the transaction's, not the checkbox click's (they can differ by minutes); that's the moment Términos
-§15 actually refers to. All three are **nullable with no backfill**: `null` means *"no hay
-constancia"* — an order predating the phase — and must never be rendered as "accepted".
-
-Three scope decisions worth not reverting blindly:
-
-1. **`termsAcceptedIp` is in the reload's `attributes.exclude` list.** That list is an *exclusion*
-   list, so every new `Order` column serializes itself into the public `201` until someone adds it.
-   Returning the buyer their own IP adds nothing. `termsAcceptedAt`/`termsVersion` do ride along —
-   they're the record of what the buyer just accepted. Covered by a test.
-2. **It never reaches `GET /api/orders/lookup/:token`.** That projection is an allow-list, so it
-   didn't leak on its own; it's left out because the link gets shared over WhatsApp and the record is
-   the merchant's evidence, not the buyer's tracking data.
-3. **It does not enter `checkoutFingerprint`.** `acceptedTerms` can't vary (the schema forces `true`),
-   and two attempts differing only in `termsVersion` — the documents were edited mid-session — must
-   replay the original order rather than double-charge. Since the fingerprint is an explicit allow-list
-   and not a hash of the raw body, adding payload fields changed no previously-issued fingerprint.
-
-**⚠️ `TRUST_PROXY` is a deployment requirement, not a detail.** `app.ts` only calls
-`app.set("trust proxy", …)` when that env var is set (deliberately opt-in — `true` on a directly
-exposed server lets anyone spoof `X-Forwarded-For`). Without it in production, `req.ip` is the
-proxy's and every order records the same address: worse than storing nothing, because it looks
-like evidence.
-
-The route is gated by `orderRateLimiter` (Fase H.3, `src/middlewares/rateLimit.ts`, 10 req/min per IP):
-every successful request creates a real Stripe PaymentIntent and an `Order` row, so a sustained flood
-would burn Stripe's account-level rate limit and bloat the orders table even though `pendingOrderSweeper`
-eventually releases the unpaid ones. Only mounted on the public `POST /`, not on `adminOrder.routes.ts`
-(already behind `requireAuth`).
+Detalle completo en `docs/features/checkout.md`.
 
 #### Public order lookup (Fase O.4)
 
-`GET /api/orders/lookup/:token` `[público]` → `lookupOrder` → `orders.service.getOrderByPublicToken`. Lets
-the buyer check status and tracking without an account. There are no customer accounts and no other public
-read of orders, so until this phase the only thing a buyer had after paying was the confirmation email —
-deleted or spam-filtered, every "¿ya salió mi pedido?" became manual WhatsApp work.
+`GET /api/orders/lookup/:token` `[público, orderLookupRateLimiter]` deja al comprador ver estado y
+guía sin cuenta, usando el UUID opaco `Order.publicToken` como única credencial (nunca `id + email`,
+que sería enumerable). La respuesta es una **proyección explícita** (`PublicOrderView`), no la fila
+con exclusiones. Incluye la rotación de token (Fase O.6).
 
-The credential is **`Order.publicToken`**, an opaque UUID (unique index, `randomUUID()` generated inside
-`createOrder`) that travels in the confirmation email **twice** — as the link behind the button
-(`/pedido/<token>`, built by `publicOrderUrl` in `payment.service.ts` from `FRONTEND_URL`) and as the
-**visible, copy-ready code** next to it (see *Emails / Resend*), because the `/pedido` page asks for the
-code and a token buried in an `href` is unreachable for most people; `publicOrderUrl` and
-`publicOrderLookupUrl` are the only URLs this backend builds toward the front — **and** in the checkout's
-`201` (the order is the buyer's, so the front can send them to the
-tracking page without waiting for the email). Deliberately **not** `id + email`: ids are sequential and an
-email is guessable, so that pair would be enumerable even behind a rate limit.
-
-The response is an **explicit projection** (`PublicOrderView`), not the row with exclusions — built field
-by field with the `SELECT` narrowed to match, so a new `Order` column doesn't leak by someone forgetting an
-exclusion list; it takes a deliberate edit to appear. **Out:** `unitCost`, `paymentIntentId`, `refundId`,
-`labelUrl` (the printable label is the owner's — it carries the shipper's details), the Skydropx ids,
-`shippingRequiresDropoff`, `couponId`, the token itself, and `customerEmail`/`customerPhone` (a tracking
-page doesn't need them and the link gets forwarded over WhatsApp easily). **In:** status, `paymentStatus`,
-tracking, frozen item prices, totals, `couponCode`/`couponDiscount`, the shipping address, and
-`refundedAt` — a cancelled order has to say *when* the money went back.
-
-A **malformed token is rejected before touching the DB**: the column is `uuid`, so
-`WHERE "publicToken" = 'abc'` makes Postgres throw a syntax error that `errorHandler` would degrade to a
-**500** (the same problem `parseId` solves for numeric `:id`s). With the format check, missing / tampered /
-malformed all return the **same 404 with the same message**. Gated by `orderLookupRateLimiter` (30 req/min
-per IP) — deliberately loose, since brute-forcing a UUID is infeasible either way and the person reloading
-that page is a buyer waiting on their order. The column ships with
-`20260728130000-orders-public-token.ts`, which backfills existing rows with `gen_random_uuid()` (core since
-Postgres 13) **before** creating the unique index, and is declared in `Order.init()`'s `indexes` because
-`tests/setup/db.ts` builds the schema with `sync({ force: true })`.
-
-**Token rotation (Fase O.6 — `POST /api/admin/orders/:id/rotate-token` `[auth]` →
-`orders.service.rotatePublicToken`)**: the Aviso de Privacidad promises "si crees que tu código quedó
-expuesto, escríbenos y lo invalidamos"; before this route the only way to honor it was a manual SQL
-`UPDATE` against production. Setting `publicToken` to `NULL` was rejected as the fix — it also kills the
-legitimate buyer's own tracking access, not just the leaked link — so this **rotates** it instead:
-generates a fresh `randomUUID()` and persists it, and the old token simply stops matching in
-`getOrderByPublicToken`'s `WHERE publicToken = token` (no blacklist needed). It works **regardless of
-`order.status`** — unlike `cancelOrderByAdmin`/`updateOrderStatusByAdmin`, there's no state guard here,
-since invalidating an exposed link has to work no matter what state the order is in. No transaction/lock:
-it's a single-column write with no multi-row invariant, so a concurrent double-rotation is harmless
-(last write wins, same as `updateOrderStatusByAdmin`'s loose field updates). No body, no `reason` field,
-no audit of who requested it — the route is deliberately minimal.
-
-The buyer is emailed the new code via `sendTokenRotatedEmail` (`payment.service.ts`), which reuses
-`orderConfirmationTemplate` with a new `codeRotated` flag that swaps only the intro copy (everything
-else — items, totals, address, the tracking-page block — renders unchanged, same as the confirmation/
-shipped split). Its subject ("Actualizamos tu código de rastreo…") is deliberately distinct from
-confirmation/shipped so it doesn't read as a duplicate. Its `idempotencyKey`
-(`` `order-token-rotated/${order.id}/${order.publicToken}` ``) deliberately differs from the fixed,
-once-ever keys `order-confirmation/${id}`/`order-shipped/${id}`: rotation is repeatable by design, so a
-fixed key would make Resend silently dedupe every rotation after the first. Including the (fresh) token
-itself gives each rotation a unique key for free, no counter/timestamp needed.
-
-#### Checkout idempotency (Fase O.2)
-
-The controller calls `orders.service.placeOrder(input, idempotencyKey?)`, which wraps the whole checkout
-(`createOrder` → `createPaymentIntentForOrder` → persist `paymentIntentId`) behind a **60 s dedup window**.
-Without it a double click created a second `Order`, a second real PaymentIntent and **decremented stock
-again**, and that phantom inventory stayed locked until `pendingOrderSweeper` reached the order
-(`PENDING_ORDER_TTL_MINUTES`, 30) — 30–40 minutes of unsellable stock at peak. `orderRateLimiter` doesn't
-cover it: two clicks are far under 10 req/min.
-
-A replay **returns the original response** (same `order`, same `clientSecret`, same `201`) instead of the
-`409` the bulk import returns for its own duplicate guard — the deliberate difference is that the checkout
-customer is waiting to pay, and a `409` would leave them unable to buy *and* holding reserved stock.
-
-Two key layers: an explicit `Idempotency-Key` header (optional, read by `readIdempotencyKey` — trimmed,
-empty = absent, >200 chars = `400`), and, when absent, an automatic fingerprint of cart + customer
-(`checkoutFingerprint`: lines aggregated by `(productId, size)` and sorted like `createOrder` does, so the
-same cart in a different order is recognized; customer fields as a **positional array**, not the object, so
-it doesn't depend on zod's key order; `quotationId`/`rateId`/`couponCode` included). Reusing an explicit key
-with a **different** cart is a client bug, not a replay → `409`, so a buyer is never handed an order that
-isn't theirs.
-
-What's cached is the **in-flight promise**, not the result: the real double-click arrives before the first
-request finishes, and both must await the same checkout — the `get`/`set` pair has no `await` between them,
-so two concurrent requests can't both claim the key. A failed attempt **releases** the key **only while
-nothing was persisted** (most failures — `409` stock, `503` quote, `400` validation — happen before any
-write, and the buyer must be able to fix and retry immediately); `executeCheckout` flips a `persisted` flag
-right after `createOrder` commits, and past that point the key is **kept** — the `Order` row and its stock
-decrement already exist, so releasing it would turn the retry (the likeliest one of all) into exactly the
-duplicate order + 30–40 min of locked stock this phase exists to prevent. The release goes through
-`IdempotencyStore.deleteIf` (identity-checked), never a bare `delete`: an attempt can outlive the 60 s TTL
-(Stripe's SDK default timeout is 80 s), and by then its entry may belong to another request.
-
-A replay is flagged with an **`Idempotency-Replayed: true` response header** — the body is byte-identical
-to the original by design, so without it the client can't tell "your order was created" from "you already
-had this one"; it's listed in the CORS `exposedHeaders` in `app.ts` or the browser wouldn't let the front
-read it.
-
-The store is `IdempotencyStore` from `src/utils/idempotency.ts`, **in memory and deliberately not
-persisted** (same decision and accepted limitation as `assertNotDuplicateCommit` and
-`pendingOrderSweeper`'s failure counter: it protects against the accident, not the abuse —
-`orderRateLimiter` is the hard barrier). `resetCheckoutIdempotency()` is exported **only for tests**.
+Detalle completo en `docs/features/order-lookup.md`.
 
 ### Payments / Stripe (Fase 8)
 
-`src/config/stripe.ts` (its own `dotenv.config()`, since imports run before `app.ts`'s) **hard-requires**
-`STRIPE_SECRET_KEY` **and** `STRIPE_WEBHOOK_SECRET` (throws at startup — no inert fallback) and exports the
-shared `stripe` client, `STRIPE_CURRENCY` (default `"mxn"`) and the sweeper knobs
-`PENDING_ORDER_TTL_MINUTES` (30) / `PENDING_ORDER_SWEEP_INTERVAL_MINUTES` (10). Keys are **test/sandbox**
-for now. `Order` carries nullable `paymentIntentId` + `paymentStatus`
-(`unpaid|processing|paid|failed|refunded`).
+`src/config/stripe.ts` (hard-require de `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET`),
+`src/services/payment.service.ts` y `POST /api/webhooks/stripe` montado con `express.raw` **antes**
+del `express.json()` global. **La transición a pagado es un único `UPDATE` condicional** (`where: {
+id, status:"pending", paymentStatus: ne "paid" }`) y el correo, el aviso al dueño y la guía solo se
+disparan con `affectedCount === 1`. Incluye `releaseOrderStock` y `pendingOrderSweeper`.
 
-`src/services/payment.service.ts`:
-- `createPaymentIntentForOrder(order)` creates a **real** PaymentIntent
-  (`amount: Math.round(order.total * 100)`, `currency`, `metadata.orderId`,
-  `automatic_payment_methods`) and returns `{ clientSecret, paymentIntentId }`; the checkout persists that
-  id (+ `paymentStatus: "processing"`) and returns the `clientSecret`.
-- `markOrderPaidFromWebhook` (→ `paid`) and `markOrderPaymentFailed` (→ `paymentStatus: "failed"`, keeps
-  `status: "pending"` so a transient decline can be retried on the same PaymentIntent) are **idempotent**
-  and **tolerant of a missing order** (log + return, never `throw`, so a verified event always 200s and
-  Stripe doesn't retry in a loop).
-
-**The paid transition is one atomic conditional UPDATE** — `Order.update({ status:"paid",
-paymentStatus:"paid" }, { where: { id, status:"pending", paymentStatus: { [Op.ne]:"paid" } } })` — and the
-confirmation email, the owner's sale notification and the shipment creation only fire on
-`affectedCount === 1`. This is the single funnel every order passes through (both the
-`payment_intent.succeeded` webhook and `pendingOrderSweeper`'s recovery path call it), and the guard
-**serializes at the DB level** against concurrent webhook + sweeper runs. A plain in-memory check
-(`if (order.paymentStatus === "paid")`) would **not**: two callers could both read `processing` before
-either writes, and both would send.
-
-The `status: "pending"` half of the guard (Fase H.5 fix) exists because this transition is only ever valid
-`pending → paid`: without it, a late/duplicate `payment_intent.succeeded` could "resurrect" an order an
-admin already cancelled (stock already restocked, possibly resold) back to `paid`, re-sending the email and
-creating a Skydropx label for a closed order — the exact failure `cancelOrderByAdmin`'s best-effort
-`stripe.paymentIntents.cancel` can trigger when the PaymentIntent had already succeeded (that call fails
-silently, logged as a warning, and the order is left `cancelled` while Stripe already captured the charge).
-When the guard's `affected === 0` **and** the order is `cancelled`, `markOrderPaidFromWebhook` logs an
-error, reports to Sentry and calls `sendAlertEmail` — a payment captured against a cancelled order needs a
-human to decide whether a manual refund is owed.
-
-The confirmation send is a thin `sendOrderConfirmationEmail(order)` over a shared `sendOrderEmail(order, {
-subject, idempotencyKey, tracking? })` (Fase 8.6 refactor) that `order.reload({ include: items excluding
-unitCost })` then templates + `sendEmail`, wrapped in its own `try/catch` that only logs; the same helper
-backs `sendShipmentEmail`. Resend's `idempotencyKey: order-confirmation/${order.id}` is a second 24 h
-safety net. It is dispatched **fire-and-forget** (`void`, **not** awaited): if Resend were slow, Stripe
-could exceed its response timeout and retry the event in a loop.
-
-`POST /api/webhooks/stripe` (`webhook.routes.ts` → `stripeWebhook`) is mounted with
-`express.raw({ type: "application/json" })` **before** the global `express.json()` (so `req.body` is the raw
-`Buffer` `stripe.webhooks.constructEvent` needs to verify the `Stripe-Signature` header). A
-missing/invalid signature returns **400** (Stripe won't count it as delivered); any verified event returns
-`{ received: true }` (200) even when unhandled, to avoid retry loops. Handled:
-`payment_intent.succeeded` → `markOrderPaidFromWebhook`; `payment_intent.payment_failed` →
-`markOrderPaymentFailed`; `payment_intent.canceled` → `releaseOrderStock`; `charge.dispute.created` /
-`.updated` / `.closed` → `applyDisputeFromWebhook` (Fase 28, below).
-
-**`orders.service.releaseOrderStock(orderId)`** is the exact inverse of the checkout's atomic decrement: in
-a transaction it locks the `Order` row **alone** (`FOR UPDATE` — *not* with the `items` include, since
-Postgres rejects `FOR UPDATE` on the nullable side of the LEFT JOIN), loads its `OrderItem`s separately,
-`ProductSize.update({ stock: literal('stock + N') })` per line, calls `releaseCouponForOrder`, and sets
-`status:"cancelled"` / `paymentStatus:"failed"`. It's **idempotent** (only acts while
-`status === "pending"`) and **never restocks a paid order**.
-
-**`src/services/pendingOrderSweeper.ts`** (started after `connectDB()`, skipped under `NODE_ENV=test`,
-timer `unref()`ed) runs every `PENDING_ORDER_SWEEP_INTERVAL_MINUTES`, finds `pending` orders older than
-`PENDING_ORDER_TTL_MINUTES` and **reconciles each against Stripe** (`retrieve`): if the PaymentIntent is
-`succeeded` it marks the order `paid` (recovers a missed webhook), otherwise it cancels the PaymentIntent
-and calls `releaseOrderStock`. An order **without** a `paymentIntentId` skips Stripe and goes straight to
-`releaseOrderStock`: the sweep deliberately does **not** filter on `paymentIntentId != null` (it did until
-Fase O.2), because a `pending` order can lack one when Stripe failed *after* `createOrder` had already
-committed and decremented stock — and those are precisely the orders nothing else will ever touch, since no
-webhook can arrive for a PaymentIntent that doesn't exist, so their stock stayed reserved forever.
-Restocking them is safe because the client never received a `clientSecret`. `sweepOnce` is exported for
-tests.
+Detalle completo en `docs/features/stripe-payments.md`.
 
 ### Disputas / contracargos (Fase 28)
 
@@ -978,7 +407,7 @@ sandbox algunos servicios literalmente llamados "Sin recolección" venían con `
 se prefiere sobre-avisar (el costo de un falso negativo es que el paquete nunca sale). Es un dato
 **operativo para el dueño**, no para el comprador.
 
-**Empaque y validación (Fase N.6 — ver *Empaque multi-caja* abajo).** `src/services/packing.ts`'s
+**Empaque y validación (Fase N.6 — ver `docs/features/multi-box-packing.md`).** `src/services/packing.ts`'s
 `packOrder` acomoda el pedido en las cajas reales de la tienda y `buildParcels` devuelve un bulto por
 caja; la cotización manda ese arreglo completo como `parcels`. `shipping.controller.ts` valida, antes de
 cotizar, que cada producto tenga `weightKg`/`lengthCm`/`widthCm`/`heightCm` > 0 (mismo invariante que
@@ -990,69 +419,13 @@ plana**; lo mismo pasa si el acomodo pasa de `MAX_PARCELS_QUOTED` (10) bultos.
 
 #### Empaque multi-caja (Fase N.6)
 
-`src/services/packing.ts` (`packOrder`/`buildParcels`/`DEFAULT_CARTONS`), `cart.computeShipping`,
-`Order.packageCount`.
+`src/services/packing.ts` acomoda el pedido en las cajas reales de la tienda (`DEFAULT_CARTONS`,
+**el único lugar que editar** cuando el dueño mida las suyas) con un first-fit-decreasing por
+volumen más una pasada de downgrade. **La cotización en vivo y la tarifa plana salen del mismo
+`packOrder`**, así que caer al respaldo cambia el precio del bulto y nunca cuántos bultos son;
+`Order.packageCount` congela ese conteo para la guía.
 
-Hasta esta fase el envío se calculaba asumiendo **un solo bulto**, por dos caminos y los dos mal.
-`buildParcel` armaba **una caja apilada** (peso y alto sumados por unidad, largo/ancho al máximo): el
-volumen salía bien, pero producía bultos que la tienda nunca arma —3 botas + 1 sombrero daban 45×45×**80
-cm**— y como la paquetería cobra **por bulto**, la factura real llegaba más cara que lo cotizado. Peor:
-`computeShipping` era un `Math.max` por tipo que **ignoraba la cantidad**, así que 3 botas + 1 sombrero
-cobraba $160, lo mismo que una sola bota, y 50 piezas de ropa cobraban $100. Ese camino no es raro —se usa
-cada vez que Skydropx está caído, no devuelve tarifas a tiempo, o un producto trae una dimensión en 0— así
-que cada caja extra salía de la utilidad del dueño. Y la guía declaraba `packages: [1]` fijo.
-
-**`DEFAULT_CARTONS` es el catálogo de cajas de la tienda** (chica 40×35×25/8 kg, mediana 55×40×35/15 kg,
-grande 60×45×50/25 kg, con su tara) y es **el único lugar que editar** cuando el dueño mida las suyas: la
-cotización, la guía y la tarifa plana se mueven todas con él. El acomodo es un *first-fit-decreasing* por
-volumen contra la caja grande **más una pasada de downgrade** que reasigna cada caja cerrada al cartón más
-chico que la aguante — sin esa segunda pasada, un pedido de una bota se cotizaría con la caja maestra y se
-sobrecobraría el envío de **casi todas las ventas**. No es empaquetado 3D exacto (NP-difícil, y aquí no
-paga): aproxima por volumen con `FILL_FACTOR` (0.8 — el 20% restante son huecos de aire, relleno y cajas
-que no teselan), exige que cada pieza quepa **dimensionalmente** (con las medidas ordenadas, o sea
-girándola) y respeta el tope de peso. Puede abrir una caja de más; nunca mete más de lo que cabe.
-`FILL_FACTOR` es literalmente la constante que decide entre subcotizar y sobrecotizar.
-
-Los casos borde están todos sesgados a **no subcotizar**: una pieza más grande que cualquier cartón viaja
-sola con sus propias medidas (`carton: null`) en vez de tumbar la cotización, y una pieza con alguna
-dimensión ≤ 0 (fila anterior a que `productSchema` exigiera `.positive()`) **no comparte caja con nada** —
-no se puede afirmar que quepa, así que se cobra un bulto completo.
-
-**`computeShipping` y la cotización en vivo salen del MISMO `packOrder`**, y eso es el punto: caer al
-respaldo cambia el precio del bulto, nunca cuántos bultos son. El respaldo suma, por caja, la tarifa del
-tipo más caro que esa caja lleva (los montos `SHIPPING_BY_TYPE` no cambiaron). Por eso `CartLineItem` ganó
-las cuatro dimensiones — los tres llamadores (`createOrder`, `shipping.controller`, `previewCoupon`) ya
-tenían el `Product` cargado, así que no hay consulta nueva.
-
-**`isUsableRate` descarta los rates `multishipment`.** Skydropx ofrece tres formas de convertir una
-cotización en envío (`shipment_creation_type`): `single`, `multipackage` (una guía con varios bultos) y
-`multishipment` (**una guía por bulto**). Este modelo guarda un solo
-`skydropxShipmentId`/`trackingNumber`/`labelUrl` por pedido y el webhook localiza la orden por
-`relationships.shipment.data.id`, así que con un `multishipment` solo una de las N guías quedaría visible y
-las demás serían dinero cobrado que nadie puede rastrear ni entregar. Un rate **sin** el campo sigue siendo
-utilizable (el sandbox no siempre lo manda; leer la ausencia como `multishipment` apagaría la cotización en
-vivo entera).
-
-**`Order.packageCount`** (nullable, migración `20260804120000-orders-package-count.ts`) congela cuántos
-bultos ampara la tarifa cobrada, y `createShipment` declara ese número de `packages` numerados. Tiene que
-ser una columna y no un recálculo: la guía se genera minutos después y en otro proceso, donde las
-dimensiones del catálogo pudieron cambiar y `GET /quotations/{id}` **no devuelve los `parcels` cotizados**.
-`null` = tarifa plana o pedido previo a la fase, y el generador lo lee como 1 — que es exactamente lo que
-esos pedidos declararon. La rama de re-cotización de `createShipmentForOrder` rehace el acomodo con las
-dimensiones actuales y **persiste el conteo nuevo** (`order.shipping`/`order.total` siguen sin tocarse: ya
-se cobraron). El `packageCount` que viaja en `NormalizedShippingRate` sale de `parcels.length`, no de la
-respuesta de Skydropx, y `getQuotationRate` lo recupera del mismo `Map` en memoria donde ya recordaba la
-dirección cotizada (mismo TTL de 24 h; si el proceso se reinició esa función ya falla cerrado, así que
-siempre que hay rate hay conteo).
-
-`src/services/productAvailability.ts`'s `assertProductAvailable(product)` es la guardia compartida de
-"producto disponible" (existe, `visible`, no soft-deleted) entre `createOrder`, `getShippingRates` y
-`/api/coupons/validate` — todos deben mostrar el mismo mensaje accionable.
-
-`productSchema`/`productUpdateSchema` exigen las cuatro dimensiones **> 0** (`.positive()`) desde Fase 8.2:
-con cotización en vivo, un producto en `0` no solo generaría una guía mala, tumbaría la cotización del
-carrito completo. `ProductForm.tsx` valida lo mismo para que un producto legado en `0` se marque como
-inválido en el formulario en vez de fallar con un 400 desde un campo no relacionado.
+Detalle completo en `docs/features/multi-box-packing.md`.
 
 #### Guía automática al pagar (Fase 8.5)
 
@@ -1123,94 +496,13 @@ no se puede, marca la fila con `unreconciled:<id real>` (best-effort) y alerta c
 
 #### Reintento de guía (Fase O.3)
 
-`POST /api/admin/orders/:id/shipment/retry` `[auth]` (`adminRetryShipment` →
-`payment.service.retryShipmentForOrder(id)`) más el cron gemelo `src/services/shipmentRetrySweeper.ts`.
+`POST /api/admin/orders/:id/shipment/retry` `[auth]` más el cron gemelo
+`src/services/shipmentRetrySweeper.ts`, para el pedido pagado que quedó sin guía (ningún webhook
+puede llegar por una guía que nunca se creó). La pieza central son los **valores especiales de
+`skydropxShipmentId`** — `"creating"` · `unreconciled:<id real>` · `unreconciled:desconocido` —, que
+separan "se está creando" de "Skydropx ya la cobró" y evitan pagar una segunda guía.
 
-La guía se genera en **una sola** llamada fire-and-forget al confirmarse el pago; si falla (Skydropx caído,
-saldo agotado, o el proceso muere a media creación) el pedido queda pagado y sin guía **para siempre** —
-ningún webhook puede llegar por una guía que nunca se creó. Además cerraba mal el caso del **centinela
-huérfano**: si el proceso moría entre el `UPDATE` que escribe `"creating"` y el `POST /shipments`, ese valor
-quedaba en la fila y cualquier intento futuro se retiraba.
-
-**Los valores especiales de `skydropxShipmentId`** son la pieza central, y separarlos fue lo que hizo seguro
-el reintento:
-- `"creating"` (`SHIPMENT_CREATION_SENTINEL`) = **solo** "alguien está creando la guía ahora", por eso
-  liberarlo por antigüedad es seguro.
-- `unreconciled:<id real>` (`unreconciledShipmentId()` lo desempaqueta) = "Skydropx ya la creó y **la
-  cobró**, solo no se pudo guardar el id".
-- `unreconciled:desconocido` (`UNCERTAIN_SHIPMENT_MARKER`) = "pudo haberla creado y cobrado, ni su id
-  sabemos".
-
-Antes los tres eran el mismo `"creating"`, así que un reintento por antigüedad habría pagado una **segunda**
-guía en el peor caso. Ni el endpoint ni el barrido tocan una fila `unreconciled:` (el `WHERE` de
-`pendingShipmentWhere` solo acepta `null` o el centinela exacto); el webhook de esa guía, si llega con un id
-real, la sana sola.
-
-**El caso incierto** (`SkydropxShipmentUncertainError`) es el que más cuesta si se trata mal: cada `fetch`
-sale con `AbortSignal.timeout` de 5 s, así que un `POST /shipments` que Skydropx **sí procesó y cobró**
-puede terminar en excepción. `createShipment` clasifica su propio fallo antes de propagarlo: un `4xx` (salvo
-408/429) es un rechazo explícito —no creó ni cobró nada, seguro reintentar— mientras que un timeout, un
-socket cortado o un `5xx` son **inciertos**. Para que la clasificación sea fiable, `createShipment` resuelve
-el token OAuth **fuera** del `try` (un fallo de token nunca es incierto: el POST jamás salió). Un fallo
-incierto marca la orden `unreconciled:desconocido` en vez de liberar el centinela —liberarlo es exactamente
-lo que pagaría la segunda guía— y alerta incondicionalmente con severidad `fatal`. El webhook **no** puede
-sanar este caso solo (no hay id que empatar), así que es el único que el dueño puede desbloquear con
-`force`.
-
-**Endpoint** (body opcional `{ force? }`, `retryShipmentSchema`): rechaza con `409` todo lo que no sea
-"falta la guía y se puede generar" — guía real ya presente (con su id en el mensaje), `unreconciled:` (con
-el id a buscar en el panel de Skydropx), `unreconciled:desconocido` (pidiendo verificar antes de forzar),
-centinela reciente ("se está generando"), pedido `pending` o `cancelled`, pedido ya `shipped`/`delivered`
-(ese es precisamente el camino del dueño que generó la guía a mano y la capturó con el `PATCH /status` de
-la Fase O.1: sin este guard el botón cobraría una segunda guía por un pedido que ya salió), y pedido con
-**tarifa plana de respaldo** (sin `skydropxRateId` no hay tarifa que convertir en guía). `force: true`
-**solo** desbloquea `unreconciled:desconocido`, y significa "ya revisé el panel de Skydropx y no existe
-ninguna guía". A diferencia del camino automático **espera el resultado** (`createShipmentForOrder` nunca
-lanza, así que `attemptShipment` relee la fila y devuelve un `ShipmentAttempt` tipado — `created` ·
-`in-progress` · `unreconciled` · `failed`) y responde `502` si Skydropx vuelve a fallar: el dueño está
-mirando la respuesta. Dos reintentos concurrentes los serializa el mismo centinela.
-
-**Liberación del huérfano**: `releaseOrphanSentinel` hace `UPDATE ... SET skydropxShipmentId = null WHERE
-skydropxShipmentId = 'creating' AND (shipmentClaimedAt IS NULL OR shipmentClaimedAt < now −
-SHIPMENT_RETRY_DELAY_MINUTES)` (15). La antigüedad se mide con **`orders.shipmentClaimedAt`**, columna
-propia poblada al reclamar el centinela (migración `20260728120000-orders-shipment-claimed-at.ts`), y no con
-`updatedAt`: cualquier otra escritura sobre el pedido lo bumpea, así que un pedido realmente atorado en
-`"creating"` reiniciaba su reloj cada vez que el dueño lo tocaba desde el panel. Las filas anteriores a la
-columna quedan en `NULL` y cuentan como huérfanas de inmediato, que es lo correcto. Un intento normal se
-resuelve o falla en segundos, así que 15 min nunca le quita el turno a una creación real en vuelo, y el
-`WHERE` condicional hace que dos liberaciones concurrentes no puedan ganar las dos. Esa misma columna acota
-el `pendingCreation` del webhook: solo un centinela **reciente** justifica pedir reintento con un `503`.
-
-**Todas las escrituras de este flujo van condicionadas al centinela**, incluida `persistShipmentId`: sin esa
-condición, una creación lenta cuyo centinela ya se liberó podía pisar en su intento 2 o 3 lo que un intento
-más nuevo hubiera escrito (otro id real, o un marcador `unreconciled:`), borrando justo el dato que un
-humano necesita para reconciliar. Cuando el `UPDATE` no afecta ninguna fila (`claim-lost`) la guía **ya está
-cobrada** y no se toca nada: se alerta `fatal` para que alguien revise si el pedido terminó con dos guías.
-
-**Barrido automático** (`shipmentRetrySweeper.ts`, arrancado/detenido en `app.ts`, saltado bajo
-`NODE_ENV=test`, timer `unref()`ado): cada `SHIPMENT_RETRY_SWEEP_INTERVAL_MINUTES` (10) toma hasta 20
-pedidos `paid` **con** `skydropxQuotationId` **y** `skydropxRateId` (los dos, porque
-`createShipmentForOrder` exige ambos y se retira sin llamar a Skydropx si falta cualquiera — filtrar solo por
-el rate metía en cada ciclo pedidos que gastaban sus tres intentos y disparaban la alerta sin una sola
-llamada) creados en las últimas **24h** (`MAX_ORDER_AGE_HOURS`: pasado ese punto el fallo no es transitorio y
-hace falta una decisión humana) que sigan sin guía pasados los 15 min, y reintenta **secuencialmente** (el
-límite de 2 req/s es de la cuenta entera y lo comparten los checkouts en vivo). Solo el desenlace `failed`
-gasta intento: `in-progress` (otra llamada tiene el centinela) no es un fallo, y `unreconciled` ya alertó por
-su cuenta. Tras `MAX_ATTEMPTS_PER_ORDER` (3) fallos manda **una** alerta y deja de intentar; esos pedidos se
-excluyen **en la consulta** (`id NOT IN`) y no con un `continue`, porque si no seguirían ocupando lugares del
-`LIMIT` y —con el orden `createdAt ASC`— veinte pedidos atorados al frente dejarían sin turno a todos los más
-nuevos. El contador es un `Map` en memoria con el momento del último intento, deliberadamente **no
-persistido**; caduca **por tiempo** (`MAX_ORDER_AGE_HOURS`) y no por "no apareció en este ciclo", que era lo
-que hacía que un pedido rotando dentro y fuera de la página del `LIMIT` reiniciara su cuenta y volviera a
-alertar. `sweepShipmentsOnce` y `resetShipmentRetryAttempts()` se exportan para los tests.
-
-Por eso `createShipmentForOrder` acepta `{ notifyOnFailure }` (default `true`): el camino automático sigue
-alertando al instante, mientras que el reintento manual y el barrido lo apagan porque ya tienen canal propio
-— si no, cada ciclo mandaría un correo. Los casos `unreconciled:` alertan **siempre**, ignorando la bandera.
-
-**Riesgo residual asumido:** si la BD está caída lo suficiente para que también falle el marcado
-`unreconciled:`, la fila queda en `"creating"` y a los 15 min el barrido podría pagar una segunda guía. Por
-eso la alerta de ese caso es incondicional y `fatal`.
+Detalle completo en `docs/features/shipment-retry.md`.
 
 ### Dashboard
 
@@ -1269,8 +561,8 @@ previous-window counterpart (and therefore the trend) comes for free; no query c
 one guía per order, exactly like the `unitCost` of each piece — not an operating expense. Since
 `GANANCIA OPERATIVA = BRUTA − GASTOS`, routing it through both would subtract it **twice**. The same
 amount is exposed **read-only** in `/api/admin/expenses/summary` and `/history` as a *derived* line so
-the owner can see it in the expenses panel without the two numbers contradicting each other (see **Gastos
-y suscripciones**, `DerivedShippingCost`). ⚠️ The corollary the owner must respect: boxes and packing
+the owner can see it in the expenses panel without the two numbers contradicting each other (see
+`docs/features/expenses.md`, `DerivedShippingCost`). ⚠️ The corollary the owner must respect: boxes and packing
 material **do** get captured as a `paqueteria` `Expense`; **the guías don't** — that's the double-count.
 
 The source is **`Order.shipping`** (no new column, no migration): with a live Skydropx quote it *is* the
@@ -1358,67 +650,13 @@ is the first import of `payment.service` from `orders.service` (no cycle: `payme
 
 ### Reports
 
-`src/routes/admin/adminReports.routes.ts`, `src/controllers/reports.controller.ts`,
-`src/services/reports.service.ts`; mounted at `/api/admin/reports` (`router.use(requireAuth)`).
+`/api/admin/reports/monthly` y `/replenishment` `[auth]`, calculados **en memoria** desde un único
+fetch compartido y cacheado (`loadReportData`, TTL 60 s) de pedidos `paymentStatus: "paid"` + todos
+los productos. El mensual agrupa unidades por `(mes UTC, productId)` sin huecos y valora al precio
+**actual**; el de resurtido alimenta `computeForecast` (`src/services/forecast.ts`) con meses
+completos por producto.
 
-Both endpoints are computed **in memory** from a single shared fetch (`loadReportData`) of
-`paymentStatus: "paid"` orders (with `items`, `attributes` trimmed to `id`/`createdAt` on `Order` and
-`productId`/`quantity` on `items` — the only fields the aggregation reads) + **all** products (with
-`productSizes` via the shared `productSizesInclude` from `src/utils/productSizesInclude.ts` — also reused
-by `dashboard.service.ts` and `product.controller.ts` — so the `Product.stock` virtual resolves). Since
-neither report can be time-windowed the way the dashboard's 180-day queries are (they cover full history by
-design), `loadReportData` caches its in-flight/settled promise for `REPORT_CACHE_TTL_MS` (60s); a failed
-fetch clears the cache immediately instead of repeating the error until the TTL expires. This keeps a
-single admin page load hitting both `/monthly` and `/replenishment` from scanning the full order history
-twice. It deliberately includes soft-deleted (discontinued) products, since a product with sales history is
-soft-deleted precisely because an `OrderItem` references it — excluding them would erase past sales.
-
-**`GET /api/admin/reports/monthly`** returns `MonthlyReport[]`: units sold grouped by
-`(UTC month, productId)` from `OrderItem.quantity`, then for **every** month in `[earliest paid-order month
-… current UTC month]` (inclusive, no gaps — empty months emitted as `$0`) it builds `byProduct`.
-`monthRange` clamps its start to `to` if `from` is somehow after `to` (clock drift, corrupt/future
-`createdAt`), so it returns at least the current month instead of `[]`. Each month's `byProduct` includes
-**every live product** (`unitsSold` 0 if unsold) **plus any discontinued product that actually sold that
-month** (discontinued ones don't appear as $0 rows in months without activity, so they never clutter recent
-months); `revenue = unitsSold × Product.salePrice`, **current** price not the frozen `OrderItem` price;
-sorted desc by `unitsSold`. `byCategory` (grouped by `type`, `label` from a plural map replicating
-`frontend/lib/categories.ts`, sorted desc by revenue) is derived from that `byProduct`, so discontinued
-sales flow into their category too. The month equal to the current UTC month is flagged `partial: true`
-(`isoMonth`/`formatMonthLabel`/`utcMonthStart` live in the shared `src/utils/date.ts` alongside the
-day-granularity `isoDay`/`formatShortDate`/`utcDayStart` — both **UTC-pinned** for the same reason;
-`formatMonthLabel` turns `"enero de 2026"` into the front's `"Enero 2026"`).
-
-**`GET /api/admin/reports/replenishment`** returns `ReplenishmentRow[]` computed on-the-fly (never
-persisted): per **live** product (discontinued filtered out — you don't restock a soft-deleted product) it
-feeds a monthly `unitsSold` series into `computeForecast` (`src/services/forecast.ts`, the Fase 0 port).
-The series uses **complete months only** (`monthlyReports.filter(r => !r.partial)`) — except when there are
-**zero** complete months yet (the store's first calendar month), where that rule would leave every series
-permanently empty and hide a real day-one stockout for up to a month; in that one case the current partial
-month is used as a single low-confidence data point. The month range starts at the **whole store's**
-earliest paid order, so a recently-added product would carry a tail of leading `$0` months from before it
-existed; those are **trimmed** per product (`rawSeries.slice(firstSale)`) so the padding doesn't dilute the
-average or push a short-lived product into the 4+-month exponential-smoothing branch seeded at level 0
-(understating demand). `$0` months **after** the first sale are kept (real dry-month demand signal); a
-product that never sold gets an empty series → `computeForecast` returns `0`/"Sin datos".
-
-`forecastNextMonth` is rounded to an integer, which can round a real-but-thin demand (~0.4 units/month)
-down to `0`; an `effectiveForecast` (the raw average of the trimmed series) is used as a floor whenever
-that happens, so `diasCobertura`/`suggestedOrder` don't fall back to the "no sales" sentinel for a product
-that actually has sales history and zero stock — `forecastNextMonth` in the response still reports the raw
-rounded forecast. From that it derives `diasCobertura` (`round(stock / effectiveForecast × 30)`, `999`
-sentinel only when there's neither a rounded forecast nor sales history), `suggestedOrder`
-(`max(0, round(effectiveForecast × 2) − stock)`, a 2-month target minus stock),
-`ingresoMensual`/`margenMensual` (from the avg of the trimmed complete-month series × price/margin),
-`costoEstimadoPedido`, and `priority` (`urgente` <15 días · `pronto` <45 · `ok`). Rows are sorted by
-priority rank then `margenMensual` desc. Rounding mirrors the frontend mock exactly:
-`ingresoMensual`/`margenMensual`/`diasCobertura`/`suggestedOrder`/`forecastNextMonth` are integers, while
-`revenue`/`totalRevenue`/`costoEstimadoPedido` are left raw.
-
-Per the ROADMAP, the backend serves only the raw monthly + replenishment rows; derived metrics (% del
-total, promedios, tendencia vs mes anterior) are computed by the frontend. Cost fields appear here because
-these are authenticated admin routes. The per-product series extraction transposes each month's `byProduct`
-into a `Map<productId, unitsSold>` once (`unitsByMonthMaps`) rather than a `.find()` per product×month
-pair, keeping it O(months×products) instead of O(months×products²).
+Detalle completo en `docs/features/reports.md`.
 
 ### Marca y usuarios (Fase 7)
 
@@ -1505,122 +743,13 @@ limit/message), `LIMIT_FILE_COUNT`, and `LIMIT_UNEXPECTED_FILE` — otherwise th
 
 ### Importación/restock masivo de productos
 
-`src/services/productImport.service.ts`, `src/schemas/productImport.ts`, `src/utils/excelCell.ts`,
-`src/utils/sizesSpec.ts`.
+Alta y restock de mercancía subiendo un `.xlsx`, en **dos pasos**: `POST
+/api/admin/products/import/preview` `[auth]` devuelve el plan por fila sin escribir nada, y `POST
+/api/admin/products/import` `[auth]` aplica el **JSON** ya revisado (no el archivo original). El
+restock **suma** stock y no se puede deshacer, así que todo el diseño está sesgado a **fallar la
+fila antes que aplicarla en silencio**.
 
-El dueño da de alta mercancía nueva y restockea la existente subiendo una hoja de cálculo. Son **dos
-pasos**, y esa separación es la decisión central de la fase:
-
-1. `POST /api/admin/products/import/preview` `[auth]` — recibe el `.xlsx` por multipart/form-data (campo
-   `file`, máx. 2 MB, máx. **500 filas**, `uploadProductImportFile`, mismo patrón `memoryStorage()` que las
-   imágenes, mimetype fijo de OOXML) y devuelve el plan **sin escribir nada**: por fila, su `action`
-   (`create`/`update`/`unchanged`/`error`), el producto con el que empareja (`before`, `null` si se
-   creará), cómo quedaría (`after`), los campos que cambian (`changes`) y el stock por talla
-   (`sizeChanges`, con `before`/`added`/`after`).
-2. `POST /api/admin/products/import` `[auth]` — recibe **JSON** `{ rows }` (los `input` que devolvió el
-   preview, con las ediciones que el dueño haya hecho en pantalla) y los aplica.
-
-Es JSON y no el `.xlsx` original a propósito: lo que se escribe es lo que se revisó y corrigió. El paso de
-revisión **no es cosmético** — el restock SUMA stock y no hay forma de deshacerlo desde la app, así que
-aplicar un archivo a ciegas (con una fórmula que no se leyó, una columna mal escrita o un nombre que
-empareja con el producto equivocado) sale caro. Por eso el diseño entero está sesgado a **fallar la fila
-antes que aplicarla en silencio**: el modo de fallo caro no es el error visible, es la fila que responde
-"actualizado" sin haber actualizado nada.
-
-**Lectura de celdas** (`src/utils/excelCell.ts`): `exceljs` (no `xlsx`/SheetJS — sin historial de CVEs de
-prototype pollution) parsea el workbook, pero `ExcelJS.CellValue` **no es solo `string | number`**: una
-celda llega como `{ formula, result }`, `{ sharedFormula, result }`, `{ richText }`, `{ text, hyperlink }`
-o `{ error }`. Sin desempaquetar cada forma, `String(value)` da `"[object Object]"` — que en una columna
-de texto se guardaba tal cual como nombre del producto y en una numérica se volvía `NaN`.
-`readCellText`/`readCellNumber`/`readCellBoolean` distinguen **tres** resultados:
-- **vacío** → la clave se OMITE de la fila, así que una actualización parcial no toca esa columna (crítico
-  porque `code`/`description` aceptan cadena vacía como valor válido en el schema base: una clave presente
-  con `""` blanquearía la columna al hacer `existing.update(fields)`);
-- **`problem`** → la celda tiene contenido pero es ilegible (fórmula sin `result` calculado, `#REF!`,
-  `Visible: "quizá"`) → se acumula en `cellErrors` y **la fila falla**;
-- **`warning`** → se leyó con una interpretación a confirmar (coma decimal `"1,5"` → `1.5` en vez de los
-  `15` que salían al quitar todas las comas; celda con formato de fecha, que es como Excel autoformatea un
-  código tipo `1-2`). El preview los muestra y el dueño decide.
-
-**Encabezados**: canónico en español (`Código | Nombre | Categoría | Descripción | Precio original |
-Precio oferta | Costo unitario | Tallas | Peso (kg) | Largo (cm) | Ancho (cm) | Alto (cm) | Visible`),
-insensible a acentos/mayúsculas y con alias comunes (`sku`→`code`, `tipo`→`type`, …) vía `HEADER_ALIASES`.
-Una columna **no reconocida** no se descarta en silencio: se reporta en el `warnings` a nivel archivo. Dos
-columnas que normalizan al **mismo** campo son un **400** — antes ganaba la última no vacía.
-
-**Tallas** (`src/utils/sizesSpec.ts`): además de la notación heredada del `ProductForm` (`"25, 26, 26"`,
-una ocurrencia = una unidad) se acepta **`"26x20"`** (20 piezas de la talla 26), mezclables
-(`"25x3, 26, 27x2"`). La notación `x` existe porque el caso de uso central es el **restock**: repetir
-`"26,"` veinte veces es inviable en una hoja de cálculo. Hay topes (talla 1–999, 9 999 piezas por entrada,
-60 tallas distintas, 10 000 piezas por fila) porque el modelo no valida tallas: sin ellos entraba una talla
-de 8 dígitos sin chistar.
-
-**Emparejamiento**: si la fila trae `código`, por `code` **insensible a mayúsculas** (columna con **índice
-único parcial**); si no, por `nombre` exacto insensible a mayúsculas usando `lower(name) = lower(?)` —
-**nunca `iLike`**, que interpreta `%`/`_` como comodines: una fila llamada `"Bota%Premium"` emparejaba con
-`"Bota Roja Premium"` y, al aplicarse el campo `name`, la **renombraba**. Un valor que empareja con **más
-de un producto** es ambiguo (`name` no tiene índice único) y la fila falla pidiendo un código, en vez del
-`findOne` arbitrario de antes. Si el código de la hoja solo difiere en mayúsculas del guardado, empareja
-pero **no** reescribe el código (sería renombrar la clave del catálogo por una diferencia de tecleo).
-
-Sin match → crea un producto nuevo (mismos campos requeridos que `POST /api/admin/products`). Con match →
-actualiza **solo** los campos presentes en la fila **y que realmente cambian** (una columna ausente nunca
-borra un valor guardado); si la fila trae `Tallas`, **suma** esas unidades al stock ya guardado por talla
-vía un upsert `INSERT ... ON CONFLICT ("productId","size") DO UPDATE SET stock = product_sizes.stock +
-EXCLUDED.stock` — **nunca** el destroy+recreate que usa `adminUpdateProduct` para una edición manual,
-porque ahí sí se quiere reemplazar. Una fila que empareja pero no cambia nada es `unchanged`, no
-`updated`. Un producto **soft-deleted** que hace match se **reactiva** (`deletedAt: null`, y `visible:
-true` salvo que la fila diga lo contrario) — restockear implica que vuelve a venderse.
-
-`validateRow`/`projectSnapshot` son **compartidos** entre preview y confirmación: el diff que se muestra y
-lo que se escribe salen del mismo código, así que no pueden divergir.
-
-**El preview resuelve contra un catálogo virtual**: el estado real de la BD más lo que las filas anteriores
-del mismo archivo ya proyectaron (`pendingByCode`/`pendingByName`/`projectedById`). Sin ese overlay, un
-archivo donde la fila 2 crea `BTA-9` y la fila 5 lo restockea mostraría dos altas del mismo producto,
-mientras que al confirmar sí sería un update. El preview hace **2 consultas** para todo el archivo.
-
-En la **confirmación**, cada fila corre **independiente** (éxito parcial) y **secuencialmente**, nunca con
-`Promise.all` — a propósito, para que una fila pueda crear un producto que una fila posterior del mismo
-lote restockee por ese mismo código. El match se hace **dentro** de la transacción y con `FOR UPDATE` sobre
-`products` (con `lock: { level, of: Product }`, porque `FOR UPDATE` con el include `hasMany` de
-`productSizes` revienta en Postgres — lado nullable de un LEFT JOIN): cargarlo fuera dejaba una ventana
-entre la lectura y el update.
-
-**Doble envío**: `assertNotDuplicateCommit` rechaza con **409** el mismo lote enviado dos veces en menos de
-60 s (hash sha256 del payload). Es un `Map` en memoria, deliberadamente **no persistido** — misma decisión
-y limitación asumida que el contador de `pendingOrderSweeper.ts`. Protege del accidente (doble clic,
-reintento del navegador), no del abuso; la barrera dura contra duplicados sigue siendo el índice único de
-`code`. Desde la Fase O.2 el mapa con TTL y la huella salen de `src/utils/idempotency.ts`, compartidos con
-el guard del checkout; lo que **no** se comparte es la política — aquí un reenvío se rechaza, en
-`POST /api/orders` se le devuelve la respuesta del original.
-
-Errores por fila se traducen a un mensaje en español con prefijo `Fila N:` (zod, `AppError`, o un
-`UniqueConstraintError` del índice de `code`). Un `ZodError` compone **hasta 3 mensajes de campo** + "(y N
-campos más por corregir)", igual que `messageFromDetails` en `errorHandler.ts`: reportar solo `issues[0]`
-obligaba a corregir una columna, volver a subir y descubrir la siguiente — y como el restock suma, cada
-reintento del archivo completo volvía a sumar el stock de las filas que sí habían funcionado. Cualquier
-error no esperado se loguea con `logger.error` antes de degradarse a fila de error. Un `.xlsx` corrupto (o
-un `.csv`/`.xls` renombrado, que pasa el filtro de mimetype) da un **400** accionable en vez del 500
-genérico. Respuestas: `{ summary: { total, created, updated, unchanged, failed }, warnings, rows }` en el
-preview y `{ summary, rows: [{ row, status, code, name, productId?, message }] }` al confirmar.
-
-El límite de `express.json()` en `src/app.ts` está en **1 mb** (no los 100 kb por defecto) porque la
-confirmación manda hasta 500 filas de producto en un solo body.
-
-`products.code` (nullable, sin restricción antes de esta fase — líneas como `ropa` legítimamente no lo
-usan) ganó un **índice único parcial** (`WHERE code IS NOT NULL AND code != ''`) vía
-`20260727120000-products-code-unique-index.ts`; declarado también en `Product.init()`'s `indexes` (mismo
-motivo que el índice de `product_sizes`: `tests/setup/db.ts` construye el esquema con
-`sync({ force: true })`, no con migraciones). Esta migración falla si ya existen códigos duplicados no
-vacíos — intencional, no se deduplica en silencio.
-
-**Nota sobre `.partial()` en zod 4** (aplica a todo el repo): `.partial()` **NO** quita los `.default()`.
-`z.object({ visible: z.boolean().default(true) }).partial().parse({})` devuelve `{ visible: true }`. Por eso
-tanto `productImportUpdateSchema` como `productUpdateSchema` re-declaran `visible` —y `stock`— como
-opcionales puros con un `.extend()` aplicado **después** de `.partial()`. Sin eso, un `PUT` que solo
-cambiaba el nombre ponía `visible: true` y **publicaba un producto oculto**. Al agregar un campo con
-`.default()` a `productBaseSchema`, hay que replicarlo en ambos `.extend()`.
+Detalle completo en `docs/features/bulk-import.md`.
 
 ### Error handling (`src/middlewares/`)
 
@@ -1657,7 +786,7 @@ bare code or id. Consequences:
   wrong-password. Same rule for `assertValidResetCode` (byte-identical across missing-user / wrong-code /
   expired / attempts-exhausted, so adding actionable text must not branch per cause) and for
   `GET /api/orders/lookup/:token`. The deliberate exception is `POST /api/coupons/validate`, documented
-  above.
+  in `docs/features/coupons.md`.
 
 ### Models (`src/models/`)
 
@@ -1841,7 +970,7 @@ all suites and removes the race. Don't re-parallelize without also fixing that s
     counts as orphaned, so a concurrent retry would pay for a second label. **Use it for any new numeric
     env knob.** Note it rejects `0`, so the valid digest hour is 1–23 (a known, costless limitation).
     `MIN_CHARGE_MXN` and the digest knobs live in their services, **not** in a `config/*`, for the
-    mock-shadowing reason documented in the coupon section.
+    mock-shadowing reason documented in `docs/features/coupons.md`.
   - **`TRUST_PROXY`** is the value handed to `app.set("trust proxy", ...)`, parsed by `trustProxyEnv`:
     `undefined` when unset/blank so `app.ts` never calls `app.set` at all, an integer as a hop count,
     `true`/`false`, anything else passed through as an address list/preset. **Every rate limiter counts by

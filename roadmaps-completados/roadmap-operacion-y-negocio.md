@@ -1,7 +1,7 @@
 # ROADMAP — Cierre operativo y features de negocio
 
 Hoja de ruta activa del backend, abierta el **2026-07-28** con los cuatro roadmaps anteriores ya
-cerrados y archivados en [`roadmaps-completados/`](roadmaps-completados/roadmap-readme.md). Cubre dos cosas
+cerrados y archivados en [`roadmaps-completados/`](roadmap-readme.md). Cubre dos cosas
 distintas que conviene no mezclar:
 
 - **Bloque O (operativo)** — huecos donde el dueño de la tienda se queda **atorado sin poder hacer
