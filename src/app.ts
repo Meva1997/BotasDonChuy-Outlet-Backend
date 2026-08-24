@@ -27,7 +27,7 @@ import couponRoutes from "./routes/public/coupon.routes";
 import adminCouponRoutes from "./routes/admin/adminCoupon.routes";
 import adminExpenseRoutes from "./routes/admin/adminExpense.routes";
 import { errorHandler } from "./middlewares/errorHandler";
-import { trustProxyEnv } from "./utils/env";
+import { apiDocsEnabled, trustProxyEnv } from "./utils/env";
 import { checkReadiness, markDraining } from "./services/readiness";
 import {
   startPendingOrderSweeper,
@@ -90,11 +90,17 @@ app.use("/api/webhooks", express.raw({ type: "application/json" }), webhookRoute
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// API docs (Swagger UI + raw OpenAPI JSON)
-app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
-app.get("/api/docs.json", (req, res) => {
-  res.json(swaggerSpec);
-});
+// API docs (Swagger UI + raw OpenAPI JSON). APAGADAS en producción salvo que se ponga
+// API_DOCS_ENABLED=true: las rutas admin siguen exigiendo JWT, pero el spec le regala a
+// cualquiera el mapa completo de endpoints, cuerpos y respuestas del panel (ver utils/env.ts
+// para por qué el interruptor es una variable y no `requireAuth`). Sin montar, ambas caen en
+// el 404 por defecto de Express.
+if (apiDocsEnabled()) {
+  app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+  app.get("/api/docs.json", (req, res) => {
+    res.json(swaggerSpec);
+  });
+}
 
 //routes
 app.use("/api/products", productRoutes);

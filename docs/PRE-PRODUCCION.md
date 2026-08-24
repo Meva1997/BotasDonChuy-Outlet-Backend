@@ -3,6 +3,10 @@
 > Revisión completa del repo hecha el **2026-08-24** sobre `main` (último commit `f72681c`,
 > Fase 28 — disputas). Este documento lista **solo lo que falta**: lo que ya funciona no se
 > repite aquí, vive en `README.md`, `CLAUDE.md` y `docs/features/`.
+>
+> **Actualizado el 2026-08-24:** cerrados los cinco arreglos de código del paso 2 del orden de
+> ejecución — puntos **8**, **9**, **10**, **11** y **14**. Lo que queda es despliegue,
+> credenciales y operación.
 
 ## Estado verificado hoy
 
@@ -11,7 +15,7 @@ Todo esto se comprobó ejecutándolo, no leyéndolo:
 | Comprobación | Resultado |
 | --- | --- |
 | `pnpm build` (type-check + emisión a `dist/`) | ✅ sin errores |
-| `pnpm test` | ✅ **58 suites / 752 tests**, todos pasando (38 s) |
+| `pnpm test` | ✅ **60 suites / 787 tests**, todos pasando (40 s) |
 | Migraciones vs. modelos | ✅ sin drift: cada columna de `Order`/`Product`/etc. tiene su migración |
 | Integración con el frontend | ✅ las 27 fases de `../frontend/ROADMAP-BACKEND-INTEGRATION.md` cerradas; disputas (Fase 28) ya se pintan en el panel |
 | CI (`.github/workflows/ci.yml`) | ✅ Postgres 16 + `pnpm build` + `pnpm test` en cada PR y push a `main` |
@@ -128,52 +132,53 @@ los precios congelados y las constancias de aceptación de términos (Fase 27, d
 
 ## 🟠 Alto — arreglar antes de abrir al público
 
-### 8. Swagger UI y el spec crudo son públicos en producción
+### 8. ~~Swagger UI y el spec crudo son públicos en producción~~ ✅ Cerrado el 2026-08-24
 
-`app.use("/api/docs", …)` y `app.get("/api/docs.json", …)` se montan **sin gate de `NODE_ENV` y sin
-auth** (`src/app.ts`). Cualquiera puede enumerar todos los endpoints admin, sus cuerpos y sus
-respuestas. No es una vulnerabilidad por sí sola (las rutas siguen exigiendo JWT), pero le regala el
-mapa completo a quien busque.
+Las dos rutas van envueltas en `if (apiDocsEnabled())` (`src/utils/env.ts` → `src/app.ts`):
+**apagadas en producción**, encendidas en dev y test, y `API_DOCS_ENABLED=true` las reabre sin
+tocar código (útil para depurar contra el despliegue real). Sin montar, caen en el 404 por defecto
+de Express.
 
-- [ ] Gatear con `NODE_ENV !== "production"`, o protegerlo con `requireAuth`, o dejarlo consciente
-      y anotarlo aquí como decisión.
+Se descartó `requireAuth`: el navegador no manda `Authorization` al pedir los assets de Swagger UI
+ni el spec, así que la interfaz quedaría rota. Verificado a mano con `NODE_ENV=production`
+(404 en ambas / 200 con la variable) y cubierto por `tests/unit/config/apiDocs.test.ts`.
 
-### 9. `PENDING_ORDER_*` se saltan `positiveNumberEnv`
+### 9. ~~`PENDING_ORDER_*` se saltan `positiveNumberEnv`~~ ✅ Cerrado el 2026-08-24
 
-`src/config/stripe.ts:34-41` usa `Number(process.env.X ?? 30)` para `PENDING_ORDER_TTL_MINUTES` y
-`PENDING_ORDER_SWEEP_INTERVAL_MINUTES` — justo el patrón que `src/utils/env.ts` existe para prohibir,
-y que `CLAUDE.md` marca como convención obligatoria. Una línea vacía en el `.env` de producción
-(`PENDING_ORDER_SWEEP_INTERVAL_MINUTES=`) da `Number("") === 0` y convierte el `setInterval` del
-sweeper en un bucle contra la base de datos y contra Stripe; un valor mal tecleado da `NaN`, con el
-mismo efecto. Son las **dos últimas** variables numéricas que quedan sin proteger.
+Las dos pasaron a `positiveNumberEnv` en `src/config/stripe.ts`. Ya **no queda ningún**
+`Number(process.env…)` sin proteger en el repo. `tests/unit/config/stripe.test.ts` cubre los dos
+valores que antes se colaban (`""` → `0` y `"abc"` → `NaN`) más `"0"`/`"-5"`.
 
-- [ ] Cambiarlas a `positiveNumberEnv("PENDING_ORDER_TTL_MINUTES", 30)` y su par, y cubrirlo con test.
+De paso se arregló el `afterEach` de esa misma suite, que restauraba las variables con
+`process.env[k] = undefined` — eso guarda la **cadena** `"undefined"`, no borra la variable, y
+dejaba basura en el entorno para las suites siguientes.
 
-### 10. Versión de Node sin fijar (y la documentada rompe el apagado ordenado)
+### 10. ~~Versión de Node sin fijar (y la documentada rompe el apagado ordenado)~~ ✅ Cerrado el 2026-08-24
 
-- `package.json` no tiene campo `engines` → el PaaS elige la versión que quiera.
-- `README.md` §Requisitos dice **"Node.js 18+"**, pero el apagado ordenado documentado en `CLAUDE.md`
-  depende de que `server.close()` destruya las conexiones keep-alive ociosas, comportamiento que
-  **solo existe desde Node 19**. En Node 18 cada redeploy se cuelga hasta el `forceExit` de 10 s.
-- CI corre Node 22; la máquina de desarrollo, Node 23.10.
+`package.json` declara `"engines": { "node": ">=22" }` (la versión del CI) y `README.md` §Requisitos
+dice ya "Node.js 22+", con la nota de que el mínimo real es 19 por el apagado ordenado. De paso se
+corrigió ahí `pnpm@11.8.0` → `pnpm@11.20.0`, una de las desalineaciones listadas más abajo.
 
-- [ ] Agregar `"engines": { "node": ">=22" }` y corregir el `README.md`.
+### 11. ~~Faltan índices en `orders` para las consultas calientes~~ ✅ Cerrado el 2026-08-24
 
-### 11. Faltan índices en `orders` para las consultas calientes
+Migración `20260824120000-orders-hot-query-indexes.ts`, declarados también en `Order.init()` (el
+esquema de los tests sale de `sync({ force: true })`, no de las migraciones):
 
-La tabla solo tiene índice en `publicToken` (único) y `couponId`. Sin índice quedan:
-
-| Columna | Quién la consulta | Efecto |
+| Índice | Columnas | Quién lo usa |
 | --- | --- | --- |
-| `paymentIntentId` | **cada evento de webhook de Stripe** (`payment.service.ts:106`) | scan completo por cada pago y cada disputa |
-| `skydropxShipmentId` | cada evento del webhook de Skydropx + el sweeper de reintentos | scan completo por evento |
-| `paymentStatus` + `createdAt` | dashboard y reportes (leen 180 días de pedidos) | scan completo en cada carga del panel |
-| `status` | `pendingShipmentWhere`, barrido de pendientes | scan completo por barrido |
+| `orders_payment_intent_id` | `paymentIntentId`, parcial `IS NOT NULL` | cada evento del webhook de Stripe y cada disputa |
+| `orders_skydropx_shipment_id` | `skydropxShipmentId`, parcial `IS NOT NULL` | cada evento del webhook de Skydropx + la reconciliación |
+| `orders_payment_status_created_at` | `("paymentStatus", "createdAt")` | dashboard, reportes y `recentSales` |
+| `orders_status_created_at` | `("status", "createdAt")` | `pendingOrderSweeper` y `pendingShipmentWhere` |
 
-Con el volumen del primer mes no se va a notar. Se nota cuando la tabla crece, y para entonces el
-webhook de Stripe —que tiene *timeout*— es el que sufre primero.
+Los dos primeros son **parciales** porque esas columnas solo se consultan por valor exacto, nunca
+por `IS NULL`, y están en `null` en buena parte de las filas. Los dos últimos son **compuestos con
+`createdAt`** y no sobre la columna de estado a secas —como decía este hallazgo— porque los cuatro
+llamadores combinan siempre el estado con una ventana de fechas y ordenan por ella.
 
-- [ ] Una migración con los cuatro índices. Es barata y no cambia comportamiento.
+Verificado con `pnpm migrate` → `pnpm migrate:undo` → `pnpm migrate` contra la base de desarrollo
+(el `down` quita exactamente esos cuatro y nada más). `tests/integration/orderIndexes.test.ts` lee
+`pg_indexes` para atrapar la deriva entre la migración y `Model.init`.
 
 ### 12. El estado en memoria obliga a **una sola instancia**
 
@@ -205,14 +210,14 @@ de los Postgres gestionados exigen TLS y varios usan certificado autofirmado (`r
       bastar); si el proveedor usa certificado propio, agregar `dialectOptions` **en los dos archivos**
       — el CLI de migraciones no comparte configuración con la app.
 
-### 14. Cliente de Stripe sin `apiVersion` fijada
+### 14. ~~Cliente de Stripe sin `apiVersion` fijada~~ ✅ Cerrado el 2026-08-24
 
-`new Stripe(secretKey)` sin `apiVersion` (`src/config/stripe.ts:25`) usa la versión por defecto que
-traiga el SDK; un `pnpm update` de `stripe` puede cambiarla y con ella la forma de los objetos que leen
-`markOrderPaidFromWebhook` y `applyDisputeFromWebhook`.
-
-- [ ] Fijar `apiVersion` explícitamente para que la actualización sea una decisión, no un efecto
-      colateral.
+`src/config/stripe.ts` exporta `STRIPE_API_VERSION = "2026-06-24.dahlia"` y se la pasa al
+constructor. **Es un no-op en runtime**: el SDK ya mandaba esa misma versión por su cuenta
+(`props.apiVersion || DEFAULT_API_VERSION`), no la del dashboard. Lo que compra es el fail-fast del
+tipo — `StripeConfig.apiVersion` está tipado con el literal exacto de la versión del SDK, así que un
+`pnpm update` de `stripe` que la mueva **rompe `pnpm build`** y obliga a revisar el changelog en vez
+de cambiar en silencio la forma de los objetos que leen los handlers del webhook.
 
 ---
 
@@ -229,12 +234,14 @@ traiga el SDK; un `pnpm update` de `stripe` puede cambiarla y con ella la forma 
 - [ ] **Sentry en producción:** confirmar que `environment` queda en `production` (sale de `NODE_ENV`,
       hoy `development`) y valorar subir *release* + sourcemaps — sin ellos, los stacktraces de `dist/`
       apuntan a JS compilado.
-- [ ] **Trabajo sin commitear.** `git status` muestra `docs/` completo sin trackear (los 11 archivos de
-      `docs/features/` que `CLAUDE.md` ya referencia como fuente de verdad), `CLAUDE.md` modificado y
-      `roadmap-operacion-y-negocio.md` movido a `roadmaps-completados/` sin registrar. **Si se despliega
-      desde el repo remoto, esa documentación no existe allá.**
+- [x] ~~**Trabajo sin commitear.**~~ **Cerrado el 2026-08-24** en el commit `04d9030` (`docs: extrae las
+      features de CLAUDE.md a docs/ y archiva el roadmap activo`), ya pusheado a `origin/main`: los 11
+      archivos de `docs/features/` + este mismo checklist quedaron versionados, `CLAUDE.md` con la
+      extracción y `roadmap-operacion-y-negocio.md` registrado en `roadmaps-completados/`. El árbol
+      está limpio, así que la documentación sí existe en el repo remoto.
 - [ ] **Desalineaciones de documentación** (rápidas):
-  - `packageManager` real es `pnpm@11.20.0`; `README.md` y `CLAUDE.md` dicen `11.8.0`.
+  - ~~`packageManager` real es `pnpm@11.20.0`; `README.md` y `CLAUDE.md` dicen `11.8.0`.~~
+    Corregido en ambos el 2026-08-24, junto con el punto 10.
   - `BCRYPT_ROUNDS` se usa (`src/utils/password.ts`) y está en `.env` y en el CI, pero **no aparece en
     la lista de variables del `README.md`**.
   - El checklist de `roadmap-operacion-y-negocio.md` sigue con "Dominio verificado en Resend" sin
@@ -276,9 +283,12 @@ Para que nadie las levante como hallazgo en la siguiente revisión:
 
 ## Orden sugerido de ejecución
 
-1. Commitear lo que está sin trackear (`docs/`, `CLAUDE.md`, el roadmap movido) — punto 🟡.
-2. Arreglos de código, que son chicos y entran en un commit: **9** (`positiveNumberEnv`),
-   **10** (`engines`), **11** (índices), **8** (gate de Swagger), **14** (`apiVersion`). Con sus tests.
+1. ~~Commitear lo que está sin trackear (`docs/`, `CLAUDE.md`, el roadmap movido) — punto 🟡.~~
+   ✅ **Hecho** (commit `04d9030`, pusheado a `origin/main`).
+2. ~~Arreglos de código, que son chicos y entran en un commit: **9** (`positiveNumberEnv`),
+   **10** (`engines`), **11** (índices), **8** (gate de Swagger), **14** (`apiVersion`). Con sus tests.~~
+   ✅ **Hecho** el 2026-08-24: los cinco, con 35 tests nuevos (60 suites / 787 en total), la
+   migración probada de ida y vuelta y el gate comprobado a mano con `NODE_ENV=production`.
 3. Crear `.env.example` (**1**) y el script de bootstrap del admin (**6**).
 4. Dar de alta el servicio y la base de datos en el proveedor; resolver **5** (migraciones en el
    pipeline), **13** (SSL) y **7** (backups + una restauración de prueba).

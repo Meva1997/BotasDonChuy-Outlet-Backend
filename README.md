@@ -21,8 +21,10 @@ Construido con Express 5, TypeScript y Sequelize sobre PostgreSQL.
 
 ## Requisitos
 
-- Node.js 18+
-- [pnpm](https://pnpm.io/) (`packageManager: pnpm@11.8.0`)
+- Node.js 22+ (`engines` lo declara en `package.json`, y el CI corre esa versión). El mínimo real
+  es 19: el apagado ordenado depende de que `server.close()` destruya las conexiones keep-alive
+  ociosas, y en Node 18 cada redeploy se cuelga hasta el corte forzado de 10 s.
+- [pnpm](https://pnpm.io/) (`packageManager: pnpm@11.20.0`)
 - Una base de datos PostgreSQL
 
 ## Instalación
@@ -86,6 +88,9 @@ ALERT_EMAIL_TO=tu_correo@ejemplo.com     # opcional: destino de las alertas oper
 
 # Despliegue detrás de un proxy — opcional, pero necesaria si hay uno (ver nota abajo)
 TRUST_PROXY=1                            # saltos de proxy en los que confiar (1 = lo típico en un PaaS)
+
+# Documentación de la API — opcional. Apagada en producción salvo que se ponga aquí `true`
+API_DOCS_ENABLED=true                    # sirve /api/docs y /api/docs.json (default: on fuera de producción)
 
 # Healthcheck (Fase O.5) — opcional
 HEALTH_READY_TIMEOUT_MS=3000             # margen del chequeo de BD en /health/ready (default 3000)
@@ -1008,7 +1013,7 @@ Suite automatizada con **Jest + ts-jest + supertest** (Fase H.1 — ver
 [`roadmaps-completados/roadmap-testing.md`](roadmaps-completados/roadmap-testing.md) para el desglose por partes; las **12 partes** — infra,
 BD de test, servicios puros, auth, checkout, idempotencia de webhooks, cancelación/reembolso manual,
 envío en vivo, cliente Skydropx, CRUD admin de productos/imágenes, marca/usuarios admin y
-agregaciones de dashboard/reports — están **completas**: 37 suites / 412 tests en verde, y cada
+agregaciones de dashboard/reports — están **completas**: 60 suites / 787 tests en verde, y cada
 fase nueva suma la suya). Los tests
 viven en `tests/` (fuera de `src/`, para que `tsc` no los incluya en el build de producción);
 `ts-jest` los transpila en memoria.
@@ -1052,6 +1057,13 @@ Con el servidor en marcha, la documentación interactiva está disponible en:
   prueba los endpoints desde el navegador.
 - **OpenAPI JSON:** [`http://localhost:4000/api/docs.json`](http://localhost:4000/api/docs.json) —
   especificación cruda (útil para importar en Postman/Insomnia o validar).
+
+> **En producción las dos rutas están apagadas** (responden 404). Las rutas admin siempre exigieron
+> JWT, así que servir el spec no era un agujero por sí solo, pero le entrega a cualquiera el mapa
+> completo de endpoints, cuerpos y respuestas del panel. Para abrirlas un rato —depurar contra el
+> despliegue real sin tocar código— basta `API_DOCS_ENABLED=true` y reiniciar; `API_DOCS_ENABLED=false`
+> hace lo contrario en desarrollo. No se protegieron con `requireAuth` porque el navegador no manda el
+> header `Authorization` al pedir los assets de Swagger UI ni el spec, y la interfaz quedaría rota.
 
 Para probar rutas protegidas: haz `POST /api/auth/login`, copia el `token`, pulsa **Authorize**
 (esquema `bearerAuth`) en la UI y pega el token; luego llama a `GET /api/auth/me`.

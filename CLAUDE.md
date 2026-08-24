@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-This project uses **pnpm** (`packageManager: pnpm@11.8.0`).
+This project uses **pnpm** (`packageManager: pnpm@11.20.0`).
 
 - `pnpm install` — install dependencies
 - `pnpm dev` — server in watch mode via `ts-node-dev` (entry: `src/app.ts`)
@@ -31,7 +31,8 @@ comportamiento de alguna, actualiza su archivo en `docs/features/`, no solo el r
 `dotenv` → create app → `trust proxy` when `TRUST_PROXY` is set (it decides whether `req.ip`, and
 therefore every rate limiter, sees the real client or the proxy — see **Conventions**) → global
 middleware (`helmet`, `cors` with `CORS_ORIGIN` as a comma-separated list split/trimmed into an array,
-JSON + urlencoded parsers) → Swagger UI at `/api/docs` (+ raw spec at `/api/docs.json`) → routers →
+JSON + urlencoded parsers) → Swagger UI at `/api/docs` (+ raw spec at `/api/docs.json`, both gated by
+`apiDocsEnabled()` — off in production unless `API_DOCS_ENABLED=true`) → routers →
 `GET /health` and `GET /health/ready` → `errorHandler` last.
 
 Everything with a **process-level side effect** — `connectDB()`, the three cron starters
@@ -198,9 +199,17 @@ with explicit `id`s, Postgres SERIAL sequences are left behind; the seed resyncs
 scheme, reusable `components.schemas` like `Product`, `LoginInput`, `Error`) plus JSDoc `@openapi`
 annotations read from the `apis` globs (`./src/routes/**/*.ts` + `./src/app.ts` in dev, and the `./dist/...`
 equivalents — both run with cwd at the backend root). `src/app.ts` serves the UI with `swagger-ui-express`
-at `/api/docs` (no `NODE_ENV` gate — exposed everywhere) and the raw JSON at `/api/docs.json`. **When adding
+at `/api/docs` and the raw JSON at `/api/docs.json`. **When adding
 a new resource, document each endpoint with an `@openapi` JSDoc block above its `router.<method>(...)`,
 referencing shared schemas via `$ref: '#/components/schemas/...'` (add new schemas to `swagger.ts`).**
+
+Both routes are wrapped in `if (apiDocsEnabled())` (`src/utils/env.ts`): **off in production**, on
+everywhere else, and `API_DOCS_ENABLED=true` turns them back on without a code change (or `=false` off
+in dev). The admin routes always required a JWT, so serving the spec was never a hole by itself — but it
+hands anyone the complete map of every endpoint, body and response, the panel's included. `requireAuth`
+was rejected as the guard: the browser doesn't send `Authorization` when fetching Swagger UI's own assets
+or the spec, so the UI would just break. The spec is still **built** at import either way (cheap, and it
+keeps `swagger.test.ts` honest); only the two routes disappear, falling to Express's default 404.
 
 ### Auth (`src/routes/auth/`, `src/controllers/auth.controller.ts`)
 
@@ -317,6 +326,12 @@ Detalle completo en `docs/features/order-lookup.md`.
 del `express.json()` global. **La transición a pagado es un único `UPDATE` condicional** (`where: {
 id, status:"pending", paymentStatus: ne "paid" }`) y el correo, el aviso al dueño y la guía solo se
 disparan con `affectedCount === 1`. Incluye `releaseOrderStock` y `pendingOrderSweeper`.
+
+El cliente compartido fija su `apiVersion` (`STRIPE_API_VERSION`, hoy `2026-06-24.dahlia`). Es un
+no-op en runtime —el SDK ya mandaba esa misma versión por su cuenta— y existe por el tipo: el campo
+está tipado con el literal exacto de la versión del SDK, así que un `pnpm update` de `stripe` que la
+mueva **rompe `pnpm build`** en vez de cambiar en silencio la forma de los objetos que leen
+`markOrderPaidFromWebhook` y `applyDisputeFromWebhook`. Subirla obliga a revisar el changelog.
 
 Detalle completo en `docs/features/stripe-payments.md`.
 
@@ -831,6 +846,17 @@ resolve**; without it they default to `0`/`[]`. Images live in `images` (`JSONB`
   under one, and `couponDiscount` is deliberately not nullable so every consumer doing arithmetic skips the
   `?? 0`).
 
+Besides `orders_public_token_unique`, `Order.init` declares four **hot-query** indexes (migration
+`20260824120000-orders-hot-query-indexes.ts`): `orders_payment_intent_id` and
+`orders_skydropx_shipment_id` — both **partial** on `IS NOT NULL`, since those columns are only ever
+looked up by exact value (every Stripe webhook event and every Skydropx one) and are `null` on a large
+share of rows — plus the composites `orders_payment_status_created_at` (dashboard/reports over their
+180-day window, and `recentSales`) and `orders_status_created_at` (`pendingOrderSweeper` and
+`pendingShipmentWhere`). The last two are composite **with `createdAt`** rather than on the status
+column alone because all four callers pair the status with a date range and order by it. They're
+declared in `Model.init` as well as in the migration for the usual `sync({ force: true })` reason, and
+`tests/integration/orderIndexes.test.ts` reads `pg_indexes` to catch the drift between the two.
+
 **`OrderItem`** freezes per-unit prices (`unitOriginalPrice`, `unitSalePrice`, `unitCost`) plus
 `nameSnapshot` so historical orders aren't affected by later `Product` price changes. **`AdminUser`** (+
 the three Fase 9 password-reset columns) and **`BrandSettings`** (singleton, with `logoUrl`/`logoPublicId`)
@@ -903,13 +929,15 @@ file, not an inline object — an inline `tsconfig` **replaces** the base config
 `roadmaps-completados/roadmap-testing.md` breaks the work into **independent parts** (0 = infra; 0.5 =
 dedicated test DB; 1 = pure services; 2 = auth; 3 = checkout; 4 = webhook idempotency; 5 = manual
 cancel/refund/release; 6 = live shipping rates; 7 = Skydropx HTTP client; 8 = admin product CRUD + images;
-9 = brand/admin users; 10 = dashboard/reports aggregations) — **all twelve are done** (57 suites / 703 tests
+9 = brand/admin users; 10 = dashboard/reports aggregations) — **all twelve are done** (60 suites / 787 tests
 at last count; new phases add their own suite, e.g. `adminOrderStatus.test.ts` (O.1),
 `checkoutIdempotency.test.ts` + `pendingOrderSweeper.test.ts` (O.2), `shipmentRetry.test.ts` (O.3),
 `orderLookup.test.ts` + `unit/services/orderConfirmationTemplate.test.ts` (O.4), the six coupon suites
 (N.2), `adminExpenses.test.ts` + `unit/services/expenses.test.ts` (N.3), and `newOrderNotification.test.ts`
 + `dailySalesDigest.test.ts` + `unit/utils/storeDay.test.ts` +
-`unit/services/newOrderNotificationTemplate.test.ts` (N.4), and `unit/services/packing.test.ts` (N.6)).
+`unit/services/newOrderNotificationTemplate.test.ts` (N.4), `unit/services/packing.test.ts` (N.6), and
+the pre-production hardening trio `unit/config/apiDocs.test.ts` + `integration/orderIndexes.test.ts`
++ the `booleanEnv`/`apiDocsEnabled` blocks in `unit/utils/env.test.ts`).
 Keep adding tests **part by part**, marking
 `[x]` as each closes, and don't touch `src/` from a test change unless a test reveals a real bug.
 
@@ -963,14 +991,22 @@ all suites and removes the race. Don't re-parallelize without also fixing that s
     `DAILY_DIGEST_HOUR` (8), `DAILY_DIGEST_CHECK_INTERVAL_MINUTES` (15), `SENTRY_DSN` (enables Sentry if
     set), `ALERT_EMAIL_TO` (operational alerts), `OWNER_NOTIFICATION_EMAIL` (business notifications, falls
     back to `ALERT_EMAIL_TO`; with neither set, Fase N.4 is off — deliberately its only switch),
-    `LOG_LEVEL`, and `TRUST_PROXY`.
+    `LOG_LEVEL`, `TRUST_PROXY`, and `API_DOCS_ENABLED` (serves `/api/docs` + `/api/docs.json`;
+    defaults to on outside production, off in it).
   - **Numeric knobs go through `positiveNumberEnv` (`src/utils/env.ts`)**, not a bare
     `Number(process.env.X ?? default)`: `??` only falls back on `undefined`, so a blank line in `.env`
     parses as `0` and a typo as `NaN` — and a `0` retry margin means a sentinel claimed milliseconds ago
     counts as orphaned, so a concurrent retry would pay for a second label. **Use it for any new numeric
     env knob.** Note it rejects `0`, so the valid digest hour is 1–23 (a known, costless limitation).
     `MIN_CHARGE_MXN` and the digest knobs live in their services, **not** in a `config/*`, for the
-    mock-shadowing reason documented in `docs/features/coupons.md`.
+    mock-shadowing reason documented in `docs/features/coupons.md`. `PENDING_ORDER_TTL_MINUTES` and
+    `PENDING_ORDER_SWEEP_INTERVAL_MINUTES` were the last two holdouts and were converted too — there
+    are now **no** bare `Number(process.env…)` knobs left.
+  - **Boolean knobs go through `booleanEnv` (`src/utils/env.ts`)**, never a bare
+    `Boolean(process.env.X)` / `=== "true"`: every non-empty string is truthy, `"false"` included —
+    exactly what someone types to turn a flag *off*. It accepts `true`/`false`/`1`/`0` case- and
+    space-insensitively and falls back with a warning on anything else, so a typo can never flip a
+    flag *on*. `apiDocsEnabled()` is the policy built on it.
   - **`TRUST_PROXY`** is the value handed to `app.set("trust proxy", ...)`, parsed by `trustProxyEnv`:
     `undefined` when unset/blank so `app.ts` never calls `app.set` at all, an integer as a hop count,
     `true`/`false`, anything else passed through as an address list/preset. **Every rate limiter counts by

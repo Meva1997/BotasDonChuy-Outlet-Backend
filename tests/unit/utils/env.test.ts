@@ -1,4 +1,9 @@
-import { positiveNumberEnv, trustProxyEnv } from "../../../src/utils/env";
+import {
+  apiDocsEnabled,
+  booleanEnv,
+  positiveNumberEnv,
+  trustProxyEnv,
+} from "../../../src/utils/env";
 
 /**
  * Nivel 1 (sin BD): `Number(process.env.X ?? 15)` deja pasar dos valores que parecen configuración
@@ -105,5 +110,112 @@ describe("trustProxyEnv", () => {
 
     process.env.TRUST_PROXY = "-1";
     expect(trustProxyEnv()).toBe("-1");
+  });
+});
+
+/**
+ * Nivel 1 (sin BD): `Boolean(process.env.X)` no sirve para una bandera —**toda** cadena no vacía
+ * es `true`, incluida `"false"`, que es justo lo que alguien escribe para apagar algo—, así que
+ * lo que se blinda aquí es que `"false"`/`"0"` apaguen de verdad y que un valor con el que nadie
+ * quiso decir nada caiga al default en vez de encender lo que estaba apagado.
+ */
+describe("booleanEnv", () => {
+  const VAR = "TEST_BOOLEAN_ENV";
+  let warnSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    delete process.env[VAR];
+    warnSpy.mockRestore();
+  });
+
+  it.each(["true", "TRUE", " True ", "1"])('lee "%s" como true', (value) => {
+    process.env[VAR] = value;
+    expect(booleanEnv(VAR, false)).toBe(true);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it.each(["false", "FALSE", " False ", "0"])('lee "%s" como false', (value) => {
+    process.env[VAR] = value;
+    // El default es `true` a propósito: sin el parseo, `"false"` encendería la bandera.
+    expect(booleanEnv(VAR, true)).toBe(false);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("cae al default cuando no está definida, viene vacía o solo espacios", () => {
+    expect(booleanEnv(VAR, true)).toBe(true);
+    expect(booleanEnv(VAR, false)).toBe(false);
+
+    process.env[VAR] = "";
+    expect(booleanEnv(VAR, true)).toBe(true);
+
+    process.env[VAR] = "   ";
+    expect(booleanEnv(VAR, false)).toBe(false);
+
+    expect(warnSpy).not.toHaveBeenCalled(); // ausente es normal, no hay nada que avisar
+  });
+
+  it.each(["si", "yes", "on", "2", "-1", "null"])(
+    'cae al default y avisa con "%s"',
+    (value) => {
+      process.env[VAR] = value;
+      expect(booleanEnv(VAR, false)).toBe(false);
+      expect(warnSpy).toHaveBeenCalled();
+    },
+  );
+});
+
+/**
+ * Nivel 1 (sin BD): la política del gate de Swagger se prueba aquí, y no reimportando `app.ts`
+ * con `NODE_ENV="production"`, porque eso dispararía `connectDB()`, los tres crons y
+ * `app.listen(PORT)` dentro de la suite. El cableado en `app.ts` se cubre aparte en
+ * `tests/unit/config/apiDocs.test.ts`.
+ *
+ * Lo que importa: **en producción, apagado salvo que alguien lo pida explícitamente** — incluso
+ * si la variable trae basura.
+ */
+describe("apiDocsEnabled", () => {
+  const originalNodeEnv = process.env.NODE_ENV;
+  let warnSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    process.env.NODE_ENV = originalNodeEnv;
+    delete process.env.API_DOCS_ENABLED;
+    warnSpy.mockRestore();
+  });
+
+  it("en producción está apagado si no se define la variable", () => {
+    process.env.NODE_ENV = "production";
+    expect(apiDocsEnabled()).toBe(false);
+  });
+
+  it.each(["development", "test"])("fuera de producción (%s) está encendido", (env) => {
+    process.env.NODE_ENV = env;
+    expect(apiDocsEnabled()).toBe(true);
+  });
+
+  it("API_DOCS_ENABLED=true lo enciende en producción (para depurar sin redesplegar)", () => {
+    process.env.NODE_ENV = "production";
+    process.env.API_DOCS_ENABLED = "true";
+    expect(apiDocsEnabled()).toBe(true);
+  });
+
+  it("API_DOCS_ENABLED=false lo apaga también en desarrollo", () => {
+    process.env.NODE_ENV = "development";
+    process.env.API_DOCS_ENABLED = "false";
+    expect(apiDocsEnabled()).toBe(false);
+  });
+
+  it("un valor sin sentido en producción NO lo enciende", () => {
+    // El fallback seguro: una variable mal escrita no debe publicar el mapa de endpoints.
+    process.env.NODE_ENV = "production";
+    process.env.API_DOCS_ENABLED = "si";
+    expect(apiDocsEnabled()).toBe(false);
+    expect(warnSpy).toHaveBeenCalled();
   });
 });

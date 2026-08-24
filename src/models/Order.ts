@@ -1,4 +1,4 @@
-import { DataTypes, Model, Optional } from "sequelize";
+import { DataTypes, Model, Op, Optional } from "sequelize";
 import { sequelize } from "../config/database";
 import type { OrderItem } from "./OrderItem";
 
@@ -442,12 +442,30 @@ Order.init(
     sequelize,
     tableName: "orders",
     timestamps: true,
-    // El índice se declara aquí ADEMÁS de en su migración (Fase O.4) porque
-    // `tests/setup/db.ts` arma el esquema con `sync({ force: true })`, no con migraciones:
-    // sin esto, la unicidad del token —la única garantía de que un token no resuelva a dos
-    // pedidos— no existiría en la BD de test. Mismo motivo que el índice de `product_sizes`.
+    // Los índices se declaran aquí ADEMÁS de en su migración porque `tests/setup/db.ts` arma el
+    // esquema con `sync({ force: true })`, no con migraciones: sin esto, la unicidad del token
+    // —la única garantía de que un token no resuelva a dos pedidos— no existiría en la BD de
+    // test. Mismo motivo que el índice de `product_sizes` y los del catálogo en `Product.ts`.
     indexes: [
+      // Fase O.4.
       { unique: true, fields: ["publicToken"], name: "orders_public_token_unique" },
+      // Consultas calientes (v. migración 20260824120000-orders-hot-query-indexes.ts). Los dos
+      // primeros son parciales porque esas columnas solo se consultan por valor exacto, nunca
+      // por `IS NULL`, y están en `null` en buena parte de las filas.
+      {
+        name: "orders_payment_intent_id",
+        fields: ["paymentIntentId"],
+        where: { paymentIntentId: { [Op.ne]: null } },
+      },
+      {
+        name: "orders_skydropx_shipment_id",
+        fields: ["skydropxShipmentId"],
+        where: { skydropxShipmentId: { [Op.ne]: null } },
+      },
+      // Compuestos con `createdAt`: dashboard, reportes y los dos barridos filtran siempre por
+      // estado MÁS una ventana de fechas, y ordenan por `createdAt`.
+      { name: "orders_payment_status_created_at", fields: ["paymentStatus", "createdAt"] },
+      { name: "orders_status_created_at", fields: ["status", "createdAt"] },
     ],
   },
 );

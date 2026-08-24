@@ -68,3 +68,46 @@ export function trustProxyEnv(): number | string | boolean | undefined {
   // entiende, que es justo el fail-fast que queremos para un valor mal escrito.
   return raw;
 }
+
+/**
+ * Lectura defensiva de variables de entorno booleanas.
+ *
+ * Mismo criterio que `positiveNumberEnv`: `Boolean(process.env.X)` es inservible aquí porque
+ * **cualquier cadena no vacía es `true`**, incluido `"false"` — justo el valor que alguien
+ * escribiría para apagar algo. Se aceptan las dos escrituras habituales (`true`/`false` y
+ * `1`/`0`), sin distinguir mayúsculas ni espacios, y cualquier otra cosa cae al default con
+ * un aviso en vez de lanzar: una bandera operativa mal escrita no debe impedir el arranque.
+ */
+export function booleanEnv(name: string, fallback: boolean): boolean {
+  const raw = process.env[name]?.trim().toLowerCase();
+  if (raw === undefined || raw === "") return fallback;
+
+  if (raw === "true" || raw === "1") return true;
+  if (raw === "false" || raw === "0") return false;
+
+  // `console.warn` y no pino, por el mismo motivo que en `positiveNumberEnv`.
+  console.warn(
+    `[config] ${name}="${raw}" no es un booleano válido (true/false/1/0); se usará ${fallback}.`,
+  );
+  return fallback;
+}
+
+/**
+ * ¿Se sirven Swagger UI (`/api/docs`) y el spec crudo (`/api/docs.json`)?
+ *
+ * **Apagado por defecto en producción.** Las rutas admin siguen exigiendo JWT, así que servir
+ * el spec no es una vulnerabilidad por sí sola, pero le regala a cualquiera el mapa completo
+ * de endpoints, sus cuerpos y sus respuestas — incluidos los del panel. `API_DOCS_ENABLED=true`
+ * lo vuelve a encender sin tocar código, para poder depurar un rato contra el despliegue real;
+ * fuera de producción (dev y test) queda encendido como siempre.
+ *
+ * No se protegió con `requireAuth`: Swagger UI se carga desde el navegador y este no manda el
+ * header `Authorization` al pedir sus propios assets ni el spec, así que la UI quedaría rota.
+ *
+ * Vive aquí y no inline en `app.ts` para poder probar la política "en producción, apagado" sin
+ * reimportar `app.ts` con `NODE_ENV=production` — eso dispararía `connectDB()`, los tres crons
+ * y `app.listen(PORT)` dentro de la suite.
+ */
+export function apiDocsEnabled(): boolean {
+  return booleanEnv("API_DOCS_ENABLED", process.env.NODE_ENV !== "production");
+}

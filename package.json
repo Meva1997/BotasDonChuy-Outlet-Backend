@@ -26,6 +26,9 @@
   "author": "Alex Medina",
   "license": "MIT",
   "packageManager": "pnpm@11.20.0",
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {
     "@sentry/node": "^10.67.0",
     "bcrypt": "^6.0.0",
