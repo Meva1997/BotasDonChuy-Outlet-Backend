@@ -6,6 +6,7 @@ import dotenv from "dotenv";
 import swaggerUi from "swagger-ui-express";
 import { connectDB, sequelize } from "./config/database";
 import { logger } from "./config/logger";
+import "./config/auth"; // valida JWT_SECRET al arrancar (fail-fast) y fija JWT_EXPIRES_IN
 import "./config/cloudinary"; // valida las llaves de Cloudinary al arrancar (fail-fast)
 import "./config/resend"; // valida RESEND_API_KEY + EMAIL_FROM al arrancar (fail-fast)
 import "./config/skydropx"; // valida SKYDROPX_CLIENT_ID + SKYDROPX_CLIENT_SECRET al arrancar (fail-fast)

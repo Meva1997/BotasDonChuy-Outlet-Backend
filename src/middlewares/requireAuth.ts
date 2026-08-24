@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import jsonwebtoken from "jsonwebtoken";
+import { JWT_SECRET } from "../config/auth";
 import { AppError } from "./AppError";
 
 export interface AuthUser {
@@ -27,7 +28,7 @@ export const requireAuth = (
   const token = authHeader.slice("Bearer ".length);
 
   try {
-    const decoded = jsonwebtoken.verify(token, process.env.JWT_SECRET!) as AuthUser;
+    const decoded = jsonwebtoken.verify(token, JWT_SECRET) as AuthUser;
     req.user = decoded;
     next();
   } catch {

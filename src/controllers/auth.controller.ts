@@ -1,5 +1,6 @@
 import type { RequestHandler, Response } from "express";
-import jsonwebtoken, { type SignOptions } from "jsonwebtoken";
+import jsonwebtoken from "jsonwebtoken";
+import { JWT_SECRET, JWT_EXPIRES_IN } from "../config/auth";
 import { AdminUser } from "../models/AdminUser";
 import { asyncHandler } from "../middlewares/asyncHandler";
 import { AppError } from "../middlewares/AppError";
@@ -59,8 +60,8 @@ export const login: RequestHandler = asyncHandler(
       role: user.role,
     };
 
-    const token = jsonwebtoken.sign(payload, process.env.JWT_SECRET!, {
-      expiresIn: process.env.JWT_EXPIRES_IN as SignOptions["expiresIn"],
+    const token = jsonwebtoken.sign(payload, JWT_SECRET, {
+      expiresIn: JWT_EXPIRES_IN,
     });
 
     res.json({ token, user: payload });

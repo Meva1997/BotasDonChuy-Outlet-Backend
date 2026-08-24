@@ -193,6 +193,48 @@ with explicit `id`s, Postgres SERIAL sequences are left behind; the seed resyncs
 (`setval(pg_get_serial_sequence(table,'id'), MAX(id))`) at the end of the transaction so later
 `id DEFAULT` inserts (e.g. `POST /api/admin/products`) don't collide with seeded ids.
 
+⚠️ **`pnpm seed` is development-only and must never run against production.** Before inserting anything
+it `TRUNCATE … RESTART IDENTITY CASCADE`s eight tables (`orders` and `adminusers` among them) *outside*
+the transaction, inserts 30+ mock products plus a fake order history the dashboard and reports would
+count as real sales, hardcodes the admin's email/password, and calls `process.exit` as a **side effect
+of being imported** (which is why `brand.controller.ts` duplicates `BRAND_DEFAULTS` instead of importing
+it, and why `seed.ts` has no tests).
+
+### First admin user in production (`src/scripts/bootstrapAdmin.ts`)
+
+The only way into the panel on a fresh database: `POST /api/admin/users` requires a JWT, and getting a
+JWT requires a user. Run **compiled** — `node dist/scripts/bootstrapAdmin.js` — because `ts-node`,
+`sequelize-cli` and `typescript` are devDependencies, so `pnpm seed`/`pnpm migrate` don't exist after a
+`pnpm install --prod`; everything this script needs at runtime (`bcrypt`, `sequelize`, `pg`, `dotenv`,
+`zod`) is already a prod dependency. `pnpm bootstrap:admin` is the local ts-node convenience only.
+
+Credentials come in as **env vars** (`BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD`, plus optional
+`BOOTSTRAP_ADMIN_NAME`/`BOOTSTRAP_ADMIN_ROLE`/`BOOTSTRAP_RESET_PASSWORD`), never argv — the password
+would otherwise land in shell history and be visible in `ps`.
+
+Load-bearing details:
+- **It validates with `createAdminUserSchema`**, the same schema `POST /api/admin/users` uses — never
+  re-derived rules. A laxer password rule here would hash fine and produce an account that can **never**
+  pass `POST /api/auth/login`, exactly what `src/schemas/auth.ts`'s header warns about. The schema
+  `.trim()`s **before** the regexes, so what gets hashed is the **parsed** string, not the raw env value
+  (a trailing space pasted into a PaaS variable editor would otherwise create a dead account).
+- **`role` defaults to `owner`, not the schema's `admin`.** `DELETE /api/admin/users/:id` refuses to
+  delete the last `owner`; a database bootstrapped as `admin` has zero owners, so that guard protects
+  nothing. Both roles carry identical route permissions by design, so this opens no access.
+- **An existing email is a hard failure (exit 1), not an overwrite** — unless `BOOTSTRAP_RESET_PASSWORD`
+  is on, which is also how the seeded admin's password gets rotated. The reset clears the three
+  password-reset columns, like `resetPassword` does, or a code issued beforehand would still be live
+  against the brand-new password.
+- **It never imports `src/app.ts`** — that would fail-fast on the Cloudinary/Resend/Skydropx keys, start
+  the three crons and bind the port. `DATABASE_URL` (plus optional `BCRYPT_ROUNDS`) is the whole
+  requirement. `config/database` must be imported **before** `utils/password`, which reads
+  `BCRYPT_ROUNDS` at module evaluation while `database.ts` is what calls `dotenv.config()`.
+- **It does not create `BrandSettings`** — `brand.controller.ts` already `findOrCreate`s the `id: 1`
+  singleton on the first (public) `GET /api/admin/brand`; doing it here would add a third copy of
+  `BRAND_DEFAULTS`.
+- Logic lives in the exported `bootstrapAdmin(env)`, with the CLI runner behind
+  `if (require.main === module)`, so it's testable — the trap `seed.ts` fell into.
+
 ### API docs (`src/config/swagger.ts`)
 
 `swagger-jsdoc` builds an OpenAPI 3.0 spec from a base `definition` (info, `servers`, `bearerAuth` security
@@ -218,7 +260,8 @@ email, compares the bcrypt hash, and returns `{ token, user }`; an unknown email
 return the **same** `401` message (anti-enumeration). `GET /api/auth/me` is protected by `requireAuth` and
 returns the decoded `{ user }`. `/login`, `/forgot-password`, `/verify-reset-code` and `/reset-password`
 are gated behind `authRateLimiter` (10 req / 15 min). `requireAuth` (`src/middlewares/requireAuth.ts`)
-extracts the Bearer token, verifies it with `JWT_SECRET`, and attaches `req.user: AuthUser`.
+extracts the Bearer token, verifies it with the `JWT_SECRET` exported by `src/config/auth.ts`
+(hard-required at startup — see **Conventions**), and attaches `req.user: AuthUser`.
 `requireRole(...roles)` checks `req.user.role` and throws `403` if the role isn't listed.
 
 **Password reset via 5-digit code** (Fase 9.2 — `auth.controller.ts`, `src/utils/resetCode.ts`): the
@@ -929,7 +972,7 @@ file, not an inline object — an inline `tsconfig` **replaces** the base config
 `roadmaps-completados/roadmap-testing.md` breaks the work into **independent parts** (0 = infra; 0.5 =
 dedicated test DB; 1 = pure services; 2 = auth; 3 = checkout; 4 = webhook idempotency; 5 = manual
 cancel/refund/release; 6 = live shipping rates; 7 = Skydropx HTTP client; 8 = admin product CRUD + images;
-9 = brand/admin users; 10 = dashboard/reports aggregations) — **all twelve are done** (60 suites / 787 tests
+9 = brand/admin users; 10 = dashboard/reports aggregations) — **all twelve are done** (62 suites / 811 tests
 at last count; new phases add their own suite, e.g. `adminOrderStatus.test.ts` (O.1),
 `checkoutIdempotency.test.ts` + `pendingOrderSweeper.test.ts` (O.2), `shipmentRetry.test.ts` (O.3),
 `orderLookup.test.ts` + `unit/services/orderConfirmationTemplate.test.ts` (O.4), the six coupon suites
@@ -937,7 +980,8 @@ at last count; new phases add their own suite, e.g. `adminOrderStatus.test.ts` (
 + `dailySalesDigest.test.ts` + `unit/utils/storeDay.test.ts` +
 `unit/services/newOrderNotificationTemplate.test.ts` (N.4), `unit/services/packing.test.ts` (N.6), and
 the pre-production hardening trio `unit/config/apiDocs.test.ts` + `integration/orderIndexes.test.ts`
-+ the `booleanEnv`/`apiDocsEnabled` blocks in `unit/utils/env.test.ts`).
++ the `booleanEnv`/`apiDocsEnabled` blocks in `unit/utils/env.test.ts`, and the deploy-prep pair
+`integration/bootstrapAdmin.test.ts` + `unit/config/auth.test.ts`).
 Keep adding tests **part by part**, marking
 `[x]` as each closes, and don't touch `src/` from a test change unless a test reveals a real bug.
 
@@ -979,12 +1023,18 @@ all suites and removes the race. Don't re-parallelize without also fixing that s
   `emitDecoratorMetadata`); source in `src/`, output in `dist/`.
 - **Configuration comes exclusively from environment variables.** `.env` is gitignored — never commit it
   (the Stripe/Resend keys are test/sandbox; Skydropx points at its own separate sandbox account).
+  **`.env.example` at the repo root is the versioned, canonical list** (`.gitignore` names `.env` and
+  `.env.test` literally, so it isn't ignored) — it's what gets copied when registering the service with a
+  PaaS, and it marks each variable required-vs-optional with its default. **When you add a new env knob to
+  the code, add it there too**; `README.md` §Variables de entorno now points at it instead of repeating
+  the list, so the two can't drift.
   - **Required (server throws at startup without them):** `DATABASE_URL`, `JWT_SECRET`,
     `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `RESEND_API_KEY`, `EMAIL_FROM`, the three
     `CLOUDINARY_*` keys, `SKYDROPX_CLIENT_ID`, `SKYDROPX_CLIENT_SECRET`, `SKYDROPX_WEBHOOK_SECRET`, and all
     eight `SHIP_FROM_*`
     (`POSTAL_CODE`/`STATE`/`CITY`/`NEIGHBORHOOD`/`STREET`/`EXTERNAL_NUMBER`/`NAME`/`PHONE`).
-  - **Optional:** `PORT`, `NODE_ENV`, `CORS_ORIGIN`, `JWT_EXPIRES_IN`, `FRONTEND_URL`, `STRIPE_CURRENCY`,
+  - **Optional:** `PORT`, `NODE_ENV`, `CORS_ORIGIN`, `JWT_EXPIRES_IN` (`7d`), `BCRYPT_ROUNDS` (10),
+    `FRONTEND_URL`, `STRIPE_CURRENCY`,
     `PENDING_ORDER_TTL_MINUTES` (30), `PENDING_ORDER_SWEEP_INTERVAL_MINUTES` (10), `SKYDROPX_BASE_URL`
     (sandbox host), `SKYDROPX_CARRIERS`, `SHIPMENT_RETRY_DELAY_MINUTES` (15),
     `SHIPMENT_RETRY_SWEEP_INTERVAL_MINUTES` (10), `HEALTH_READY_TIMEOUT_MS` (3000), `MIN_CHARGE_MXN` (10),
@@ -992,7 +1042,16 @@ all suites and removes the race. Don't re-parallelize without also fixing that s
     set), `ALERT_EMAIL_TO` (operational alerts), `OWNER_NOTIFICATION_EMAIL` (business notifications, falls
     back to `ALERT_EMAIL_TO`; with neither set, Fase N.4 is off — deliberately its only switch),
     `LOG_LEVEL`, `TRUST_PROXY`, and `API_DOCS_ENABLED` (serves `/api/docs` + `/api/docs.json`;
-    defaults to on outside production, off in it).
+    defaults to on outside production, off in it). The five `BOOTSTRAP_ADMIN_*`/`BOOTSTRAP_RESET_PASSWORD`
+    vars are read **only** by `src/scripts/bootstrapAdmin.ts`, never by the server.
+  - **`JWT_SECRET` fail-fasts in `src/config/auth.ts`** (same pattern as `stripe.ts`/`resend.ts`: own
+    `dotenv.config()`, hard-require, side-effect imported from `app.ts`). Until that module existed both
+    `auth.controller.ts` and `requireAuth.ts` read it as `process.env.JWT_SECRET!` with **nothing
+    validating it**, so a deploy missing it booted happily, served the public catalog, and only blew up
+    with a **500 on the first login** — the symptom arriving far from the cause. It also pins
+    `JWT_EXPIRES_IN` to an explicit `"7d"` default: the old `expiresIn: process.env.JWT_EXPIRES_IN`
+    produced `undefined` when unset, i.e. **tokens that never expire**, unrevocable without rotating the
+    secret and logging everyone out.
   - **Numeric knobs go through `positiveNumberEnv` (`src/utils/env.ts`)**, not a bare
     `Number(process.env.X ?? default)`: `??` only falls back on `undefined`, so a blank line in `.env`
     parses as `0` and a typo as `NaN` — and a `0` retry margin means a sentinel claimed milliseconds ago

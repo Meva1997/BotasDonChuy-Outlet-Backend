@@ -31,80 +31,39 @@ Construido con Express 5, TypeScript y Sequelize sobre PostgreSQL.
 
 ```bash
 pnpm install
+cp .env.example .env   # y llena los valores (ver Variables de entorno)
+pnpm migrate           # aplica el esquema
 ```
 
 ## Variables de entorno
 
-Crea un archivo `.env` en la raíz del proyecto (no se versiona):
+La lista completa y comentada de variables vive en **`.env.example`** (versionado). Para
+empezar, cópialo y llena los valores:
 
-```env
-PORT=4000
-NODE_ENV=development
-DATABASE_URL=postgres://usuario:password@host:5432/basededatos
-CORS_ORIGIN=http://localhost:3000,https://tu-dominio.com
-
-# Auth
-JWT_SECRET=un_secreto_largo_y_seguro
-JWT_EXPIRES_IN=7d
-
-# Cloudinary
-CLOUDINARY_CLOUD_NAME=tu_cloud_name
-CLOUDINARY_API_KEY=tu_api_key
-CLOUDINARY_API_SECRET=tu_api_secret
-
-# Stripe (test/sandbox) — ambas son OBLIGATORIAS: el server no arranca sin ellas
-STRIPE_SECRET_KEY=sk_test_...           # o una restricted key rk_test_... con permiso de PaymentIntents
-STRIPE_WEBHOOK_SECRET=whsec_...         # de `stripe listen` (local) o del endpoint del dashboard
-STRIPE_CURRENCY=mxn                      # opcional (default mxn)
-PENDING_ORDER_TTL_MINUTES=30            # opcional: antigüedad para reciclar órdenes pending
-PENDING_ORDER_SWEEP_INTERVAL_MINUTES=10 # opcional: cada cuánto corre el barrido
-
-# Resend (emails transaccionales) — ambas OBLIGATORIAS: el server no arranca sin ellas
-RESEND_API_KEY=re_...                    # del dashboard de Resend
-EMAIL_FROM=Botas Don Chuy Outlet <no-reply@botasdonchuy.com>  # dominio verificado en Resend (ver abajo)
-FRONTEND_URL=http://localhost:3000       # opcional: base para links dentro de los correos
-
-# Skydropx (cotización en vivo + guía automática) — client id/secret, webhook secret y los 8 SHIP_FROM_* son OBLIGATORIOS
-SKYDROPX_CLIENT_ID=...
-SKYDROPX_CLIENT_SECRET=...
-SKYDROPX_WEBHOOK_SECRET=...             # secreto HMAC del webhook de estado de envío (Fase 8.6); el server no arranca sin él
-SKYDROPX_BASE_URL=https://sb-pro.skydropx.com   # opcional (default: sandbox; producción es pro.skydropx.com)
-SKYDROPX_CARRIERS=dhl,paquetexpress    # opcional: slugs provider_name separados por coma, restringe qué paqueterías cotizar
-SHIPMENT_RETRY_DELAY_MINUTES=15         # opcional: espera antes de reintentar una guía (y antigüedad de un centinela huérfano)
-SHIPMENT_RETRY_SWEEP_INTERVAL_MINUTES=10 # opcional: cada cuánto corre el barrido de guías pendientes
-SHIP_FROM_POSTAL_CODE=38000
-SHIP_FROM_STATE=Guanajuato
-SHIP_FROM_CITY=Celaya
-SHIP_FROM_NEIGHBORHOOD=Centro
-SHIP_FROM_STREET=...          # dirección de origen de la guía (Fase 8.5)
-SHIP_FROM_EXTERNAL_NUMBER=...
-SHIP_FROM_NAME=...
-SHIP_FROM_PHONE=...
-
-# Logging y monitoreo (Fase H.4) — todas opcionales, nada de esto bloquea el arranque
-LOG_LEVEL=debug                         # opcional: nivel de pino (default info en prod, debug en dev)
-SENTRY_DSN=https://...ingest.sentry.io/...  # opcional: si falta, Sentry queda deshabilitado (solo se loguea)
-ALERT_EMAIL_TO=tu_correo@ejemplo.com     # opcional: destino de las alertas operativas (correo vía Resend)
-
-# Despliegue detrás de un proxy — opcional, pero necesaria si hay uno (ver nota abajo)
-TRUST_PROXY=1                            # saltos de proxy en los que confiar (1 = lo típico en un PaaS)
-
-# Documentación de la API — opcional. Apagada en producción salvo que se ponga aquí `true`
-API_DOCS_ENABLED=true                    # sirve /api/docs y /api/docs.json (default: on fuera de producción)
-
-# Healthcheck (Fase O.5) — opcional
-HEALTH_READY_TIMEOUT_MS=3000             # margen del chequeo de BD en /health/ready (default 3000)
-
-# Cupones (Fase N.2) — opcional
-MIN_CHARGE_MXN=10                        # total mínimo que acepta el checkout (default 10, el mínimo de Stripe en MXN)
-
-# Avisos de venta al dueño (Fase N.4) — opcionales, pero SIN destinatario la fase queda apagada
-OWNER_NOTIFICATION_EMAIL=duenio@ejemplo.com  # destino del aviso por venta y del resumen diario;
-                                             # si falta, cae a ALERT_EMAIL_TO. Ponerlo aparte permite
-                                             # filtrar "vendiste" de "algo se rompió".
-DAILY_DIGEST_HOUR=8                      # hora local (Celaya) del resumen del día anterior (default 8; válido 1–23)
-DAILY_DIGEST_CHECK_INTERVAL_MINUTES=15   # cada cuánto se revisa si ya toca mandarlo (default 15)
+```bash
+cp .env.example .env
 ```
+
+`.env` está en `.gitignore` y nunca se commitea. `.env.example` es la **referencia canónica**:
+marca cuáles son obligatorias (el server no arranca sin ellas, por el fail-fast de cada
+`src/config/*`), cuáles son opcionales y con qué valor caen por defecto. Al agregar una variable
+nueva al código, agrégala también ahí — es lo que se copia al dar de alta el servicio en el
+proveedor.
+
+| Bloque | Variables |
+| --- | --- |
+| Núcleo | `DATABASE_URL`\*, `PORT`, `NODE_ENV`, `CORS_ORIGIN` |
+| Auth | `JWT_SECRET`\*, `JWT_EXPIRES_IN`, `BCRYPT_ROUNDS` |
+| Cloudinary | `CLOUDINARY_CLOUD_NAME`\*, `CLOUDINARY_API_KEY`\*, `CLOUDINARY_API_SECRET`\* |
+| Stripe | `STRIPE_SECRET_KEY`\*, `STRIPE_WEBHOOK_SECRET`\*, `STRIPE_CURRENCY`, `PENDING_ORDER_TTL_MINUTES`, `PENDING_ORDER_SWEEP_INTERVAL_MINUTES` |
+| Resend | `RESEND_API_KEY`\*, `EMAIL_FROM`\*, `FRONTEND_URL` |
+| Skydropx | `SKYDROPX_CLIENT_ID`\*, `SKYDROPX_CLIENT_SECRET`\*, `SKYDROPX_WEBHOOK_SECRET`\*, los 8 `SHIP_FROM_*`\*, `SKYDROPX_BASE_URL`, `SKYDROPX_CARRIERS`, `SHIPMENT_RETRY_DELAY_MINUTES`, `SHIPMENT_RETRY_SWEEP_INTERVAL_MINUTES` |
+| Logging y monitoreo | `LOG_LEVEL`, `SENTRY_DSN`, `ALERT_EMAIL_TO` |
+| Despliegue | `TRUST_PROXY`, `API_DOCS_ENABLED`, `HEALTH_READY_TIMEOUT_MS` |
+| Negocio | `MIN_CHARGE_MXN`, `OWNER_NOTIFICATION_EMAIL`, `DAILY_DIGEST_HOUR`, `DAILY_DIGEST_CHECK_INTERVAL_MINUTES` |
+| Alta del primer admin | `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD`, `BOOTSTRAP_ADMIN_NAME`, `BOOTSTRAP_ADMIN_ROLE`, `BOOTSTRAP_RESET_PASSWORD` (solo las lee el script de bootstrap, ver [Alta del primer usuario admin](#alta-del-primer-usuario-admin)) |
+
+\* obligatoria: el proceso falla al arrancar si falta.
 
 > **`TRUST_PROXY` cuando la API va detrás de un proxy** (Render, Railway, Fly, nginx,
 > Cloudflare…). Sin ella, `req.ip` es la IP del proxy y **todos** los rate limiters de
@@ -169,11 +128,76 @@ dudas y reclamos sin construir nada nuevo dentro del panel admin. Pasos cuando s
 | `pnpm start`            | Ejecuta la build de producción (`node dist/app.js`)  |
 | `pnpm test`             | Corre la suite de tests con Jest (ver [Testing](#testing)) |
 | `pnpm test:watch`       | Corre Jest en modo watch                             |
-| `pnpm seed`             | Llena la base de datos con productos, histórico de ventas, usuario admin semilla y configuración de marca (`src/seed.ts`) |
+| `pnpm seed`             | **Solo desarrollo.** Llena la base con productos, histórico de ventas, usuario admin semilla y configuración de marca (`src/seed.ts`) |
+| `pnpm bootstrap:admin`  | Da de alta el primer usuario admin (`src/scripts/bootstrapAdmin.ts`). En producción se corre compilado, ver [Alta del primer usuario admin](#alta-del-primer-usuario-admin) |
 | `pnpm migrate`          | Aplica las migraciones de esquema pendientes (`sequelize-cli db:migrate`) |
 | `pnpm migrate:undo`     | Revierte la última migración aplicada (`db:migrate:undo`) |
 | `pnpm migrate:undo:all` | Revierte **todas** las migraciones (`db:migrate:undo:all`) |
 | `pnpm migrate:status`   | Lista qué migraciones están aplicadas y cuáles pendientes (`db:migrate:status`) |
+
+> ⚠️ **`pnpm seed` NO debe correrse nunca contra producción.** Antes de insertar nada hace
+> `TRUNCATE … RESTART IDENTITY CASCADE` de ocho tablas —`orders` y `adminusers` incluidas—, mete
+> 30+ productos de prueba y un histórico de órdenes falsas que el dashboard y los reportes
+> contarían como ventas reales, y crea el admin con correo y contraseña **hardcodeados**. Para
+> dar de alta el primer usuario en un despliegue real está el script de bootstrap, abajo.
+
+## Alta del primer usuario admin
+
+En una base recién creada no hay forma de entrar al panel: `POST /api/admin/users` exige un JWT,
+y para tener un JWT hace falta un usuario. Ese huevo-y-gallina lo rompe
+`src/scripts/bootstrapAdmin.ts`, que solo toca la tabla `adminusers` (una fila) y **nada más**.
+
+En producción se corre **compilado**, con `node` pelón:
+
+```bash
+pnpm build   # ya forma parte del build step del despliegue
+
+BOOTSTRAP_ADMIN_EMAIL=duenio@botasdonchuy.com \
+BOOTSTRAP_ADMIN_PASSWORD='TuContra1@' \
+  node dist/scripts/bootstrapAdmin.js
+```
+
+En local, `pnpm bootstrap:admin` hace lo mismo vía `ts-node`.
+
+Las credenciales entran por **variables de entorno** y no como argumentos para que la contraseña
+no quede en el historial del shell ni sea visible en `ps`. La contraseña debe cumplir **exactamente
+lo mismo que exige el login** (8+ caracteres, una mayúscula, un número y un signo de
+``!@#$%^&*(),.?":{}|<>_-+=``) — el script valida con el mismo esquema zod que
+`POST /api/admin/users`, porque una contraseña más laxa produciría una cuenta que hashea bien pero
+**nunca podría iniciar sesión**.
+
+| Variable | Default | Para qué |
+| --- | --- | --- |
+| `BOOTSTRAP_ADMIN_EMAIL` | — | Correo con el que se entra al panel. Se guarda tal cual: el login lo compara sin normalizar |
+| `BOOTSTRAP_ADMIN_PASSWORD` | — | Contraseña inicial. Se recorta con `trim` antes de hashearse |
+| `BOOTSTRAP_ADMIN_NAME` | `Admin` | Nombre que se muestra en el panel |
+| `BOOTSTRAP_ADMIN_ROLE` | `owner` | `owner` o `admin` |
+| `BOOTSTRAP_RESET_PASSWORD` | — | Con `true`, reescribe la contraseña si el correo ya existe |
+
+**Por qué el default es `owner` y no `admin`:** `DELETE /api/admin/users/:id` se niega a borrar al
+último `owner`, así que una base con cero owners deja ese guard sin nada que proteger y el panel se
+puede quedar sin acceso. Los dos roles tienen los mismos permisos de ruta por diseño, de modo que
+esto no abre nada — solo activa el guard de integridad.
+
+Si el correo ya existe, el script **falla y no toca la fila** (exit 1). Para reescribir la
+contraseña —por ejemplo la del admin semilla, si en algún momento se corrió `pnpm seed` contra esa
+base— hay que pedirlo explícitamente:
+
+```bash
+BOOTSTRAP_ADMIN_EMAIL=duenio@botasdonchuy.com \
+BOOTSTRAP_ADMIN_PASSWORD='OtraContra9@' \
+BOOTSTRAP_RESET_PASSWORD=true \
+  node dist/scripts/bootstrapAdmin.js
+```
+
+El reset también limpia las tres columnas de recuperación (`resetPasswordCodeHash`,
+`resetPasswordExpiresAt`, `resetPasswordAttempts`): si no, un código de 5 dígitos pedido antes del
+reset seguiría vivo y serviría para cambiar la contraseña recién puesta.
+
+El script **no importa `src/app.ts`**, así que no exige las llaves de Stripe/Resend/Cloudinary/
+Skydropx ni arranca los crons ni abre el puerto: con `DATABASE_URL` (y opcionalmente
+`BCRYPT_ROUNDS`) basta. Tampoco crea `BrandSettings` — esa fila la crea sola `brand.controller.ts`
+en el primer `GET /api/admin/brand`.
 
 ## Migraciones
 
@@ -1013,7 +1037,7 @@ Suite automatizada con **Jest + ts-jest + supertest** (Fase H.1 — ver
 [`roadmaps-completados/roadmap-testing.md`](roadmaps-completados/roadmap-testing.md) para el desglose por partes; las **12 partes** — infra,
 BD de test, servicios puros, auth, checkout, idempotencia de webhooks, cancelación/reembolso manual,
 envío en vivo, cliente Skydropx, CRUD admin de productos/imágenes, marca/usuarios admin y
-agregaciones de dashboard/reports — están **completas**: 60 suites / 787 tests en verde, y cada
+agregaciones de dashboard/reports — están **completas**: 62 suites / 811 tests en verde, y cada
 fase nueva suma la suya). Los tests
 viven en `tests/` (fuera de `src/`, para que `tsc` no los incluya en el build de producción);
 `ts-jest` los transpila en memoria.
@@ -1074,6 +1098,7 @@ anotaciones JSDoc `@openapi` sobre su router en `src/routes/*.ts`.
 ## Estructura
 
 ```
+.env.example                     # Plantilla versionada de TODAS las variables de entorno (cópiala a .env)
 .sequelizerc                     # Config de sequelize-cli (ts-node/register + rutas de migrations/seeders/models)
 jest.config.ts                   # Config de Jest (preset ts-jest, setupFiles, testMatch tests/**)
 tsconfig.jest.json               # tsconfig para tests (extiende el base; rootDir "." + types jest/node)
@@ -1087,9 +1112,12 @@ tests/                           # Suite automatizada (fuera de src/ — tsc la 
                                   # adminProducts, adminProductImport, adminBrandUsers, healthReady)
 src/
 ├── app.ts                       # Punto de entrada: Express, middleware, arranque y apagado ordenado
-├── seed.ts                      # Script de seed (productos, histórico, admin, marca)
+├── seed.ts                      # Script de seed SOLO PARA DESARROLLO (trunca 8 tablas y mete datos mock)
+├── scripts/
+│   └── bootstrapAdmin.ts        # Alta del primer usuario admin en una base vacía (compilado a dist/)
 ├── config/
 │   ├── database.ts              # Conexión Sequelize a PostgreSQL
+│   ├── auth.ts                  # JWT_SECRET exigido al arrancar (fail-fast) + JWT_EXPIRES_IN (default 7d)
 │   ├── sequelize-cli.js         # Config de conexión para sequelize-cli (JS plano, dotenv propio)
 │   ├── stripe.ts                # Cliente Stripe + llaves exigidas (test/sandbox)
 │   ├── cloudinary.ts            # Cliente Cloudinary + llaves exigidas (fail-fast al arrancar)

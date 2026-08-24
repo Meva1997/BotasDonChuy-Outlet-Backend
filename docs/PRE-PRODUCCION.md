@@ -5,7 +5,9 @@
 > repite aquí, vive en `README.md`, `CLAUDE.md` y `docs/features/`.
 >
 > **Actualizado el 2026-08-24:** cerrados los cinco arreglos de código del paso 2 del orden de
-> ejecución — puntos **8**, **9**, **10**, **11** y **14**. Lo que queda es despliegue,
+> ejecución — puntos **8**, **9**, **10**, **11** y **14**— y después el **paso 3**:
+> `.env.example` versionado (parte del punto **1**) y el script de bootstrap del admin
+> (punto **6**), más el punto **15** que salió de esa revisión. Lo que queda es despliegue,
 > credenciales y operación.
 
 ## Estado verificado hoy
@@ -15,7 +17,7 @@ Todo esto se comprobó ejecutándolo, no leyéndolo:
 | Comprobación | Resultado |
 | --- | --- |
 | `pnpm build` (type-check + emisión a `dist/`) | ✅ sin errores |
-| `pnpm test` | ✅ **60 suites / 787 tests**, todos pasando (40 s) |
+| `pnpm test` | ✅ **62 suites / 811 tests**, todos pasando (47 s) |
 | Migraciones vs. modelos | ✅ sin drift: cada columna de `Order`/`Product`/etc. tiene su migración |
 | Integración con el frontend | ✅ las 27 fases de `../frontend/ROADMAP-BACKEND-INTEGRATION.md` cerradas; disputas (Fase 28) ya se pintan en el panel |
 | CI (`.github/workflows/ci.yml`) | ✅ Postgres 16 + `pnpm build` + `pnpm test` en cada PR y push a `main` |
@@ -32,14 +34,16 @@ Es el hueco más grande. El frontend ya tiene su camino (`vercel.json`, `.env.ve
 `outlet.botasdonchuy.com` apuntando a Vercel); **el backend no tiene nada**:
 
 - Sin `Dockerfile`, `render.yaml`, `fly.toml`, `Procfile` ni equivalente.
-- Sin `.env.example` versionado — la única lista de variables está en prosa dentro del `README.md`,
-  así que dar de alta el servicio en el PaaS es copiar a mano ~35 variables sin nada que las valide.
+- ~~Sin `.env.example` versionado~~ — ✅ cerrado el 2026-08-24 (ver abajo).
 - Sin paso de deploy que corra `pnpm migrate` (ver punto 5).
 
 **Qué hacer:**
 - [ ] Elegir proveedor (Render/Railway/Fly — el roadmap de gastos ya asume Render) y crear el servicio.
-- [ ] Crear `.env.example` en la raíz con **todas** las variables (nombres + comentario, sin valores)
-      y versionarlo. Es la referencia de alta y evita descubrir una variable faltante en el arranque.
+- [x] ~~Crear `.env.example` en la raíz con **todas** las variables (nombres + comentario, sin valores)
+      y versionarlo.~~ ✅ **Hecho el 2026-08-24.** Las **48** variables (43 que lee el server + las 5
+      `BOOTSTRAP_*`), agrupadas por bloque, cada una marcada obligatoria u opcional-con-default.
+      `README.md` §Variables de entorno dejó de repetir la lista y ahora apunta ahí, para que no
+      puedan divergir.
 - [ ] Definir el comando de arranque: `pnpm build` en build, `pnpm start` en runtime.
 - [ ] Apuntar el *readiness probe* del proveedor a `GET /health/ready` y el *liveness* a `GET /health`
       (están hechos para eso: apuntar el liveness a `/ready` provoca reinicios en cada blip de Postgres).
@@ -102,23 +106,49 @@ Un `pnpm install --prod` en el paso de release deja el comando sin binario.
 - [ ] Añadir el paso de migración al pipeline **antes** de arrancar la app nueva (hay 21 migraciones
       pendientes de aplicar contra una base vacía).
 
-### 6. Alta del primer usuario admin en producción
+### 6. ~~Alta del primer usuario admin en producción~~ ✅ Cerrado el 2026-08-24
 
-**`pnpm seed` NO sirve para producción** y esto no está dicho en ningún lado:
-- inserta 30+ productos mock del frontend y un histórico de órdenes falsas que entrarían al dashboard
-  y a los reportes como si fueran ventas reales;
-- crea el admin con la contraseña **hardcodeada `Queco144@`** y el correo del desarrollador
-  (`src/seed.ts:247`);
-- llama `process.exit` al final.
+`src/scripts/bootstrapAdmin.ts`, que se corre **compilado** (`node dist/scripts/bootstrapAdmin.js`)
+justo porque `ts-node`/`sequelize-cli`/`typescript` son devDependencies y el punto 5 sigue abierto:
+así el bootstrap no depende de cómo se resuelva el pipeline de migraciones. Todo lo que necesita en
+runtime (`bcrypt`, `sequelize`, `pg`, `dotenv`, `zod`) ya es dependencia de producción.
 
-No existe ningún otro camino para crear el primer usuario (`POST /api/admin/users` exige un JWT, y
-para tener JWT hace falta un usuario).
+```bash
+BOOTSTRAP_ADMIN_EMAIL=duenio@botasdonchuy.com \
+BOOTSTRAP_ADMIN_PASSWORD='...' node dist/scripts/bootstrapAdmin.js
+```
 
-- [ ] Escribir un script mínimo de bootstrap (correo + contraseña por argumento/env, solo
-      `AdminUser` + `BrandSettings`, sin productos ni órdenes), **o** documentar el `INSERT` manual
-      con un hash de bcrypt generado aparte.
-- [ ] Cambiar la contraseña del admin semilla si en algún momento se corrió el seed contra la base
-      que va a producción.
+Credenciales por **variables de entorno** y no por argumentos: la contraseña no queda en el
+historial del shell ni es visible en `ps`, y la misma invocación sirve en un one-off shell y en un
+release step. Solo toca `adminusers`, una fila — nada de los 30+ productos mock ni del histórico de
+órdenes falsas del seed.
+
+Cuatro decisiones que conviene no "arreglar" después:
+
+- **Valida con `createAdminUserSchema`**, el mismo esquema de `POST /api/admin/users`. Una regla más
+  laxa aquí crearía una cuenta que hashea bien pero **nunca** puede pasar `POST /api/auth/login`.
+- **El rol default es `owner`, no `admin`.** El seed creaba un `admin`, así que una base recién
+  sembrada nacía con **cero owners** y el guard de `DELETE /api/admin/users/:id` que se niega a
+  borrar al último owner no protegía nada.
+- **Un correo existente es error (exit 1), no sobreescritura**, salvo `BOOTSTRAP_RESET_PASSWORD=true`
+  — que es justo cómo se atiende el segundo pendiente de este punto: **cambiar la contraseña del
+  admin semilla** si en algún momento se corrió el seed contra la base que va a producción. El reset
+  además limpia las tres columnas de recuperación, o un código pedido antes seguiría vivo contra la
+  contraseña nueva.
+- **No crea `BrandSettings`**, a diferencia de lo que pedía la redacción original de este punto:
+  `brand.controller.ts` ya hace `findOrCreate` del singleton `id: 1` en el primer
+  `GET /api/admin/brand` (que es público), así que hacerlo aquí solo agregaría una tercera copia de
+  `BRAND_DEFAULTS`.
+
+No importa `src/app.ts`, así que corre con `DATABASE_URL` como único requisito — verificado a mano
+desde un directorio sin `.env`, sin ninguna llave de Stripe/Resend/Cloudinary/Skydropx en el
+entorno. `README.md` §Alta del primer usuario admin lo documenta, y
+`tests/integration/bootstrapAdmin.test.ts` (18 casos) lo cubre, incluido el **round-trip real de
+login** — la única aserción que prueba que la cuenta no nació muerta.
+
+⚠️ Lo que **sigue vigente** de este punto: `pnpm seed` **no sirve para producción** (trunca ocho
+tablas, mete datos mock, hardcodea credenciales). Eso ahora está advertido en `README.md` §Scripts y
+en `CLAUDE.md` §Seed, donde antes no estaba dicho en ningún lado.
 
 ### 7. No hay estrategia de respaldo de la base de datos
 
@@ -219,6 +249,31 @@ tipo — `StripeConfig.apiVersion` está tipado con el literal exacto de la vers
 `pnpm update` de `stripe` que la mueva **rompe `pnpm build`** y obliga a revisar el changelog en vez
 de cambiar en silencio la forma de los objetos que leen los handlers del webhook.
 
+### 15. ~~`JWT_SECRET` sin fail-fast (y `JWT_EXPIRES_IN` sin default)~~ ✅ Cerrado el 2026-08-24
+
+**Hallazgo nuevo**, salido de inventariar las variables para el `.env.example`; no estaba en la
+revisión original.
+
+`auth.controller.ts` y `requireAuth.ts` leían `process.env.JWT_SECRET!` y **nadie la validaba**: sin
+ella el server arrancaba contento, servía el catálogo público sin inmutarse y reventaba con un
+**500** en el primer `POST /api/auth/login` y en toda ruta admin. El síntoma aparecía lejísimos de la
+causa y solo cuando alguien intentaba entrar al panel — es decir, justo el error que iba a producir
+el paso 5 (cargar ~48 variables a mano) y el que peor se diagnostica, porque el despliegue "arrancó
+bien".
+
+Además, `expiresIn: process.env.JWT_EXPIRES_IN as …` con la variable sin definir daba
+`expiresIn: undefined`, que no es "una vigencia por defecto" sino **un token que no expira nunca**:
+sin lista de revocación, la única forma de invalidarlo sería rotar `JWT_SECRET` y sacar a todos.
+
+`src/config/auth.ts` con el patrón exacto de `stripe.ts`/`resend.ts` (dotenv propio, hard-require,
+side-effect import desde `app.ts`): `JWT_SECRET` exigida —con `trim`, para que un valor de solo
+espacios no firme con un secreto vacío— y `JWT_EXPIRES_IN` con default explícito `"7d"`. Los dos
+consumidores importan de ahí; ya no queda ningún `process.env.JWT_*` suelto. Verificado a mano
+(arrancar sin la variable ahora aborta con mensaje en español; con ella, el login devuelve un token
+cuyo `exp − iat` son 604800 s) y cubierto por `tests/unit/config/auth.test.ts`.
+
+No rompió nada: `JWT_SECRET` ya estaba en `.env`, en `.env.test` y en el bloque `env:` del CI.
+
 ---
 
 ## 🟡 Medio — conviene, no bloquea
@@ -242,8 +297,9 @@ de cambiar en silencio la forma de los objetos que leen los handlers del webhook
 - [ ] **Desalineaciones de documentación** (rápidas):
   - ~~`packageManager` real es `pnpm@11.20.0`; `README.md` y `CLAUDE.md` dicen `11.8.0`.~~
     Corregido en ambos el 2026-08-24, junto con el punto 10.
-  - `BCRYPT_ROUNDS` se usa (`src/utils/password.ts`) y está en `.env` y en el CI, pero **no aparece en
-    la lista de variables del `README.md`**.
+  - ~~`BCRYPT_ROUNDS` se usa (`src/utils/password.ts`) y está en `.env` y en el CI, pero **no aparece
+    en la lista de variables del `README.md`**.~~ Cerrado el 2026-08-24: entró al `.env.example`
+    (con su default real, 10) y a la tabla de bloques del `README.md`.
   - El checklist de `roadmap-operacion-y-negocio.md` sigue con "Dominio verificado en Resend" sin
     palomear, cuando el `README.md` documenta que ya se hizo (2026-08-19).
   - `README.md` no tiene sección de **Despliegue**. Al cerrar los puntos 1–7, escribirla.
@@ -289,7 +345,12 @@ Para que nadie las levante como hallazgo en la siguiente revisión:
    **10** (`engines`), **11** (índices), **8** (gate de Swagger), **14** (`apiVersion`). Con sus tests.~~
    ✅ **Hecho** el 2026-08-24: los cinco, con 35 tests nuevos (60 suites / 787 en total), la
    migración probada de ida y vuelta y el gate comprobado a mano con `NODE_ENV=production`.
-3. Crear `.env.example` (**1**) y el script de bootstrap del admin (**6**).
+3. ~~Crear `.env.example` (**1**) y el script de bootstrap del admin (**6**).~~
+   ✅ **Hecho** el 2026-08-24: `.env.example` con las 48 variables (y el `README.md` apuntando ahí en
+   vez de repetir la lista), `src/scripts/bootstrapAdmin.ts` corriendo compilado, y de paso el punto
+   **15** (fail-fast de `JWT_SECRET`) que salió del inventario. 24 tests nuevos en dos suites
+   (62 / 811 en total) y prueba manual de punta a punta contra una base desechable: alta → rerun que
+   falla → reset → login real.
 4. Dar de alta el servicio y la base de datos en el proveedor; resolver **5** (migraciones en el
    pipeline), **13** (SSL) y **7** (backups + una restauración de prueba).
 5. Cargar las variables de producción (**2**) con `TRUST_PROXY=1` (**4**), desplegar y comprobar
