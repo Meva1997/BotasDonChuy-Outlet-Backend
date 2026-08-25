@@ -1173,7 +1173,12 @@ no force-push or deletion. The repo allows squash/rebase only and deletes the br
   native `fetch`.
 - `pnpm-workspace.yaml` holds the pnpm `allowBuilds` map (which dependency lifecycle scripts may run, e.g.
   `bcrypt: true`, `@scarf/scarf: false`). pnpm v11 errors on undecided build scripts, so new deps with
-  install scripts must be resolved via `pnpm approve-builds`.
+  install scripts must be resolved via `pnpm approve-builds`. It also holds **`overrides`**, the only
+  way to patch a **transitive** dependency: `pnpm update` moves direct dependencies only, so a
+  vulnerable package pulled in three levels down stays put even when its parent's range already admits
+  the fixed version. Keys carry the major line (`brace-expansion@1`) so the override touches just that
+  branch, and values are **ranges** (`^1.1.18`), not exact pins, so later patches still flow and the
+  entry can be deleted once the parents catch up.
 - `jest` + `ts-jest` + `supertest` (+ `@types/*`) are devDependencies for the test suite.
 - `sequelize-cli` + `ts-node` + `typescript` drive schema migrations via `.sequelizerc` /
   `src/config/sequelize-cli.js`, and are **`dependencies`, not devDependencies** (Fase de despliegue):
