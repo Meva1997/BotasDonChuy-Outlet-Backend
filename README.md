@@ -23,9 +23,16 @@ Construido con Express 5, TypeScript y Sequelize sobre PostgreSQL.
 
 ## Requisitos
 
-- Node.js 22+ (`engines` lo declara en `package.json`, y el CI corre esa versión). El mínimo real
-  es 19: el apagado ordenado depende de que `server.close()` destruya las conexiones keep-alive
-  ociosas, y en Node 18 cada redeploy se cuelga hasta el corte forzado de 10 s.
+- **Node.js 24** (LTS activo). La versión va **fijada en tres lugares que deben coincidir**:
+  `.node-version`, `engines.node` en `package.json` y `node-version` en el CI. Antes `engines`
+  decía `>=22` y cada entorno elegía por su cuenta — el CI corría 22, la máquina local 23 y Render
+  agarraba la más nueva que hubiera (26.7.0): producción estrenaba un runtime que los tests nunca
+  habían tocado. `@types/node` se mantiene en la misma major a propósito (Dependabot tiene
+  bloqueado su major): tipar contra APIs que el runtime todavía no trae deja pasar `pnpm build` en
+  verde y revienta en el arranque.
+  El mínimo real de la app sigue siendo 19: el apagado ordenado depende de que `server.close()`
+  destruya las conexiones keep-alive ociosas, y en Node 18 cada redeploy se cuelga hasta el corte
+  forzado de 10 s.
 - [pnpm](https://pnpm.io/) (`packageManager: pnpm@11.20.0`)
 - Una base de datos PostgreSQL
 
@@ -1213,7 +1220,7 @@ Suite automatizada con **Jest + ts-jest + supertest** (Fase H.1 — ver
 [`roadmaps-completados/roadmap-testing.md`](roadmaps-completados/roadmap-testing.md) para el desglose por partes; las **12 partes** — infra,
 BD de test, servicios puros, auth, checkout, idempotencia de webhooks, cancelación/reembolso manual,
 envío en vivo, cliente Skydropx, CRUD admin de productos/imágenes, marca/usuarios admin y
-agregaciones de dashboard/reports — están **completas**: 62 suites / 811 tests en verde, y cada
+agregaciones de dashboard/reports — están **completas**: 64 suites / 835 tests en verde, y cada
 fase nueva suma la suya). Los tests
 viven en `tests/` (fuera de `src/`, para que `tsc` no los incluya en el build de producción);
 `ts-jest` los transpila en memoria.
