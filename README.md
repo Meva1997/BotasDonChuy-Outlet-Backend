@@ -316,12 +316,28 @@ gh pr merge --squash --auto   # mergea solo en cuanto los checks pasen → dispa
 
 ### Dependencias al día
 
-`.github/dependabot.yml` abre PRs de actualización (npm semanal, acciones de GitHub mensual),
-agrupando minors y parches en **un solo PR** para no gastar una corrida de CI por bump. Quedan
-**ignorados los majors** de `stripe` (el cliente fija `apiVersion` con el literal exacto del SDK:
-un major cambia la forma de los objetos que leen los handlers del webhook) y de
-`sequelize`/`sequelize-cli` (la 7 es una reescritura, no un bump). Esos se suben a mano leyendo el
-changelog.
+Son **dos mecanismos distintos**, y confundirlos es lo normal:
+
+| | Cuándo abre PR | Dónde se configura |
+| --- | --- | --- |
+| **Alertas de seguridad** | Solo ante una **vulnerabilidad real** en una versión que usamos — incluidas las **transitivas** del lockfile | *Settings → Advanced Security*: `Dependabot alerts` + `Dependabot security updates`, ambas **encendidas**. No lleva archivo |
+| **Actualizaciones de versión** | Cada vez que sale una versión nueva, haya problema o no | `.github/dependabot.yml` |
+
+Lo que protege el repo es el primero. Este backend cobra con tarjeta, hashea contraseñas, guarda
+domicilios y recibe archivos subidos (`multer`, `exceljs`), y el repo es **público**: el
+`package.json` es tan visible como el aviso de la vulnerabilidad. Al encenderlas aparecieron **18
+alertas abiertas de golpe** (`brace-expansion`, `fast-uri`, `ip-address`, `js-yaml`, `uuid`),
+**todas transitivas** — ninguna es una dependencia declarada a mano, que es justo por lo que nadie
+las había visto.
+
+El segundo es mantenimiento preventivo y está deliberadamente **a volumen bajo**: npm **mensual**,
+máximo **2 PRs** a la vez, minors y parches agrupados en uno solo para no gastar una corrida de CI
+por bump. **No hay bloque `github-actions`** — los majors de `actions/checkout` y compañía no
+aportan nada aquí; el costo asumido es que cuando GitHub deprecie el runtime de una acción habrá
+que subirla a mano, avisada por el propio CI. Quedan **ignorados los majors** de `stripe` (el
+cliente fija `apiVersion` con el literal exacto del SDK: un major cambia la forma de los objetos
+que leen los handlers del webhook) y de `sequelize`/`sequelize-cli` (la 7 es una reescritura, no
+un bump). Esos se suben a mano leyendo el changelog.
 
 ### Health check: `/health`, no `/health/ready`
 

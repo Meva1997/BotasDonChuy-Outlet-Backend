@@ -1,28 +1,35 @@
 version: 2
 
-updates:
-  # Las acciones se fijan por major (`@v4`), que GitHub sí mueve — pero un
-  # `pnpm/action-setup@v4` que quede sin mantenimiento no avisa solo.
-  - package-ecosystem: github-actions
-    directory: /
-    schedule:
-      interval: monthly
-    commit-message:
-      prefix: "chore(ci)"
-    labels: [dependencias, ci]
+# ⚠️ Esto son las actualizaciones de VERSIÓN: abren PR cada vez que sale algo
+# nuevo, haya o no un problema. Lo que de verdad protege el repo son las
+# ALERTAS DE SEGURIDAD, que no se configuran aquí sino en
+# Settings → Advanced Security ("Dependabot alerts" y "Dependabot security
+# updates", ambas encendidas). Esas solo hablan cuando hay una vulnerabilidad
+# real en una versión que estamos usando, y abren su PR sin importar lo que
+# diga este archivo — incluso para dependencias transitivas del lockfile.
+#
+# Deliberadamente NO hay bloque `github-actions`. Los majors de
+# `actions/checkout`, `actions/setup-node` y `pnpm/action-setup` no aportan
+# nada aquí y llenan la bandeja. El costo asumido: cuando GitHub deprecie el
+# runtime de una acción, el CI empezará a avisar (y con el tiempo a fallar) y
+# habrá que subirla A MANO. Es un aviso ruidoso e imposible de no ver, así que
+# no hace falta un bot vigilándolo cada mes.
 
+updates:
   - package-ecosystem: npm
     directory: /
     schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
+      interval: monthly
+    # Dos a la vez: esto es mantenimiento preventivo, no urgencias. Su único
+    # beneficio real es que el día que SÍ haga falta un parche de seguridad,
+    # la distancia sea un salto corto y no una migración de tres majors.
+    open-pull-requests-limit: 2
     commit-message:
       prefix: "chore(deps)"
     labels: [dependencias]
     groups:
-      # Un PR por lote en vez de veinte sueltos: son parches, y cada PR
-      # cuesta una corrida completa del CI.
+      # Un PR por lote en vez de veinte sueltos: son parches, y cada PR cuesta
+      # una corrida completa del CI.
       parches-y-menores:
         update-types: [minor, patch]
     ignore:
