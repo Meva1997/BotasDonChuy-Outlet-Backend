@@ -6,10 +6,24 @@ on:
   push:
     branches: [main]
 
+# Token de solo lectura: ningún job de este archivo escribe en el repo.
+# Sin esto, el GITHUB_TOKEN hereda los permisos por defecto de la organización,
+# que en repos viejos siguen siendo de escritura.
+permissions:
+  contents: read
+
+# Un PR al que se le empujan tres commits seguidos no necesita tres corridas:
+# se cancela la anterior. En `main` NO se cancela — cada push a main dispara el
+# deploy, y matar una corrida a medias dejaría un commit sin desplegar.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: Build & Test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     services:
       postgres:
@@ -77,3 +91,90 @@ jobs:
 
       - name: Run tests
         run: pnpm test
+
+  # Job aparte, con su PROPIO Postgres: la suite corre `sync({ force: true })`,
+  # que dropea y recrea todas las tablas, así que compartir base con el job de
+  # arriba se pisaría a medio camino.
+  #
+  # Existe porque el deploy en Render corre `pnpm migrate` como `preDeployCommand`
+  # y NO hay `sync({ alter: true })` en ningún lado que tape una migración rota:
+  # sin este job, un `up` con un typo se descubre en producción, con el tráfico
+  # ya apuntando a la versión anterior y el deploy abortado.
+  #
+  # El `undo:all` + `migrate` de vuelta valida también los `down` — que son
+  # justo donde se olvida el `DROP TYPE` del ENUM que `dropTable` no borra.
+  migrations:
+    name: Migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: botasdonchuy_migrations
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/botasdonchuy_migrations
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Aplicar migraciones desde cero
+        run: pnpm migrate
+
+      - name: Estado de migraciones
+        run: pnpm migrate:status
+
+      - name: Revertir todo (valida los `down`)
+        run: pnpm migrate:undo:all
+
+      - name: Re-aplicar sobre la base ya revertida
+        run: pnpm migrate
+
+  # CD: el único camino a producción. Render tiene `autoDeploy: false` en
+  # `render.yaml` justo para esto — antes desplegaba en cuanto llegaba el push,
+  # sin mirar si el CI había pasado, así que un commit con tests rojos salía
+  # igual. Ahora el deploy es la consecuencia de un `main` verde.
+  deploy:
+    name: Deploy (Render)
+    needs: [test, migrations]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+
+    steps:
+      - name: Disparar el Deploy Hook de Render
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "${RENDER_DEPLOY_HOOK_URL}" ]; then
+            echo "::warning::Falta el secret RENDER_DEPLOY_HOOK_URL; se omite el deploy."
+            exit 0
+          fi
+          curl -fsS -X POST "${RENDER_DEPLOY_HOOK_URL}" -o /dev/null
+          echo "Deploy solicitado a Render. El avance real se sigue en su dashboard."

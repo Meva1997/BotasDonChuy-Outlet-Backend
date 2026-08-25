@@ -31,6 +31,18 @@ services:
     # proceso, y los tres crons arrancan en cada réplica.
     numInstances: 1
 
+    # El deploy NO lo dispara el push, lo dispara el CI. Con el valor por
+    # defecto (`true`), Render empieza a construir en cuanto llega el commit a
+    # `main`, en paralelo con GitHub Actions y sin enterarse del resultado: un
+    # commit con tests rojos se desplegaba igual. Ahora el único camino a
+    # producción es el job `deploy` de `.github/workflows/ci.yml`, que corre
+    # DESPUÉS de `Build & Test` y `Migrations` y llama al Deploy Hook.
+    #
+    # ⚠️ Este campo solo aplica al crear/sincronizar el Blueprint. Si el
+    # servicio ya existe, hay que apagar "Auto-Deploy" también en
+    # Settings → Build & Deploy del dashboard, o seguirá desplegando solo.
+    autoDeploy: false
+
     buildCommand: pnpm install --frozen-lockfile && pnpm build
     # Corre después del build y ANTES de arrancar la app nueva, con el tráfico
     # todavía en la versión anterior. Es el lugar correcto para el esquema:
