@@ -52,7 +52,7 @@ proveedor.
 
 | Bloque | Variables |
 | --- | --- |
-| Núcleo | `DATABASE_URL`\*, `PORT`, `NODE_ENV`, `CORS_ORIGIN` |
+| Núcleo | `DATABASE_URL`\*, `DATABASE_SSL`, `DATABASE_SSL_REJECT_UNAUTHORIZED`, `PORT`, `NODE_ENV`, `CORS_ORIGIN` |
 | Auth | `JWT_SECRET`\*, `JWT_EXPIRES_IN`, `BCRYPT_ROUNDS` |
 | Cloudinary | `CLOUDINARY_CLOUD_NAME`\*, `CLOUDINARY_API_KEY`\*, `CLOUDINARY_API_SECRET`\* |
 | Stripe | `STRIPE_SECRET_KEY`\*, `STRIPE_WEBHOOK_SECRET`\*, `STRIPE_CURRENCY`, `PENDING_ORDER_TTL_MINUTES`, `PENDING_ORDER_SWEEP_INTERVAL_MINUTES` |
@@ -75,6 +75,19 @@ proveedor.
 > `1` (o el número de proxies encadenados — **empieza aquí**), `loopback`/`10.0.0.0/8`/una lista
 > separada por comas (lo más estricto), o `true` (confía en toda la cadena; solo si el proxy
 > garantiza reescribir el header). Sin definir, se conserva el default de Express.
+
+> **⚠️ TLS a Postgres: `?sslmode=require` en el `DATABASE_URL` NO funciona.** Es el consejo
+> habitual y aquí falla en silencio, dejando la conexión en claro. El motivo está en el camino
+> que recorre el valor: Sequelize copia los query params de la URL a `dialectOptions`, pero el
+> connection manager de su dialecto de Postgres filtra ese objeto con una allowlist que incluye
+> `ssl` y **no** `sslmode`; la clave se descarta ahí y `pg` cae a su default, `ssl: false`.
+> Contra un servidor que exige TLS el síntoma al menos es ruidoso; contra uno que lo acepta sin
+> exigirlo, la sesión viaja sin cifrar y nadie se entera. Usa **`DATABASE_SSL=true`** (y
+> `DATABASE_SSL_REJECT_UNAUTHORIZED=false` si el certificado es autofirmado), que es lo que
+> `src/config/databaseSsl.ts` traduce a `dialectOptions.ssl` **para la app y para
+> `sequelize-cli` desde la misma función**, para que las migraciones no puedan quedar sin
+> cifrar mientras la app va cifrada. Si aun así aparece un `sslmode` en la cadena sin
+> `DATABASE_SSL`, el arranque lo avisa por consola en vez de dejarlo pasar.
 
 > **El esquema nunca se sincroniza automáticamente**, ni siquiera en desarrollo. `connectDB()`
 > solo autentica la conexión; todo cambio de esquema pasa por una migración versionada
@@ -221,6 +234,85 @@ pnpm migrate:status   # verifica qué quedó aplicado
 > **Al agregar o modificar una columna/tabla**, escribe la migración correspondiente en
 > `src/migrations/` — no hay `sync({ alter: true })` de respaldo que la replique en ningún
 > ambiente, desarrollo incluido.
+
+## Despliegue
+
+El destino es **Render**, descrito como código en **`render.yaml`** (Blueprint): el servicio web
+y su base de datos Postgres. Ningún secreto vive ahí — todo lo sensible va marcado `sync: false`
+y Render lo pide una vez en el dashboard.
+
+### El pipeline
+
+| Fase | Comando | Qué hace |
+| --- | --- | --- |
+| Build | `pnpm install --frozen-lockfile && pnpm build` | Instala (con devDependencies, que `tsc` necesita) y compila a `dist/` — incluidas las migraciones |
+| Pre-deploy | `pnpm migrate` | Aplica el esquema **con el tráfico todavía en la versión anterior**; si falla, la app nueva no arranca |
+| Start | `pnpm start` | `node dist/app.js` |
+
+`sequelize-cli`, `ts-node` y `typescript` son **`dependencies`, no `devDependencies`**,
+precisamente para que el paso de migración no dependa de cómo instale el proveedor. Por el mismo
+motivo `.sequelizerc` registra `ts-node/register/transpile-only`: con type-check, arrancar el CLI
+exigiría `@types/node` y compañía instalados en producción. No se pierde nada — `tsconfig.json`
+incluye `src/**/*`, así que `pnpm build` ya compila y verifica cada migración, y corre antes.
+
+### Health check: `/health`, no `/health/ready`
+
+Render usa **un solo** health check para dos cosas: gatear el deploy nuevo y, en servicio
+corriendo, sacar la instancia de rotación a los 15 s y **reiniciarla a los 60 s**. Apuntarlo a
+`/health/ready` (que sí consulta la base) convertiría un corte de Postgres de un minuto en un
+reinicio de la app — matando peticiones en vuelo sin arreglar nada, que es justo el anti-patrón
+que estos dos endpoints existen para evitar.
+
+El hueco aparente —un deploy nuevo empieza a recibir tráfico sin haber verificado la base— ya
+está cubierto: `connectDB()` hace `process.exit(1)` si no logra autenticar, así que el proceso
+muere, nunca responde `/health` y Render cancela el deploy conservando la versión anterior.
+
+`/health/ready` queda para el **monitoreo externo de uptime**, donde un `503` es una alerta para
+un humano y no un reinicio automático.
+
+### Alta del servicio (una vez)
+
+1. **Render → New → Blueprint**, apuntando a este repo. Render lee `render.yaml` y pide los
+   valores marcados `sync: false`.
+2. Verifica que la base quedó en la **misma región** que el servicio web: es lo que habilita la
+   URL interna (red privada). Si por lo que sea quedan separados, hay que encender
+   `DATABASE_SSL=true`.
+3. El primer deploy corre `pnpm migrate` contra una base vacía y aplica las 19 migraciones.
+4. **Da de alta el primer admin** con un one-off shell — sin esto no hay forma de entrar al panel
+   (ver [Alta del primer usuario admin](#alta-del-primer-usuario-admin)):
+
+   ```bash
+   BOOTSTRAP_ADMIN_EMAIL=duenio@botasdonchuy.com \
+   BOOTSTRAP_ADMIN_PASSWORD='...' node dist/scripts/bootstrapAdmin.js
+   ```
+
+   ⚠️ **Nunca `pnpm seed`**: trunca ocho tablas y mete datos de prueba.
+5. Comprueba `GET /health` y `GET /health/ready` contra el dominio real.
+6. Verifica que `TRUST_PROXY=1` quedó bien: `req.ip` debe ser la del cliente y no la del proxy.
+   Un `429` que llegue absurdamente pronto es la señal de que quedó mal.
+
+### Respaldos
+
+Los planes de pago de Render Postgres incluyen *point-in-time recovery*; el plan `free` **no
+tiene respaldos automáticos** y expira a los 30 días. Además de confirmar la ventana de retención
+del plan contratado, hay que **probar una restauración antes de lanzar** — un backup no
+verificado no es un backup:
+
+```bash
+tar -zxvf <export>.tar.gz
+pg_restore --dbname=$URL_DE_UNA_BASE_DESECHABLE --verbose \
+  --clean --if-exists --no-owner --no-privileges --format=directory <export>/<nombre>
+```
+
+La base guarda los pedidos, el histórico de ventas, los precios congelados y las constancias de
+aceptación de términos (dato con valor legal).
+
+### Una sola instancia, a propósito
+
+`numInstances: 1` en el Blueprint no es un ahorro: los cinco rate limiters, la idempotencia del
+checkout, el contador de fallos del sweeper y la caché de `checkReadiness` viven **en memoria del
+proceso**, y los tres crons arrancarían en cada réplica (el resumen diario saldría duplicado).
+Escalar horizontalmente exigiría mover los limiters a Redis y los crons a un proceso aparte.
 
 ## Endpoints
 

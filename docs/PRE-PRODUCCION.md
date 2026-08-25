@@ -9,6 +9,12 @@
 > `.env.example` versionado (parte del punto **1**) y el script de bootstrap del admin
 > (punto **6**), más el punto **15** que salió de esa revisión. Lo que queda es despliegue,
 > credenciales y operación.
+>
+> **Actualizado el 2026-08-25 (paso 4):** cerrada toda la parte de **código** del paso 4 —
+> punto **5** (migraciones en el pipeline), punto **13** (SSL, que resultó estar **peor** de lo
+> que decía este documento) y el `render.yaml` con el resto del punto **1** y el **4**
+> (`TRUST_PROXY`). Queda pendiente lo que solo se puede hacer en el dashboard de Render: el alta
+> del servicio y **el punto 7 (backups + restauración de prueba)**.
 
 ## Estado verificado hoy
 
@@ -17,7 +23,7 @@ Todo esto se comprobó ejecutándolo, no leyéndolo:
 | Comprobación | Resultado |
 | --- | --- |
 | `pnpm build` (type-check + emisión a `dist/`) | ✅ sin errores |
-| `pnpm test` | ✅ **62 suites / 811 tests**, todos pasando (47 s) |
+| `pnpm test` | ✅ **64 suites / 835 tests**, todos pasando (65 s, al 2026-08-25) |
 | Migraciones vs. modelos | ✅ sin drift: cada columna de `Order`/`Product`/etc. tiene su migración |
 | Integración con el frontend | ✅ las 27 fases de `../frontend/ROADMAP-BACKEND-INTEGRATION.md` cerradas; disputas (Fase 28) ya se pintan en el panel |
 | CI (`.github/workflows/ci.yml`) | ✅ Postgres 16 + `pnpm build` + `pnpm test` en cada PR y push a `main` |
@@ -33,20 +39,33 @@ Todo esto se comprobó ejecutándolo, no leyéndolo:
 Es el hueco más grande. El frontend ya tiene su camino (`vercel.json`, `.env.vercel.production`,
 `outlet.botasdonchuy.com` apuntando a Vercel); **el backend no tiene nada**:
 
-- Sin `Dockerfile`, `render.yaml`, `fly.toml`, `Procfile` ni equivalente.
+- ~~Sin `Dockerfile`, `render.yaml`, `fly.toml`, `Procfile` ni equivalente.~~ — ✅ cerrado el
+  2026-08-25: **`render.yaml`** en la raíz (servicio web + Postgres, build/pre-deploy/start,
+  `healthCheckPath`, `numInstances: 1`, y `TRUST_PROXY=1` que cierra el punto 4). Los secretos
+  van con `sync: false` y `JWT_SECRET` con `generateValue: true`.
 - ~~Sin `.env.example` versionado~~ — ✅ cerrado el 2026-08-24 (ver abajo).
-- Sin paso de deploy que corra `pnpm migrate` (ver punto 5).
+- ~~Sin paso de deploy que corra `pnpm migrate`~~ — ✅ cerrado el 2026-08-25 (punto 5).
 
 **Qué hacer:**
-- [ ] Elegir proveedor (Render/Railway/Fly — el roadmap de gastos ya asume Render) y crear el servicio.
+- [x] ~~Elegir proveedor~~ ✅ **Render**, como ya asumía el roadmap de gastos. **Falta crear el
+      servicio** conectando el Blueprint desde el dashboard (no se puede hacer desde el repo).
 - [x] ~~Crear `.env.example` en la raíz con **todas** las variables (nombres + comentario, sin valores)
       y versionarlo.~~ ✅ **Hecho el 2026-08-24.** Las **48** variables (43 que lee el server + las 5
       `BOOTSTRAP_*`), agrupadas por bloque, cada una marcada obligatoria u opcional-con-default.
       `README.md` §Variables de entorno dejó de repetir la lista y ahora apunta ahí, para que no
       puedan divergir.
-- [ ] Definir el comando de arranque: `pnpm build` en build, `pnpm start` en runtime.
-- [ ] Apuntar el *readiness probe* del proveedor a `GET /health/ready` y el *liveness* a `GET /health`
-      (están hechos para eso: apuntar el liveness a `/ready` provoca reinicios en cada blip de Postgres).
+- [x] ~~Definir el comando de arranque~~ ✅ en `render.yaml`: build `pnpm install --frozen-lockfile
+      && pnpm build`, pre-deploy `pnpm migrate`, start `pnpm start`.
+- [x] ~~Apuntar el *readiness probe* a `/health/ready` y el *liveness* a `/health`.~~
+      ⚠️ **Este punto estaba mal planteado y se resolvió al revés.** Render **no tiene dos
+      probes**: expone un solo `healthCheckPath` y lo usa tanto para gatear el deploy nuevo como
+      para, en servicio corriendo, sacar de rotación a los 15 s y **reiniciar la instancia a los
+      60 s**. Apuntarlo a `/health/ready` haría que un corte de Postgres de un minuto reiniciara
+      la app — exactamente el anti-patrón que estos dos endpoints existen para evitar. Va a
+      **`/health`**; el hueco (un deploy nuevo tomando tráfico sin verificar la base) ya lo cierra
+      `connectDB()` con su `process.exit(1)`, que mata el proceso y hace que Render cancele el
+      deploy. `/health/ready` queda para el monitoreo externo de uptime (punto 🟡), donde un 503
+      es una alerta para un humano y no un reinicio.
 
 ### 2. Todas las credenciales están en modo prueba
 
@@ -86,25 +105,36 @@ recibe el evento y todo "parece" funcionar.
       **HMAC** y usar ese mismo secreto como `SKYDROPX_WEBHOOK_SECRET`. Sin él no llega ningún
       `tracking_number`, no sale el correo "va en camino" y el pedido nunca avanza a `shipped`.
 
-### 4. `TRUST_PROXY` sin definir
+### 4. `TRUST_PROXY` sin definir — ✅ declarado el 2026-08-25, falta verificarlo en vivo
 
 No está en el `.env` actual. Detrás del proxy del PaaS, `req.ip` es la IP del proxy y **los cinco rate
 limiters colapsan en un solo cupo para toda la tienda**: 30 consultas/min de
 `GET /api/orders/lookup/:token` compartidas entre *todos* los compradores, así que el 31.º que abra su
 link de seguimiento recibe un `429` en su propio pedido.
 
-- [ ] `TRUST_PROXY=1` como punto de partida en cualquier PaaS. Verificar después de desplegar que
-      `req.ip` es la del cliente (un `429` que llegue demasiado pronto es la señal de que quedó mal).
+- [x] ~~`TRUST_PROXY=1` como punto de partida en cualquier PaaS.~~ ✅ ya va en `render.yaml`.
+- [ ] **Verificar después de desplegar** que `req.ip` es la del cliente (un `429` que llegue
+      demasiado pronto es la señal de que quedó mal). Esto solo se puede comprobar en vivo.
 
-### 5. `pnpm migrate` no puede correr en un deploy de producción tal como está
+### 5. ~~`pnpm migrate` no puede correr en un deploy de producción tal como está~~ ✅ Cerrado el 2026-08-25
 
-`sequelize-cli` y `ts-node` son **devDependencies**, y las migraciones están escritas en TypeScript.
-Un `pnpm install --prod` en el paso de release deja el comando sin binario.
+Se promovieron a `dependencies` — la segunda de las dos opciones que planteaba este punto, por ser
+la que no depende de cómo instale el proveedor. Son **tres**, no dos: `sequelize-cli`, `ts-node` y
+**`typescript`**, que este hallazgo no mencionaba y sin el cual `ts-node` no arranca.
 
-- [ ] Decidir una de dos: instalar sin `--prod` en el paso de migración, o promover
-      `sequelize-cli` + `ts-node` a `dependencies`.
-- [ ] Añadir el paso de migración al pipeline **antes** de arrancar la app nueva (hay 21 migraciones
-      pendientes de aplicar contra una base vacía).
+De paso, `.sequelizerc` pasó de `ts-node/register` a **`ts-node/register/transpile-only`**: con
+type-check, arrancar el CLI exigiría `@types/node` y compañía instalados en producción (verificado:
+tras un `pnpm install --prod` el directorio `node_modules/@types` no existe). No se pierde nada —
+`tsconfig.json` incluye `src/**/*`, así que `pnpm build` ya compila y verifica cada migración, y en
+el pipeline corre **antes** de migrar.
+
+El paso quedó como **`preDeployCommand: pnpm migrate`** en `render.yaml`: corre después del build y
+con el tráfico todavía en la versión anterior, así que una migración fallida nunca deja una app a
+medio migrar recibiendo peticiones.
+
+Verificado copiando el repo a un directorio limpio, corriendo `pnpm install --prod`
+(«devDependencies: skipped») y ejecutando el CLI. Y son **19** migraciones, no 21 como decía este
+punto.
 
 ### 6. ~~Alta del primer usuario admin en producción~~ ✅ Cerrado el 2026-08-24
 
@@ -157,6 +187,20 @@ los precios congelados y las constancias de aceptación de términos (Fase 27, d
 
 - [ ] Activar los backups automáticos del proveedor de Postgres y confirmar la retención.
 - [ ] **Probar una restauración una vez**, antes de lanzar. Un backup no verificado no es un backup.
+
+**Sigue abierto** — es lo único del paso 4 que no se puede tocar desde el repo. Lo que ya se
+averiguó para ejecutarlo: en Render los planes de pago traen *point-in-time recovery* (ventana de
+3 días en Hobby, 7 en Pro) y **el plan `free` no trae respaldos automáticos** y además expira a los
+30 días, así que el plan contratado importa. Los *logical backups* exportables desde el dashboard se
+retienen 7 días independientemente del plan. La restauración de prueba, contra una base desechable:
+
+```bash
+tar -zxvf <export>.tar.gz
+pg_restore --dbname=$URL_DE_UNA_BASE_DESECHABLE --verbose \
+  --clean --if-exists --no-owner --no-privileges --format=directory <export>/<nombre>
+```
+
+Está documentado en `README.md` §Despliegue → Respaldos.
 
 ---
 
@@ -227,18 +271,45 @@ mismos pedidos (los guards atómicos evitan el daño, pero no el ruido).
 Para esta tienda una sola instancia sobra. Lo que falta es **que sea una decisión explícita y no un
 accidente**:
 
-- [ ] Fijar el servicio en 1 instancia en el proveedor y anotarlo.
+- [x] ~~Fijar el servicio en 1 instancia en el proveedor y anotarlo.~~ ✅ el 2026-08-25:
+      `numInstances: 1` en `render.yaml`, con el porqué anotado ahí, en `README.md` §Despliegue y
+      en `CLAUDE.md` §Deployment.
 - [ ] Si algún día se escala horizontalmente: rate limiters a Redis, y los crons a un proceso aparte
       o con un lock en la base de datos.
 
-### 13. Conexión a Postgres sin SSL explícito
+### 13. ~~Conexión a Postgres sin SSL explícito~~ ✅ Cerrado el 2026-08-25 — y era peor de lo descrito
 
-`src/config/database.ts` y `src/config/sequelize-cli.js` no configuran `dialectOptions.ssl`. La mayoría
-de los Postgres gestionados exigen TLS y varios usan certificado autofirmado (`rejectUnauthorized`).
+Este hallazgo decía que «`sslmode=require` en la cadena suele bastar». **No basta: no hace
+absolutamente nada, y falla en silencio dejando la conexión en claro.** El recorrido del valor,
+verificado sobre las versiones instaladas (`sequelize@6.37.8` / `pg@8.22.0`):
 
-- [ ] Verificar que el `DATABASE_URL` de producción conecta (`sslmode=require` en la cadena suele
-      bastar); si el proveedor usa certificado propio, agregar `dialectOptions` **en los dos archivos**
-      — el CLI de migraciones no comparte configuración con la app.
+1. `sequelize/lib/sequelize.js` parsea la URL y copia **todos** los query params a
+   `options.dialectOptions`, así que `sslmode` sobrevive hasta ahí.
+2. `sequelize/lib/dialects/postgres/connection-manager.js` arma la config para `pg` con un `_.pick`
+   sobre una **allowlist** (`application_name`, `ssl`, `client_encoding`, `keepAlive`,
+   `statement_timeout`, …). **`sslmode` no está en esa lista** y se descarta ahí mismo.
+3. `pg/lib/connection-parameters.js` lee `config.ssl`, nunca `config.sslmode`; como llega
+   `undefined`, cae a `defaults.ssl`, que es `false`.
+
+Comprobado de las dos formas contra la base de desarrollo (que no habla TLS): con
+`DATABASE_SSL=true` el servidor **rechaza** la conexión (`ERROR: The server does not support SSL
+connections` — prueba de que la opción sí llega a `pg`), mientras que con `?sslmode=require` en la
+cadena `pnpm migrate:status` **conecta y lista las migraciones tan campante**, sin cifrado.
+
+La solución es `src/config/databaseSsl.ts`, con dos knobs vía `booleanEnv`: `DATABASE_SSL` (default
+`false` — un Postgres local no habla TLS, y en un PaaS con la base en la misma región la URL interna
+va por red privada) y `DATABASE_SSL_REJECT_UNAUTHORIZED` (default `true`; a `false` solo para
+certificados autofirmados, que es una rebaja real y por eso nunca es el default). Apagado devuelve
+**`{}`** y no `{ ssl: false }`, para que el comportamiento quede idéntico al de antes.
+
+**Lo importante es que lo llaman los dos**, que es justo lo que este hallazgo pedía y la parte fácil
+de hacer mal: `src/config/sequelize-cli.js` (`.js` plano) puede `require` el `.ts` porque
+`.sequelizerc` ya registra ts-node, así que no hay una segunda copia que pueda divergir —
+`tests/unit/config/sequelizeCliConfig.test.ts` lo verifica.
+
+Y como el consejo viejo está escrito en varios lados y alguien lo va a repetir, el módulo **avisa**
+por consola cuando el `DATABASE_URL` trae un `sslmode` que espera TLS y `DATABASE_SSL` está apagado.
+El comentario de `.env.example` se corrigió.
 
 ### 14. ~~Cliente de Stripe sin `apiVersion` fijada~~ ✅ Cerrado el 2026-08-24
 
@@ -302,7 +373,8 @@ No rompió nada: `JWT_SECRET` ya estaba en `.env`, en `.env.test` y en el bloque
     (con su default real, 10) y a la tabla de bloques del `README.md`.
   - El checklist de `roadmap-operacion-y-negocio.md` sigue con "Dominio verificado en Resend" sin
     palomear, cuando el `README.md` documenta que ya se hizo (2026-08-19).
-  - `README.md` no tiene sección de **Despliegue**. Al cerrar los puntos 1–7, escribirla.
+  - ~~`README.md` no tiene sección de **Despliegue**.~~ Escrita el 2026-08-25 (§Despliegue: el
+    pipeline, el porqué de `/health`, el alta paso a paso, respaldos y la instancia única).
 
 ---
 
@@ -353,6 +425,14 @@ Para que nadie las levante como hallazgo en la siguiente revisión:
    falla → reset → login real.
 4. Dar de alta el servicio y la base de datos en el proveedor; resolver **5** (migraciones en el
    pipeline), **13** (SSL) y **7** (backups + una restauración de prueba).
+   🟡 **Parte de código hecha** el 2026-08-25: **5** (las tres deps a `dependencies` +
+   `transpile-only` + `preDeployCommand`), **13** (`databaseSsl.ts` compartido por la app y el CLI,
+   tras descubrir que `sslmode` no hacía nada) y `render.yaml` con el resto del punto **1**, el
+   **4** (`TRUST_PROXY=1`) y el **12** (`numInstances: 1`). 24 tests nuevos en 2 suites
+   (**64 / 835** en total) y verificación manual de las dos direcciones del SSL.
+   **Falta, y solo se puede hacer en el dashboard de Render:** conectar el Blueprint, correr el
+   bootstrap del admin, y el punto **7** (confirmar la retención de backups y **probar una
+   restauración**).
 5. Cargar las variables de producción (**2**) con `TRUST_PROXY=1` (**4**), desplegar y comprobar
    `/health/ready`.
 6. Configurar los webhooks de Stripe live y Skydropx producción (**3**) y probar de punta a punta:

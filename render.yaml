@@ -1,0 +1,172 @@
+##############################################################################
+# Blueprint de Render — backend Botas Don Chuy Outlet
+#
+# Infraestructura como código: el servicio web y su base de datos. Se conecta
+# desde Render → New → Blueprint, apuntando a este repo.
+#
+# NINGÚN SECRETO VIVE AQUÍ. Todo lo sensible va con `sync: false`: Render lo
+# pide una vez en el dashboard al crear el servicio y lo guarda cifrado. Este
+# archivo sí se versiona.
+#
+# La lista canónica y comentada de las 43 variables está en `.env.example`.
+# Aquí solo aparecen las OBLIGATORIAS (sin ellas el proceso no arranca, por el
+# fail-fast deliberado de cada src/config/*) y las que en producción necesitan
+# un valor DISTINTO de su default. Las opcionales cuyo default ya sirve se
+# omiten a propósito, para no tener dos fuentes de verdad: quien quiera
+# cambiarlas las agrega en el dashboard.
+##############################################################################
+
+services:
+  - type: web
+    name: botasdonchuy-api
+    runtime: node
+    # `free` NO sirve aquí: duerme por inactividad, y con el proceso dormido no
+    # corren los tres crons (pendingOrderSweeper, shipmentRetrySweeper,
+    # dailySalesDigest) ni llegan los webhooks de Stripe/Skydropx a tiempo.
+    plan: starter
+    region: oregon
+    # Una sola instancia, y que sea una DECISIÓN y no un accidente (punto 12 del
+    # checklist): los rate limiters, la idempotencia del checkout, el contador de
+    # fallos del sweeper y la caché de checkReadiness viven en memoria del
+    # proceso, y los tres crons arrancan en cada réplica.
+    numInstances: 1
+
+    buildCommand: pnpm install --frozen-lockfile && pnpm build
+    # Corre después del build y ANTES de arrancar la app nueva, con el tráfico
+    # todavía en la versión anterior. Es el lugar correcto para el esquema:
+    # `sequelize-cli`, `ts-node` y `typescript` son dependencies (no devDeps)
+    # justo para que este paso no dependa de cómo se instale.
+    preDeployCommand: pnpm migrate
+    startCommand: pnpm start
+
+    # `/health` (liveness) y NO `/health/ready`, aunque este último exista y
+    # consulte la base. Render usa un solo health check para dos cosas: gatear
+    # el deploy nuevo y, en servicio corriendo, sacar de rotación a los 15 s y
+    # REINICIAR la instancia a los 60 s. Con `/health/ready`, un corte de
+    # Postgres de más de un minuto reiniciaría la app —matando peticiones en
+    # vuelo sin arreglar nada—, que es exactamente el anti-patrón que
+    # documenta CLAUDE.md §Healthchecks.
+    #
+    # El hueco aparente (un deploy nuevo empieza a recibir tráfico sin haber
+    # verificado la base) ya está cubierto: `connectDB()` hace `process.exit(1)`
+    # si no logra autenticar, así que el proceso muere, nunca responde `/health`
+    # y Render cancela el deploy conservando la versión anterior.
+    #
+    # `/health/ready` queda para el monitoreo externo de uptime, donde un 503 es
+    # una alerta para un humano y no un reinicio automático.
+    healthCheckPath: /health
+
+    envVars:
+      # ── Base de datos ───────────────────────────────────────────────────────
+      # URL INTERNA de la base de abajo: misma región, red privada, sin salir a
+      # internet. Por eso no se declara `DATABASE_SSL` (ver `.env.example`); sí
+      # hace falta para conectarse desde fuera de Render.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: botasdonchuy-db
+          property: connectionString
+
+      # ── Núcleo ──────────────────────────────────────────────────────────────
+      # PORT no se declara: Render lo inyecta y `src/app.ts` ya lo lee.
+      - key: NODE_ENV
+        value: production
+      - key: CORS_ORIGIN
+        value: https://outlet.botasdonchuy.com
+      # Sin esto, `req.ip` es la IP del proxy de Render y los cinco rate
+      # limiters colapsan en un solo cupo para toda la tienda (punto 4 del
+      # checklist). 1 = confía en un salto de proxy.
+      - key: TRUST_PROXY
+        value: 1
+
+      # ── Auth ────────────────────────────────────────────────────────────────
+      # Generado por Render (256 bits base64) una sola vez, al crear el
+      # servicio: nunca pasa por manos humanas ni por el historial del shell.
+      # OJO: cambiarlo invalida todas las sesiones del panel.
+      - key: JWT_SECRET
+        generateValue: true
+
+      # ── Cloudinary (imágenes) ───────────────────────────────────────────────
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+
+      # ── Stripe (pagos) ──────────────────────────────────────────────────────
+      # Llave LIVE (`sk_live_`/`rk_live_`), no la de test.
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      # El `whsec_` del endpoint LIVE — es distinto del de test. Se obtiene al
+      # crear el webhook en el dashboard de Stripe (paso 6 del checklist).
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+
+      # ── Resend (correos) ────────────────────────────────────────────────────
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        value: no-reply@botasdonchuy.com
+      # De aquí salen los links de TODOS los correos al comprador. Con el valor
+      # de desarrollo, cada correo de seguimiento manda a `localhost`.
+      - key: FRONTEND_URL
+        value: https://outlet.botasdonchuy.com
+
+      # ── Skydropx (envíos) ───────────────────────────────────────────────────
+      # Producción, no el sandbox `sb-pro`. Cuidado: la cuenta de producción no
+      # tiene sandbox propio, así que cada guía de prueba gasta saldo real.
+      - key: SKYDROPX_BASE_URL
+        value: https://pro.skydropx.com
+      - key: SKYDROPX_CLIENT_ID
+        sync: false
+      - key: SKYDROPX_CLIENT_SECRET
+        sync: false
+      # Mismo secreto que se configure como autenticación HMAC del webhook en el
+      # panel de Skydropx.
+      - key: SKYDROPX_WEBHOOK_SECRET
+        sync: false
+
+      # Dirección de origen de las guías. Van con `sync: false` aunque no sean
+      # credenciales: son el domicilio y el teléfono reales de la tienda, y no
+      # tienen por qué quedar versionados.
+      - key: SHIP_FROM_STREET
+        sync: false
+      - key: SHIP_FROM_EXTERNAL_NUMBER
+        sync: false
+      - key: SHIP_FROM_NEIGHBORHOOD
+        sync: false
+      - key: SHIP_FROM_CITY
+        sync: false
+      - key: SHIP_FROM_STATE
+        sync: false
+      - key: SHIP_FROM_POSTAL_CODE
+        sync: false
+      - key: SHIP_FROM_NAME
+        sync: false
+      - key: SHIP_FROM_PHONE
+        sync: false
+
+      # ── Monitoreo y avisos ──────────────────────────────────────────────────
+      # Opcional: sin DSN, Sentry se queda apagado con un aviso y la app sigue.
+      - key: SENTRY_DSN
+        sync: false
+      # Alertas operativas (guía que no se pudo crear, correo que no salió…).
+      - key: ALERT_EMAIL_TO
+        sync: false
+      # Avisos de negocio al dueño (venta nueva, resumen diario). Sin esta ni
+      # ALERT_EMAIL_TO, la Fase N.4 queda apagada — es su único interruptor.
+      - key: OWNER_NOTIFICATION_EMAIL
+        sync: false
+
+databases:
+  - name: botasdonchuy-db
+    databaseName: botasdonchuy
+    user: botasdonchuy
+    # MISMA región que el servicio web: es lo que habilita la URL interna
+    # (red privada, sin TLS de por medio ni salto por internet).
+    region: oregon
+    # El plan `free` expira a los 30 días y no trae backups automáticos. Los
+    # planes de pago incluyen point-in-time recovery; confirma la ventana de
+    # retención de tu plan y PRUEBA UNA RESTAURACIÓN antes de lanzar
+    # (punto 7 del checklist) — un backup no verificado no es un backup.
+    plan: basic-256mb

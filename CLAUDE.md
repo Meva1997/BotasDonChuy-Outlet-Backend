@@ -92,11 +92,29 @@ included (this used to run `sync({ alter: true })` in development; removed in Fa
 share the exact same schema-change path). SQL logging is gated on development. On any connection error
 the process exits with code 1.
 
+**TLS comes from `src/config/databaseSsl.ts`, and `?sslmode=…` in the URL does nothing.** That's the
+usual advice and it fails silently here, leaving the connection in cleartext: Sequelize copies the
+URL's query params into `dialectOptions`, but its postgres connection manager filters that object
+through an allowlist containing `ssl` and **not** `sslmode`, so the key is dropped and `pg` falls back
+to its `ssl: false` default. `databaseSslOptions()` reads `DATABASE_SSL` (default `false`) and
+`DATABASE_SSL_REJECT_UNAUTHORIZED` (default `true`) through `booleanEnv` and returns
+`{ ssl: { rejectUnauthorized } }` — or **`{}`** when off, not `{ ssl: false }`, so `pg` keeps its own
+default and behavior is unchanged from before the module existed. It also `console.warn`s when the URL
+carries an `sslmode` that expects TLS while `DATABASE_SSL` is off, turning that trap into a message.
+**Both `database.ts` and `sequelize-cli.js` call the same function** (the `.js` can `require` the `.ts`
+because `.sequelizerc` registers ts-node first) — a hand-copied second version is exactly how the
+migrations would end up unencrypted while the app is encrypted.
+`tests/unit/config/sequelizeCliConfig.test.ts` asserts the two can't drift.
+
 ### Migrations (`src/migrations/`, Fase H.2)
 
 The versioned, reproducible path to change schema, dev and prod alike. `sequelize-cli` is driven by
-`.sequelizerc` at the repo root, which registers `ts-node/register` (migrations are authored in
-TypeScript; this CLI version's glob matches `.ts` natively) and points
+`.sequelizerc` at the repo root, which registers **`ts-node/register/transpile-only`** (migrations are
+authored in TypeScript; this CLI version's glob matches `.ts` natively). `transpile-only` is
+deliberate: type-checking at CLI startup would need `@types/node` and friends installed *in
+production*, and nothing is lost — `tsconfig.json`'s `include: ["src/**/*"]` covers `src/migrations/`,
+so `pnpm build` already type-checks and emits every migration, and the deploy pipeline runs it before
+`pnpm migrate`. It points
 `migrations-path`/`seeders-path`/`models-path` at `src/migrations`/`src/seeders`/`src/models`. The
 CLI's connection config is `src/config/sequelize-cli.js` (plain `.js`, not compiled by `tsc` —
 `sequelize-cli` never imports `app.ts`, so it bootstraps its own `dotenv.config()`, same reasoning as
@@ -234,6 +252,29 @@ Load-bearing details:
   `BRAND_DEFAULTS`.
 - Logic lives in the exported `bootstrapAdmin(env)`, with the CLI runner behind
   `if (require.main === module)`, so it's testable — the trap `seed.ts` fell into.
+
+### Deployment (`render.yaml`)
+
+Render Blueprint at the repo root: the web service plus its Postgres database. Build is
+`pnpm install --frozen-lockfile && pnpm build`, **`preDeployCommand` is `pnpm migrate`** (runs after the
+build with traffic still on the old version, so a failed migration never fronts a half-migrated app),
+start is `pnpm start`. Secrets are `sync: false` — Render prompts for them once and they are never
+committed; `JWT_SECRET` uses `generateValue: true` so it never passes through a human's hands. `PORT`
+is deliberately not declared (Render injects it, `app.ts` reads it) and neither is `DATABASE_SSL` (the
+service and the DB share a region, so `DATABASE_URL` is the private internal URL).
+
+**`healthCheckPath` is `/health`, not `/health/ready`** — the one place this repo's two-probe design
+meets a platform that only has one hook. Render uses that single check both to gate a new deploy and,
+on a running service, to pull the instance out of rotation after 15 s and **restart it after 60 s**.
+Pointing it at the readiness probe would turn a one-minute Postgres blip into a restart: precisely the
+failure mode **Healthchecks** above exists to prevent. The apparent gap — a new deploy taking traffic
+without having verified the DB — is already closed by `connectDB()`'s `process.exit(1)`, which kills
+the process so it never answers `/health` and Render cancels the deploy. `/health/ready` is for
+external uptime monitoring, where a `503` pages a human instead of restarting anything.
+
+`numInstances: 1` is a **decision, not a default**: rate limiters, checkout idempotency, the sweeper's
+failure counter and the readiness cache are all process memory, and the three crons would run in every
+replica.
 
 ### API docs (`src/config/swagger.ts`)
 
@@ -1033,7 +1074,9 @@ all suites and removes the race. Don't re-parallelize without also fixing that s
     `CLOUDINARY_*` keys, `SKYDROPX_CLIENT_ID`, `SKYDROPX_CLIENT_SECRET`, `SKYDROPX_WEBHOOK_SECRET`, and all
     eight `SHIP_FROM_*`
     (`POSTAL_CODE`/`STATE`/`CITY`/`NEIGHBORHOOD`/`STREET`/`EXTERNAL_NUMBER`/`NAME`/`PHONE`).
-  - **Optional:** `PORT`, `NODE_ENV`, `CORS_ORIGIN`, `JWT_EXPIRES_IN` (`7d`), `BCRYPT_ROUNDS` (10),
+  - **Optional:** `PORT`, `NODE_ENV`, `CORS_ORIGIN`, `DATABASE_SSL` (`false`) and
+    `DATABASE_SSL_REJECT_UNAUTHORIZED` (`true`) — see **Database**, and note that `?sslmode=` in the
+    URL is *not* an alternative, `JWT_EXPIRES_IN` (`7d`), `BCRYPT_ROUNDS` (10),
     `FRONTEND_URL`, `STRIPE_CURRENCY`,
     `PENDING_ORDER_TTL_MINUTES` (30), `PENDING_ORDER_SWEEP_INTERVAL_MINUTES` (10), `SKYDROPX_BASE_URL`
     (sandbox host), `SKYDROPX_CARRIERS`, `SHIPMENT_RETRY_DELAY_MINUTES` (15),
@@ -1087,10 +1130,11 @@ all suites and removes the race. Don't re-parallelize without also fixing that s
   `bcrypt: true`, `@scarf/scarf: false`). pnpm v11 errors on undecided build scripts, so new deps with
   install scripts must be resolved via `pnpm approve-builds`.
 - `jest` + `ts-jest` + `supertest` (+ `@types/*`) are devDependencies for the test suite.
-- `sequelize-cli` + `ts-node` (devDependencies) drive schema migrations via `.sequelizerc` /
-  `src/config/sequelize-cli.js`. Both are devDependencies: a production deploy step running `pnpm migrate`
-  needs them installed at that point (`pnpm install` without `--prod`, or promote them to `dependencies` —
-  a decision for whenever the deploy pipeline is built).
+- `sequelize-cli` + `ts-node` + `typescript` drive schema migrations via `.sequelizerc` /
+  `src/config/sequelize-cli.js`, and are **`dependencies`, not devDependencies** (Fase de despliegue):
+  the deploy pipeline runs `pnpm migrate` as a pre-deploy step, and a `pnpm install --prod` there would
+  otherwise leave the command without a binary. `typescript` has to move with them — `ts-node` doesn't
+  run without it. Verified by installing with `--prod` in a clean copy and running the CLI.
 
 ## Workflow
 

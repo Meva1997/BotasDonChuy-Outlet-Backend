@@ -2,7 +2,12 @@ const path = require("path");
 
 // Registered here (once, at CLI startup) so every migration file under
 // migrations-path can be authored in TypeScript like the rest of the repo.
-require("ts-node/register");
+//
+// transpile-only on purpose: type-checking at CLI startup would need @types/node and friends
+// installed at migration time, i.e. in production. Nothing is lost — tsconfig.json's
+// `include: ["src/**/*"]` covers src/migrations/, so `pnpm build` already type-checks (and emits)
+// every migration, and the deploy pipeline runs it before `pnpm migrate`.
+require("ts-node/register/transpile-only");
 
 module.exports = {
   config: path.resolve(__dirname, "src", "config", "sequelize-cli.js"),

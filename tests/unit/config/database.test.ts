@@ -75,6 +75,17 @@ describe("instancia compartida de sequelize", () => {
     expect(sequelize.config.pool?.max).toBe(5);
   });
 
+  it("sin DATABASE_SSL no manda opciones de TLS a pg", () => {
+    // No-regresión: el entorno de test corre contra un Postgres local sin TLS, así que si
+    // `databaseSslOptions()` empezara a devolver algo por default, la suite entera dejaría de
+    // conectar. La cobertura de los knobs vive en `databaseSsl.test.ts`.
+    const { dialectOptions } = (
+      sequelize as unknown as { options: { dialectOptions: Record<string, unknown> } }
+    ).options;
+
+    expect(dialectOptions.ssl).toBeUndefined();
+  });
+
   it("no loguea SQL fuera de desarrollo", () => {
     // En producción una línea por consulta se come la cuota del proveedor de logs.
     // `options` no está en los tipos públicos de Sequelize 6, pero sí en la instancia.
