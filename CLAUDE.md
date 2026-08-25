@@ -258,7 +258,8 @@ Load-bearing details:
 Render Blueprint at the repo root: the web service plus its Postgres database. Build is
 `pnpm install --frozen-lockfile && pnpm build`, **`preDeployCommand` is `pnpm migrate`** (runs after the
 build with traffic still on the old version, so a failed migration never fronts a half-migrated app),
-start is `pnpm start`. Secrets are `sync: false` — Render prompts for them once and they are never
+start is `pnpm start`. **`autoDeploy` is `false`** — the deploy is triggered by the CI's `deploy`
+job after a green `main`, never by the push itself (see **CI/CD**). Secrets are `sync: false` — Render prompts for them once and they are never
 committed; `JWT_SECRET` uses `generateValue: true` so it never passes through a human's hands. `PORT`
 is deliberately not declared (Render injects it, `app.ts` reads it) and neither is `DATABASE_SSL` (the
 service and the DB share a region, so `DATABASE_URL` is the private internal URL).
@@ -1057,6 +1058,41 @@ all suites and removes the race. Don't re-parallelize without also fixing that s
 
 `pnpm test` also runs automatically on every PR and on pushes to `main` via GitHub Actions
 (`.github/workflows/ci.yml`, Fase H.6 — Postgres service container, `pnpm build`, then `pnpm test`).
+
+### CI/CD (`.github/workflows/ci.yml`)
+
+Three jobs, on every PR against `main` and every push to `main`. `Build & Test` is the original
+Fase H.6 job (`pnpm build` + `pnpm test` against a Postgres 16 service container) — **its name is a
+required status check on the protected branch, so renaming the job silently breaks the merge
+gate**, since protection matches checks by context string.
+
+`Migrations` runs `pnpm migrate` → `migrate:status` → `migrate:undo:all` → `pnpm migrate` against
+its **own** Postgres service (the test job's `sync({ force: true })` drops every table, so sharing
+one database would have them stomping on each other). It exists because Render's
+`preDeployCommand` is `pnpm migrate` and **there is no `sync({ alter: true })` anywhere** to paper
+over a broken migration — without this job a typo in an `up` surfaces in production. The
+`undo:all` leg is what covers the `down`s, i.e. the `DROP TYPE` for the ENUM that `dropTable`
+doesn't drop (see **Migrations**).
+
+`Deploy (Render)` `needs: [test, migrations]`, runs **only** on a push to `main`, and `POST`s to
+Render's Deploy Hook (`RENDER_DEPLOY_HOOK_URL`, a repo secret). It's paired with
+**`autoDeploy: false` in `render.yaml`**: with Render's default, a push started a build in
+parallel with CI and never learned the result, so a commit with red tests deployed anyway. The
+step no-ops with a `::warning::` when the secret is missing, so CI doesn't break while it's being
+configured. ⚠️ `autoDeploy` in the Blueprint only applies on create/sync — an already-created
+service also needs Auto-Deploy turned off in its dashboard.
+
+The workflow declares `permissions: contents: read` (no job writes to the repo) and a
+`concurrency` group that cancels superseded runs **on PRs only** — cancelling on `main` would
+leave a commit undeployed. `.github/dependabot.yml` opens grouped update PRs and deliberately
+ignores majors of `stripe` (the pinned `apiVersion` literal, see **Payments / Stripe**) and of
+`sequelize`/`sequelize-cli`.
+
+**`main` is protected** and the rule applies to admins too (`enforce_admins`), so **nothing lands
+by direct push, including your own commits**: PR required (0 approvals — solo repo), `Build &
+Test` + `Migrations` green, branch up to date (`strict`), conversations resolved, linear history,
+no force-push or deletion. The repo allows squash/rebase only and deletes the branch on merge.
+`gh pr merge --squash --auto` is the normal way to land work.
 
 ## Conventions
 

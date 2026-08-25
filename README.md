@@ -1,5 +1,7 @@
 # BotasDonChuy-Outlet-Backend
 
+[![CI](https://github.com/Meva1997/BotasDonChuy-Outlet-Backend/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Meva1997/BotasDonChuy-Outlet-Backend/actions/workflows/ci.yml)
+
 API backend para la tienda **Botas Don Chuy Outlet** (botas, sombreros y ropa).
 Construido con Express 5, TypeScript y Sequelize sobre PostgreSQL.
 
@@ -254,6 +256,72 @@ precisamente para que el paso de migración no dependa de cómo instale el prove
 motivo `.sequelizerc` registra `ts-node/register/transpile-only`: con type-check, arrancar el CLI
 exigiría `@types/node` y compañía instalados en producción. No se pierde nada — `tsconfig.json`
 incluye `src/**/*`, así que `pnpm build` ya compila y verifica cada migración, y corre antes.
+
+### CI/CD: el deploy es consecuencia de un `main` verde
+
+`.github/workflows/ci.yml` corre en **cada PR contra `main` y en cada push a `main`**, con tres
+jobs:
+
+| Job | Qué hace | Cuándo |
+| --- | --- | --- |
+| `Build & Test` | `pnpm build` (type-check) + `pnpm test` contra un Postgres 16 de servicio | PR y push |
+| `Migrations` | `pnpm migrate` → `migrate:status` → `migrate:undo:all` → `pnpm migrate` sobre **otro** Postgres | PR y push |
+| `Deploy (Render)` | `POST` al Deploy Hook de Render | solo push a `main`, y solo si los dos anteriores pasaron |
+
+El job `Migrations` tiene su propia base porque la suite hace `sync({ force: true })` y se
+pisarían. Existe porque el `preDeployCommand` de Render es `pnpm migrate` y **no hay
+`sync({ alter: true })` en ningún lado** que tape una migración rota: sin este job, un `up` con un
+typo se descubre en producción. El `undo:all` + `migrate` de vuelta valida además los `down` —
+donde se olvida el `DROP TYPE` del ENUM que `dropTable` no borra.
+
+**`render.yaml` fija `autoDeploy: false`**, y eso es la mitad del asunto. Con el valor por defecto
+Render construye en cuanto le llega el commit, **en paralelo** con GitHub Actions y sin enterarse
+del resultado: un commit con los tests en rojo se desplegaba igual. Ahora el único camino a
+producción es el job `deploy`.
+
+> ⚠️ **Dos pasos manuales, una sola vez.** (1) En Render → el servicio → *Settings → Build &
+> Deploy*, apaga **Auto-Deploy** (`autoDeploy` en el Blueprint solo aplica al crear/sincronizar) y
+> copia el **Deploy Hook**. (2) Pega esa URL en GitHub → *Settings → Secrets and variables →
+> Actions* como **`RENDER_DEPLOY_HOOK_URL`**. Mientras el secret no exista, el job `deploy` no
+> falla: avisa con un `::warning::` y se salta — así el CI no se rompe entre un paso y el otro.
+
+El hook dispara el deploy y no espera a que termine; el avance se sigue en el dashboard de Render.
+El deploy corre bajo el *environment* `production` de GitHub, que es donde se le puede agregar
+después una **aprobación manual** si algún día se quiere un botón entre el merge y producción.
+
+### Protección de `main`
+
+`main` está protegida (*Settings → Branches*), y la regla **también aplica al dueño del repo**
+(`enforce_admins`), que es lo que la vuelve real en un repo de una sola persona:
+
+- **Pull Request obligatorio**, con **0 aprobaciones** requeridas — no hay a quién pedírselas, y
+  exigir una bloquearía todo. Lo que hace el trabajo aquí no es la revisión humana, son los checks.
+- **`Build & Test` y `Migrations` obligatorios en verde**, y la rama debe estar **al día con
+  `main`** antes de mergear (`strict`), para que los checks se hayan corrido contra el código que
+  realmente va a quedar.
+- **Conversaciones resueltas** antes de mergear, **historial lineal**, y **sin force-push ni
+  borrado** de la rama.
+- El repo permite solo **squash** y **rebase** (el merge commit está apagado, por el historial
+  lineal) y **borra la rama al mergear**.
+
+El flujo, entonces:
+
+```bash
+git switch -c feat/lo-que-sea
+# ...commits...
+git push -u origin feat/lo-que-sea
+gh pr create --fill
+gh pr merge --squash --auto   # mergea solo en cuanto los checks pasen → dispara el deploy
+```
+
+### Dependencias al día
+
+`.github/dependabot.yml` abre PRs de actualización (npm semanal, acciones de GitHub mensual),
+agrupando minors y parches en **un solo PR** para no gastar una corrida de CI por bump. Quedan
+**ignorados los majors** de `stripe` (el cliente fija `apiVersion` con el literal exacto del SDK:
+un major cambia la forma de los objetos que leen los handlers del webhook) y de
+`sequelize`/`sequelize-cli` (la 7 es una reescritura, no un bump). Esos se suben a mano leyendo el
+changelog.
 
 ### Health check: `/health`, no `/health/ready`
 

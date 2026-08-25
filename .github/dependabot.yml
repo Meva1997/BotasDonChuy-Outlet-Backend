@@ -1,0 +1,39 @@
+version: 2
+
+updates:
+  # Las acciones se fijan por major (`@v4`), que GitHub sí mueve — pero un
+  # `pnpm/action-setup@v4` que quede sin mantenimiento no avisa solo.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(ci)"
+    labels: [dependencias, ci]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    labels: [dependencias]
+    groups:
+      # Un PR por lote en vez de veinte sueltos: son parches, y cada PR
+      # cuesta una corrida completa del CI.
+      parches-y-menores:
+        update-types: [minor, patch]
+    ignore:
+      # `stripe` fija `apiVersion` con el literal exacto de la versión del SDK
+      # (ver CLAUDE.md §Payments): un major arrastra el cambio de forma de los
+      # objetos que leen `markOrderPaidFromWebhook` y `applyDisputeFromWebhook`.
+      # Debe subirse a mano, leyendo el changelog.
+      - dependency-name: stripe
+        update-types: [version-update:semver-major]
+      # Sequelize 7 es una reescritura (ESM, otro paquete). No es un bump.
+      - dependency-name: sequelize
+        update-types: [version-update:semver-major]
+      - dependency-name: sequelize-cli
+        update-types: [version-update:semver-major]
