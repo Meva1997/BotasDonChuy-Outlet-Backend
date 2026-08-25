@@ -1014,7 +1014,7 @@ file, not an inline object — an inline `tsconfig` **replaces** the base config
 `roadmaps-completados/roadmap-testing.md` breaks the work into **independent parts** (0 = infra; 0.5 =
 dedicated test DB; 1 = pure services; 2 = auth; 3 = checkout; 4 = webhook idempotency; 5 = manual
 cancel/refund/release; 6 = live shipping rates; 7 = Skydropx HTTP client; 8 = admin product CRUD + images;
-9 = brand/admin users; 10 = dashboard/reports aggregations) — **all twelve are done** (62 suites / 811 tests
+9 = brand/admin users; 10 = dashboard/reports aggregations) — **all twelve are done** (64 suites / 835 tests
 at last count; new phases add their own suite, e.g. `adminOrderStatus.test.ts` (O.1),
 `checkoutIdempotency.test.ts` + `pendingOrderSweeper.test.ts` (O.2), `shipmentRetry.test.ts` (O.3),
 `orderLookup.test.ts` + `unit/services/orderConfirmationTemplate.test.ts` (O.4), the six coupon suites
@@ -1107,6 +1107,16 @@ no force-push or deletion. The repo allows squash/rebase only and deletes the br
 
 - TypeScript runs in `strict` mode with decorators enabled (`experimentalDecorators`,
   `emitDecoratorMetadata`); source in `src/`, output in `dist/`.
+- **The Node version is pinned to 24 (active LTS) in FOUR places that must move together**:
+  `.node-version`, `engines.node` in `package.json`, `node-version` in both jobs of
+  `.github/workflows/ci.yml`, and the `@types/node` major. `engines` used to say `>=22` and each
+  environment resolved it on its own — CI ran 22, the dev machine 23, and Render picked the newest
+  it had (26.7.0), so **production ran a runtime the test suite had never executed** and a
+  behavioral change between those majors would pass `Build & Test` green and only surface on
+  deploy. `@types/node` is held at the runtime's major (Dependabot ignores its major updates for
+  this reason): types ahead of the runtime describe APIs that aren't there, which `tsc` accepts and
+  the process discovers at startup. Node 26 becomes LTS on 2026-10-28 — moving to it means changing
+  the same four values in one commit, never one at a time.
 - **Configuration comes exclusively from environment variables.** `.env` is gitignored — never commit it
   (the Stripe/Resend keys are test/sandbox; Skydropx points at its own separate sandbox account).
   **`.env.example` at the repo root is the versioned, canonical list** (`.gitignore` names `.env` and

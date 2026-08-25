@@ -44,3 +44,10 @@ updates:
         update-types: [version-update:semver-major]
       - dependency-name: sequelize-cli
         update-types: [version-update:semver-major]
+      # `@types/node` va PINEADO a la major del runtime que corremos en
+      # producción (ver `.node-version` y `engines.node`). Un major suelto aquí
+      # tipa contra APIs que ese Node todavía no tiene: `pnpm build` pasa en
+      # verde y el fallo aparece en Render. Se sube junto con el runtime, no
+      # antes.
+      - dependency-name: "@types/node"
+        update-types: [version-update:semver-major]
