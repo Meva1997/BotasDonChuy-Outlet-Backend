@@ -1084,9 +1084,18 @@ service also needs Auto-Deploy turned off in its dashboard.
 
 The workflow declares `permissions: contents: read` (no job writes to the repo) and a
 `concurrency` group that cancels superseded runs **on PRs only** — cancelling on `main` would
-leave a commit undeployed. `.github/dependabot.yml` opens grouped update PRs and deliberately
-ignores majors of `stripe` (the pinned `apiVersion` literal, see **Payments / Stripe**) and of
-`sequelize`/`sequelize-cli`.
+leave a commit undeployed.
+
+**Dependabot is two mechanisms, and only one of them lives in this repo.** `Dependabot alerts` +
+`Dependabot security updates` are **repo settings**, not a file, and they're what actually
+protects the project: they fire only on a real vulnerability, **including transitive ones in
+`pnpm-lock.yaml`** (turning them on surfaced 18 open alerts at once — `brace-expansion`,
+`fast-uri`, `ip-address`, `js-yaml`, `uuid` — every one of them transitive, which is why nobody
+had seen them). `.github/dependabot.yml` is the *other* one, routine version bumps, kept
+deliberately quiet: npm **monthly**, `open-pull-requests-limit: 2`, minors/patches grouped into
+one PR, **no `github-actions` block at all** (the accepted cost: a deprecated action runtime has
+to be bumped by hand, which the CI itself announces loudly). It ignores majors of `stripe` (the
+pinned `apiVersion` literal, see **Payments / Stripe**) and of `sequelize`/`sequelize-cli`.
 
 **`main` is protected** and the rule applies to admins too (`enforce_admins`), so **nothing lands
 by direct push, including your own commits**: PR required (0 approvals — solo repo), `Build &
