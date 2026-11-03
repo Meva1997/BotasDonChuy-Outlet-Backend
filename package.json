@@ -54,7 +54,7 @@
     "swagger-ui-express": "^5.0.1",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3",
-    "zod": "^4.4.3"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
